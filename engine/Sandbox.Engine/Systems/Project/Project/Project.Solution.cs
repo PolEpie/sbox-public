@@ -1,4 +1,4 @@
-﻿using Sandbox.SolutionGenerator;
+using Sandbox.SolutionGenerator;
 using System.IO;
 using System.Text.RegularExpressions;
 
@@ -97,7 +97,7 @@ public sealed partial class Project
 				if ( Config.Ident != "toolbase" )
 					project.PackageReferences.Add( "local.toolbase" );
 			}
-			else if ( Config.Type == "game" || Config.Type == "library" )
+			else if ( Config.Type == "game" || Config.Type == "library" || Config.Type == "addon" )
 			{
 				project.AddAspComponentsGlobalUsing();
 				project.AddGameNamespaceGlobalStatic();
@@ -108,14 +108,14 @@ public sealed partial class Project
 				}
 			}
 
-			if ( Config.Type == "game" )
+			if ( Config.Type == "game" || Config.Type == "addon" )
 			{
 				AddLibrariesToProject( project );
 
 			}
 		}
 
-		if ( Config.Type == "game" || Config.Type == "library" )
+		if ( Config.Type == "game" || Config.Type == "library" || Config.Type == "addon" )
 		{
 			//
 			// Editor project
@@ -235,7 +235,7 @@ public sealed partial class Project
 			project.References.Add( $"{reference}.dll" );
 		}
 
-		if ( Config.Type == "game" )
+		if ( Config.Type == "game" || Config.Type == "addon" )
 		{
 			// editor libraries
 			foreach ( var library in Libraries.Where( x => x.HasEditorPath() ) )
