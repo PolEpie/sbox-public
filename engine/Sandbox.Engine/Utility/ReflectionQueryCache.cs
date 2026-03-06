@@ -27,6 +27,7 @@ internal static class ReflectionQueryCache
 		_orderedMemberCache.Clear();
 		_requiredComponentMemberCache.Clear();
 		_syncVarMemberCache.Clear();
+		MemberCopyCache.Clear();
 	}
 
 	/// <summary>
