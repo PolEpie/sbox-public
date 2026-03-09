@@ -91,9 +91,10 @@ public static class SceneEditorMenus
 			var lastSelected = objects.LastOrDefault();
 			if ( lastSelected != null )
 			{
-				var nextSelect = lastSelected.GetNextSibling( false );
-				if ( !nextSelect.IsValid() )
-					nextSelect = lastSelected.Parent;
+				var nextSelect = lastSelected.GetNextSibling( false, GameObjectFlags.Hidden );
+				for ( var p = lastSelected.Parent; !nextSelect.IsValid() && p.IsValid(); p = p.Parent )
+					if ( !p.Flags.Contains( GameObjectFlags.Hidden ) )
+						nextSelect = p;
 
 				if ( SceneEditorSession.Active.Selection.Contains( lastSelected ) )
 				{

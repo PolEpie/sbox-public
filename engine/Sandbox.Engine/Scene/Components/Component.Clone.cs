@@ -126,6 +126,15 @@ internal static class CloneHelpers
 			return;
 		}
 
+		// Fast path: if the type implements ICloneable and is not a BCL/system type (whose Clone()
+		// is only a shallow copy that would silently skip GUID rewiring), call Clone() directly
+		// to avoid the JSON roundtrip overhead.
+		if ( originalValue is ICloneable cloneable && ReflectionQueryCache.IsICloneableSafe( valueType ) )
+		{
+			SetMemberValue( member, target, cloneable.Clone() );
+			return;
+		}
+
 		// Fallback to JSON
 		var clonedJson = Json.ToNode( originalValue, valueType );
 		UpdateClonedIdsInJson( clonedJson, originalIdToCloneId );
