@@ -24,6 +24,17 @@ public static class SceneEditorMenus
 
 		EditorScene.Selection.Clear();
 
+		SceneTraceResult? tr = null;
+
+		if ( EditorPreferences.PasteAtCursor &&
+			 SceneViewWidget.Current?.LastSelectedViewportWidget is { } viewport &&
+			 viewport.IsValid() )
+		{
+			using ( viewport.GizmoInstance.Push() )
+				if ( viewport.TryGetCursorTracePosition( out var result ) )
+					tr = result;
+		}
+
 		var groups = new Dictionary<GameObject, GameObject>( selection.Length );
 		foreach ( var entry in selection )
 		{
@@ -37,11 +48,15 @@ public static class SceneEditorMenus
 		foreach ( var entry in groups )
 		{
 			var clone = entry.Key.Clone();
-
 			clone.WorldTransform = entry.Key.WorldTransform;
 			entry.Value.AddSibling( clone, false );
 
 			EditorScene.Selection.Add( clone );
+		}
+
+		if ( tr is { } trace )
+		{
+			EditorScene.PlaceBoundsOnSurface( EditorScene.Selection.OfType<GameObject>(), trace.HitPosition, trace.Normal );
 		}
 	}
 
