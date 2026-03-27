@@ -1,4 +1,4 @@
-﻿using SkiaSharp;
+using SkiaSharp;
 using System.Collections.Concurrent;
 using System.Diagnostics.CodeAnalysis;
 using Topten.RichTextKit;
@@ -79,6 +79,29 @@ internal class FontManager : FontMapper
 		}
 	}
 
+	private static string GetLegacyName( SKTypeface face )
+	{
+		var data = face.GetTableData( 0x6E616D65 ); // "name"
+		if ( data == null || data.Length < 6 ) return null;
+		int count = (data[2] << 8) | data[3];
+		int stringOffset = (data[4] << 8) | data[5];
+		for ( int i = 0; i < count; i++ )
+		{
+			int recordOffset = 6 + i * 12;
+			int platformID = (data[recordOffset] << 8) | data[recordOffset + 1];
+			int encodingID = (data[recordOffset + 2] << 8) | data[recordOffset + 3];
+			int nameID = (data[recordOffset + 6] << 8) | data[recordOffset + 7];
+			int length = (data[recordOffset + 8] << 8) | data[recordOffset + 9];
+			int offset = (data[recordOffset + 10] << 8) | data[recordOffset + 11];
+			// Name ID 1, Windows platform (3), Unicode BMP (1)
+			if ( nameID == 1 && platformID == 3 && encodingID == 1 )
+			{
+				return System.Text.Encoding.BigEndianUnicode.GetString( data, stringOffset + offset, length );
+			}
+		}
+		return null;
+	}
+
 	/// <summary>
 	/// Tries to get the best matching font for the given style.
 	/// Will return a matching font family with the closest font weight and optionally slant.
@@ -87,6 +110,8 @@ internal class FontManager : FontMapper
 	{
 		// Must be of same family
 		var familyFonts = LoadedFonts.Values.Where( x => string.Equals( x.FamilyName, style.FontFamily, StringComparison.OrdinalIgnoreCase ) );
+		if ( !familyFonts.Any() )
+			familyFonts = LoadedFonts.Values.Where( x => string.Equals( GetLegacyName( x ), style.FontFamily, StringComparison.OrdinalIgnoreCase ) );
 		if ( !familyFonts.Any() ) return null;
 
 		// Get matching slants, if no matching fallback to regular
