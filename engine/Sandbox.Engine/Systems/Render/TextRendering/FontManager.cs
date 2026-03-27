@@ -81,7 +81,10 @@ internal class FontManager : FontMapper
 
 	private static string GetLegacyName( SKTypeface face )
 	{
-		var data = face.GetTableData( 0x6E616D65 ); // "name"
+		// OpenType "name" table tag (see OpenType spec); using a named constant avoids a magic hex literal.
+		const uint NameTableTag = 0x6E616D65;
+
+		var data = face.GetTableData( NameTableTag );
 		if ( data == null || data.Length < 6 ) return null;
 		int count = (data[2] << 8) | data[3];
 		int stringOffset = (data[4] << 8) | data[5];
