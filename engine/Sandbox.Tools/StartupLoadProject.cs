@@ -335,14 +335,43 @@ static class StartupLoadProject
 		options.SingleThreaded = false;
 		options.ConsoleOutput = false;
 
-		FastTimer timer = FastTimer.StartNew();
-		for ( int i = 0; i < gr.Length; i++ )
-		{
-			EditorSplashScreen.SetMessage( $"Compiling shader {i + 1}/{gr.Length} {gr[i].RelativePath}" );
-			StepProgress( (float)i / gr.Length );
+		//
+		// Phase 1: check which shaders are out of date in parallel.
+		// The native LoadFromCompiledUnlessOutOfDate call takes ~500ms each,
+		// so doing this sequentially for 65+ shaders is brutal.
+		//
+		EditorSplashScreen.SetMessage( $"Checking {gr.Length} shaders..." );
 
-			await ShaderCompile.Compile( gr[i].AbsolutePath, gr[i].RelativePath, options, default );
+		var outOfDate = new System.Collections.Concurrent.ConcurrentBag<Asset>();
+
+		await Task.Run( () =>
+		{
+			Parallel.ForEach( gr, asset =>
+			{
+				var shader = new ShaderSource();
+				shader.AbsolutePath = asset.AbsolutePath;
+				shader.RelativePath = asset.RelativePath;
+				shader.Read();
+
+				if ( shader.IsOutOfDate )
+					outOfDate.Add( asset );
+			} );
+		} );
+
+		Log.Info( $"Shader check took {sw.Elapsed.TotalSeconds:0.000}s ({gr.Length} checked, {outOfDate.Count} out of date)" );
+
+		//
+		// Phase 2: compile only the out-of-date shaders sequentially
+		//
+		var toCompile = outOfDate.ToArray();
+		for ( int i = 0; i < toCompile.Length; i++ )
+		{
+			EditorSplashScreen.SetMessage( $"Compiling shader {i + 1}/{toCompile.Length} {toCompile[i].RelativePath}" );
+			StepProgress( (float)i / toCompile.Length );
+
+			await ShaderCompile.Compile( toCompile[i].AbsolutePath, toCompile[i].RelativePath, options, default );
 		}
+
 		if ( sw.Elapsed.TotalSeconds > 2 )
 		{
 			Log.Info( $"Compiling shaders took {sw.Elapsed.TotalSeconds:0.000}s" );
