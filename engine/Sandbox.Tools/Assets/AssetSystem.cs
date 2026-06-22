@@ -175,7 +175,8 @@ public static partial class AssetSystem
 
 			if ( asset.HasCachedThumbnail )
 			{
-				asset.RebuildThumbnail( true );
+				// Avoid rebuild immediatly the scene thumbnail else it cause a lag on save
+				asset.RebuildThumbnail( asset.AssetType.FileExtension != 'scene' );
 			}
 
 			if ( !asset.IsCompiled && asset.AssetType.IsGameResource )
