@@ -85,6 +85,13 @@ public partial class TerrainEditorTool : EditorTool
 			var rndRot = group.Add( ControlSheetRow.Create( so.GetProperty( nameof( BrushSettings.RandomRotation ) ) ) );
 			group.Add( ControlSheetRow.Create( so.GetProperty( nameof( BrushSettings.ShowGridPreview ) ) ) );
 
+			// Flatten only option, the sidebar is rebuilt whenever the subtool changes
+			if ( CurrentTool is FlattenTool flatten )
+			{
+				var flattenSo = flatten.GetSerialized();
+				group.Add( ControlSheetRow.Create( flattenSo.GetProperty( nameof( FlattenTool.AlignToSurface ) ) ) );
+			}
+
 			so.OnPropertyChanged += ( prop ) =>
 			{
 				if ( prop?.Name == nameof( BrushSettings.RandomRotation ) && rot.IsValid() )
