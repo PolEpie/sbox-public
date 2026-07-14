@@ -1,4 +1,4 @@
-﻿using Sandbox.Mounting;
+using Sandbox.Mounting;
 
 namespace Editor;
 
@@ -38,4 +38,49 @@ public class WrappedAssetBrowser : Widget
 	public AssetBrowser GetBrowser( AssetEntry asset ) => GetBrowser( asset.AbsolutePath );
 
 	public void SwitchTo( Widget widget ) => Tabs.SetPage( widget );
+
+	/// <summary>
+	/// Create a new browser in a new dock with the given path opened, splitting this dock's
+	/// space on the given side. <see cref="DockArea.Center"/> adds it as a tab of this dock instead.
+	/// </summary>
+	public MainAssetBrowser OpenInNewDock( string path, DockArea area )
+	{
+		var dockManager = EditorWindow.DockManager;
+
+		// the main dock owns the plain "Asset Browser" name, side docks count up from 2
+		var index = 2;
+		while ( dockManager.FindDockWidget( $"Asset Browser {index}" ) is not null ) index++;
+
+		var browser = new MainAssetBrowser( null );
+		browser.DeleteOnClose = true;
+
+		var dock = dockManager.CreateDockWidget( $"Asset Browser {index}", "folder_open", browser );
+
+		// split our own dock area rather than the whole window, so the rest of the layout is untouched
+		dockManager.AddDock( dock, area, dockManager.FindDockWidget( this ) );
+		dock.SetAsCurrentTab();
+
+		var page = browser.GetBrowser( path );
+		browser.SwitchTo( page );
+		page.NavigateTo( path );
+
+		// title the dock by where the browser is looking, rather than "Asset Browser N"
+		browser._titleDock = dock;
+
+		return browser;
+	}
+
+	/// <summary>
+	/// Finds the browser hosting the given widget, if any.
+	/// </summary>
+	internal static WrappedAssetBrowser Find( Widget widget )
+	{
+		for ( var w = widget; w.IsValid(); w = w.Parent )
+		{
+			if ( w is WrappedAssetBrowser browser )
+				return browser;
+		}
+
+		return null;
+	}
 }

@@ -1,4 +1,4 @@
-﻿using Editor.Widgets.Packages;
+using Editor.Widgets.Packages;
 using System.IO;
 using System.Security;
 
@@ -678,6 +678,26 @@ public partial class AssetList
 			CreateAsset.AddOptions( menu, location );
 			e.Menu.AddSeparator();
 		}
+	}
+
+	[Event( "folder.contextmenu", Priority = 15 )]
+	private static void OnFolderContextMenu_OpenInDock( FolderContextMenu e )
+	{
+		if ( e.ThisFolder || e.Target is null || !e.Target.Exists ) return;
+
+		// only offered from the editor's main asset browser
+		var widget = e.Context switch
+		{
+			Widget w => w,
+			TreeNode node => node.TreeView,
+			_ => null
+		};
+
+		if ( WrappedAssetBrowser.Find( widget ) is not { } browser ) return;
+
+		var path = e.Target.FullName;
+		e.Menu.AddOption( "Open in Left Dock", "west", () => browser.OpenInNewDock( path, DockArea.Left ) );
+		e.Menu.AddOption( "Open in Right Dock", "east", () => browser.OpenInNewDock( path, DockArea.Right ) );
 	}
 
 	[Event( "folder.contextmenu", Priority = 50 )]
