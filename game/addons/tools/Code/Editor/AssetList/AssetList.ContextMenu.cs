@@ -696,6 +696,7 @@ public partial class AssetList
 		if ( WrappedAssetBrowser.Find( widget ) is not { } browser ) return;
 
 		var path = e.Target.FullName;
+		e.Menu.AddOption( "Open in New Tab", "tab", () => browser.OpenInNewDock( path, DockArea.Center ) );
 		e.Menu.AddOption( "Open in Left Dock", "west", () => browser.OpenInNewDock( path, DockArea.Left ) );
 		e.Menu.AddOption( "Open in Right Dock", "east", () => browser.OpenInNewDock( path, DockArea.Right ) );
 	}
