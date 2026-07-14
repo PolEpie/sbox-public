@@ -1,4 +1,4 @@
-using Sandbox.Mounting;
+﻿using Sandbox.Mounting;
 
 namespace Editor;
 
@@ -68,6 +68,30 @@ public class WrappedAssetBrowser : Widget
 		browser._titleDock = dock;
 
 		return browser;
+	}
+
+	DockWidget _titleDock;
+
+	/// <summary>
+	/// A short title describing where this browser is currently looking.
+	/// </summary>
+	string CurrentTitle => Tabs?.CurrentPage switch
+	{
+		AssetBrowser browser => browser.CurrentLocation?.Name ?? "Assets",
+		CloudAssetBrowser => "Cloud",
+		_ => "Assets",
+	};
+
+	[EditorEvent.Frame]
+	void UpdateDockTitle()
+	{
+		if ( !_titleDock.IsValid() ) return;
+
+		// only the visible title changes - the dock keeps its "Asset Browser N" name for lookups
+		var title = CurrentTitle;
+		if ( _titleDock.WindowTitle == title ) return;
+
+		_titleDock.WindowTitle = title;
 	}
 
 	/// <summary>
