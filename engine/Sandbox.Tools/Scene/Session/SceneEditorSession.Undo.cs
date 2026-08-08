@@ -1,4 +1,4 @@
-﻿using Sandbox.Helpers;
+using Sandbox.Helpers;
 using System;
 using System.Text.Json.Nodes;
 
@@ -433,6 +433,27 @@ internal sealed class SceneUndoSnapshot : IDisposable
 
 	private Dictionary<Component, ComponentReference> _destroyedComponents { get; } = new();
 
+	// Prefab instance roots that need their cached patch recomputed, by id since undo/redo may recreate them
+	private readonly HashSet<Guid> _prefabRootsToRefresh = new();
+
+	/// <summary>
+	/// Recomputes the cached patch of the given instance roots. Unpatched instance changes get
+	/// discarded when the prefab refreshes.
+	/// </summary>
+	private static void RefreshPrefabPatches( Scene scene, IReadOnlyCollection<Guid> rootIds )
+	{
+		foreach ( var id in rootIds )
+		{
+			var root = scene.Directory.FindByGuid( id );
+
+			// May have been destroyed or unlinked since
+			if ( !root.IsValid() || !root.IsOutermostPrefabInstanceRoot )
+				continue;
+
+			root.PrefabInstance.RefreshPatch();
+		}
+	}
+
 	private bool _captureDestructions = false;
 
 	private bool _captureComponentCreations = false;
@@ -458,11 +479,10 @@ internal sealed class SceneUndoSnapshot : IDisposable
 		{
 			foreach ( var go in gos )
 			{
-				// Need to capture the prefab root and only the prefab root if we edited an instance
+				// Capture instance members directly, the root's patch is reconciled in RefreshPrefabPatches instead
 				if ( go.IsPrefabInstance )
 				{
-					_initalCapturedGameObjects[go.OutermostPrefabInstanceRoot] = GameObjectUndoFlags.All;
-					continue;
+					_prefabRootsToRefresh.Add( go.OutermostPrefabInstanceRoot.Id );
 				}
 
 				if ( _initalCapturedGameObjects.ContainsKey( go ) )
@@ -505,11 +525,10 @@ internal sealed class SceneUndoSnapshot : IDisposable
 
 		foreach ( var comp in builder.CapturedComponents )
 		{
-			// Need to capture the prefab root and only the prefab root if we edited an instance
+			// Same as above for components
 			if ( comp.GameObject.IsPrefabInstance )
 			{
-				_initalCapturedGameObjects[comp.GameObject.OutermostPrefabInstanceRoot] = GameObjectUndoFlags.All;
-				continue;
+				_prefabRootsToRefresh.Add( comp.GameObject.OutermostPrefabInstanceRoot.Id );
 			}
 
 			// only add if parent is not already watched or does not have component flag
@@ -623,16 +642,10 @@ internal sealed class SceneUndoSnapshot : IDisposable
 				continue;
 			}
 
+			// May have been moved into a prefab instance during the scope
 			if ( go.IsPrefabInstance )
 			{
-				disposeWatchedGameObjects[go.OutermostPrefabInstanceRoot] = GameObjectUndoFlags.All;
-			}
-
-			// We may have moved this object to a different prefab instance => update prefabroot instead of it
-			if ( go.Parent.IsValid() && go.Parent.IsPrefabInstance )
-			{
-				disposeWatchedGameObjects[go.Parent.OutermostPrefabInstanceRoot] = GameObjectUndoFlags.All;
-				continue;
+				_prefabRootsToRefresh.Add( go.OutermostPrefabInstanceRoot.Id );
 			}
 
 			if ( !disposeWatchedGameObjects.ContainsKey( go ) )
@@ -705,13 +718,14 @@ internal sealed class SceneUndoSnapshot : IDisposable
 				continue;
 			}
 
-			// Need to capture the prefab root and only the prefab root if we edited an instance
+			// Same as the initial capture
 			if ( comp.GameObject.IsPrefabInstance )
 			{
-				disposeWatchedGameObjects[comp.GameObject.OutermostPrefabInstanceRoot] = GameObjectUndoFlags.All;
+				_prefabRootsToRefresh.Add( comp.GameObject.OutermostPrefabInstanceRoot.Id );
 			}
+
 			// only add if parent is not already watched or does not have component flag
-			else if ( !_initalCapturedGameObjects.ContainsKey( comp.GameObject ) || !_initalCapturedGameObjects[comp.GameObject].Contains( GameObjectUndoFlags.Components ) )
+			if ( !_initalCapturedGameObjects.ContainsKey( comp.GameObject ) || !_initalCapturedGameObjects[comp.GameObject].Contains( GameObjectUndoFlags.Components ) )
 			{
 				disposeWatchedComponents.Add( comp );
 			}
@@ -734,8 +748,6 @@ internal sealed class SceneUndoSnapshot : IDisposable
 		var destroyedGameObjectRefs = _destroyedGameObjects.Select( x => x.Value ).ToArray();
 		var destroyedComponentRefs = _destroyedComponents.Select( x => x.Value ).ToArray();
 
-		var prefabInstanceRootsRequiringRefresh = new HashSet<GameObject>();
-
 		// if nothing changed, don't add an undo
 		if ( _initialState == disposeState )
 		{
@@ -747,6 +759,20 @@ internal sealed class SceneUndoSnapshot : IDisposable
 		{
 			_session.HasUnsavedChanges = true;
 		}
+
+		// Roots captured in patch form just refreshed their patch, don't do it twice
+		foreach ( var (go, flags) in disposeWatchedGameObjects )
+		{
+			if ( go.IsOutermostPrefabInstanceRoot && flags.HasFlag( GameObjectUndoFlags.Children ) )
+			{
+				_prefabRootsToRefresh.Remove( go.Id );
+			}
+		}
+
+		// Fold this scope's changes into the cached patches of the touched prefab instances
+		RefreshPrefabPatches( _session.Scene, _prefabRootsToRefresh );
+
+		var prefabRootsToRefresh = _prefabRootsToRefresh.ToArray();
 
 		// copy we want to avoid capture this
 		var preChangeStateCopy = _initialState;
@@ -795,6 +821,12 @@ internal sealed class SceneUndoSnapshot : IDisposable
 					{
 						goRef.Resolve( _session.Scene )?.Destroy();
 					}
+				}
+
+				// Reconcile patches after the batch flush, blob-backed components need their state back first
+				if ( preChangeStateCopy.Scene == null )
+				{
+					RefreshPrefabPatches( _session.Scene, prefabRootsToRefresh );
 				}
 
 				// At last restore selection
