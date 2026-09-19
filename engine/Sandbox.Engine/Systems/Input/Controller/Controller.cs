@@ -41,10 +41,53 @@ internal sealed partial class Controller
 		DeviceId = deviceHandle;
 		InputContext = Input.Context.Create( $"GameController:{SDLHandle}" );
 		Name = NativeEngine.SDLGameController.GetControllerName( SDLHandle );
-		GlyphSet = NativeEngine.SDLGameController.GetControllerGlyphSet( SDLHandle );
+
+		// The name wins where it names a family: a driver or compatibility layer will report a
+		// generic (usually Xbox) glyph set for a pad SDL still names as a DualSense or a Pro
+		// Controller, and then every prompt in the game draws the wrong buttons.
+		GlyphSet = GlyphSetFromName( Name )
+			?? NativeEngine.SDLGameController.GetControllerGlyphSet( SDLHandle );
 
 		var id = joystickHandle % 4;
 		LEDColor = ControllerColors[id];
+	}
+
+	/// <summary>
+	/// The glyph set a device name implies, or null when it names no family. Matches both SDL's
+	/// product strings ("Sony DualSense", "Nintendo Switch Pro Controller") and the engine's own
+	/// `#controller_*` tokens.
+	/// </summary>
+	internal static GameControllerGlyphSet? GlyphSetFromName( string name )
+	{
+		if ( string.IsNullOrWhiteSpace( name ) )
+			return null;
+
+		var lower = name.ToLowerInvariant();
+
+		if ( Mentions( lower, "playstation", "dualsense", "dualshock", "ps5", "ps4", "ps3" ) )
+			return GameControllerGlyphSet.PlayStation;
+
+		if ( Mentions( lower, "nintendo", "switch", "joy-con", "joycon", "joy con" ) )
+			return GameControllerGlyphSet.Switch;
+
+		if ( Mentions( lower, "steam" ) )
+			return GameControllerGlyphSet.Steam;
+
+		if ( Mentions( lower, "xbox", "xinput", "x360" ) )
+			return GameControllerGlyphSet.Xbox;
+
+		return null;
+	}
+
+	static bool Mentions( string name, params string[] words )
+	{
+		foreach ( var word in words )
+		{
+			if ( name.Contains( word, StringComparison.Ordinal ) )
+				return true;
+		}
+
+		return false;
 	}
 
 	public override string ToString()
