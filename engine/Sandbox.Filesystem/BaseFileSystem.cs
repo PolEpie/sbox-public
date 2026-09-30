@@ -108,6 +108,26 @@ public class BaseFileSystem
 	}
 
 	/// <summary>
+	/// Snapshot every file under <paramref name="folder"/>, recursively, with the filesystem each resolves to.
+	/// See <see cref="FileIndex"/>.
+	/// </summary>
+	internal FileIndex IndexFiles( string folder )
+	{
+		Zio.UPath root = FixPath( folder );
+
+		var paths = new SortedSet<Zio.UPath>();
+		var owners = new Dictionary<string, Zio.IFileSystem>( StringComparer.OrdinalIgnoreCase );
+
+		try
+		{
+			CollectFiles( system, root, paths, owners );
+		}
+		catch ( System.IO.DirectoryNotFoundException ) { } // If directory not found, doesn't matter
+
+		return new FileIndex( root, paths, owners );
+	}
+
+	/// <summary>
 	/// Every file under <paramref name="folder"/>, recursively and sorted by path, that passes
 	/// <paramref name="include"/>, with the physical path <see cref="GetFullPath"/> would give it. On an aggregate
 	/// filesystem GetFullPath searches every mounted filesystem again for each file; this takes the path from the
@@ -115,33 +135,22 @@ public class BaseFileSystem
 	/// </summary>
 	internal List<(string Path, string FullPath)> FindFileWithFullPath( string folder, Predicate<string> include = null )
 	{
-		folder = FixPath( folder );
+		var index = IndexFiles( folder );
 
-		// Path -> the filesystem it resolves to, null where GetFullPath has no physical path
-		var found = new SortedDictionary<Zio.UPath, Zio.IFileSystem>();
-
-		try
-		{
-			if ( system is Zio.FileSystems.AggregateFileSystem or Zio.FileSystems.SubFileSystem )
-			{
-				CollectFiles( system, folder, found );
-			}
-			else
-			{
-				foreach ( var path in system.EnumeratePaths( folder, "*", SearchOption.AllDirectories, Zio.SearchTarget.File ) )
-					found.TryAdd( path, null );
-			}
-		}
-		catch ( System.IO.DirectoryNotFoundException ) { } // If directory not found, doesn't matter
+		// GetFullPath only has physical paths for these
+		var hasFullPaths = system is Zio.FileSystems.AggregateFileSystem or Zio.FileSystems.SubFileSystem;
 
 		var files = new List<(string Path, string FullPath)>();
-		foreach ( var (path, owner) in found )
+		foreach ( var relative in index.Files )
 		{
-			var relative = path.FullName.Substring( folder.Length ).Trim( '/' );
 			if ( include is not null && !include( relative ) )
 				continue;
 
-			files.Add( (relative, owner?.ConvertPathToInternal( path )) );
+			string fullPath = null;
+			if ( hasFullPaths && index.TryGet( relative, out var path, out var owner ) )
+				fullPath = owner.ConvertPathToInternal( path );
+
+			files.Add( (relative, fullPath) );
 		}
 
 		return files;
@@ -149,18 +158,18 @@ public class BaseFileSystem
 
 	/// <summary>
 	/// Walks aggregates highest priority first, like AggregateFileSystem's own lookups, so the first
-	/// filesystem to have a path is the one GetFullPath would resolve it to.
+	/// filesystem to have a path is the one the aggregate resolves it to.
 	/// </summary>
-	static void CollectFiles( Zio.IFileSystem fs, Zio.UPath folder, SortedDictionary<Zio.UPath, Zio.IFileSystem> found )
+	static void CollectFiles( Zio.IFileSystem fs, Zio.UPath folder, SortedSet<Zio.UPath> paths, Dictionary<string, Zio.IFileSystem> owners )
 	{
 		if ( fs is Zio.FileSystems.AggregateFileSystem aggregate )
 		{
 			var children = aggregate.GetFileSystems();
 			for ( var i = children.Count - 1; i >= 0; i-- )
-				CollectFiles( children[i], folder, found );
+				CollectFiles( children[i], folder, paths, owners );
 
 			if ( aggregate.Fallback is { } fallback )
-				CollectFiles( fallback, folder, found );
+				CollectFiles( fallback, folder, paths, owners );
 
 			return;
 		}
@@ -169,7 +178,10 @@ public class BaseFileSystem
 			return;
 
 		foreach ( var path in fs.EnumeratePaths( folder, "*", SearchOption.AllDirectories, Zio.SearchTarget.File ) )
-			found.TryAdd( path, fs );
+		{
+			paths.Add( path );
+			owners.TryAdd( path.FullName, fs );
+		}
 	}
 
 	/// <summary>

@@ -617,28 +617,19 @@ public class ResourceSystem
 
 	/// <summary>
 	/// Loads a Gameresource from disk. Doesn't look at cache. Registers the resource if successful.
+	/// A bulk load passes an <c>index</c> of <c>fs</c>: files are then opened straight from the filesystem
+	/// they're in, and a file the snapshot doesn't have is missing without searching for it.
 	/// </summary>
-	internal GameResource LoadGameResource( AssetTypeAttribute type, string file, BaseFileSystem fs, bool deferPostload = false, Package sourcePackage = null )
+	internal GameResource LoadGameResource( AssetTypeAttribute type, string file, BaseFileSystem fs, bool deferPostload = false, Package sourcePackage = null, FileIndex index = null )
 	{
 		Assert.NotNull( type );
 		Assert.NotNull( file );
 
 		if ( !file.EndsWith( "_c" ) ) file += "_c";
 
-		Span<byte> data = null;
-
 		try
 		{
-			// No FileExists first: on an aggregate filesystem that's a second search over every
-			// mounted filesystem, and the open below does the same search anyway.
-			try
-			{
-				data = fs.ReadAllBytes( file );
-			}
-			catch ( FileNotFoundException ) { }
-			catch ( DirectoryNotFoundException ) { }
-
-			if ( data.Length <= 3 )
+			if ( !TryReadFile( fs, index, file, out var data ) || data.Length <= 3 )
 			{
 				Log.Warning( $"		Skipping {file} (is null)" );
 				return null;
@@ -663,15 +654,11 @@ public class ResourceSystem
 
 			if ( Application.IsEditor )
 			{
-				// Read directly rather than ReadAllText, which checks FileExists first and so
-				// searches every mounted filesystem twice. The text must match ReadAllText's,
-				// the file watcher hashes that and compares it to this.
-				try
+				// The text must match ReadAllText's, the file watcher hashes that and compares it to this
+				if ( TryReadFile( fs, index, file.Substring( 0, file.Length - 2 ), out var source ) )
 				{
-					se.LastSavedSourceHash = DecodeText( fs.ReadAllBytes( file.Substring( 0, file.Length - 2 ) ) ).FastHash();
+					se.LastSavedSourceHash = DecodeText( source ).FastHash();
 				}
-				catch ( FileNotFoundException ) { }
-				catch ( DirectoryNotFoundException ) { }
 			}
 
 			//
@@ -707,6 +694,31 @@ public class ResourceSystem
 			Log.Warning( ex, $"		Error when deserializing {file} ({ex.Message})" );
 			return null;
 		}
+	}
+
+	/// <summary>
+	/// Read a whole file, false if it doesn't exist. Without an index this opens it directly rather than checking
+	/// FileExists first - on an aggregate filesystem each is a search over every mounted filesystem.
+	/// </summary>
+	static bool TryReadFile( BaseFileSystem fs, FileIndex index, string path, out Span<byte> bytes )
+	{
+		if ( index is not null )
+		{
+			var found = index.TryReadAllBytes( path, out var indexed );
+			bytes = indexed;
+			return found;
+		}
+
+		try
+		{
+			bytes = fs.ReadAllBytes( path );
+			return true;
+		}
+		catch ( FileNotFoundException ) { }
+		catch ( DirectoryNotFoundException ) { }
+
+		bytes = default;
+		return false;
 	}
 
 	/// <summary>
