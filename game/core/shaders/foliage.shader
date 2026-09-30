@@ -350,6 +350,14 @@ PS
 			m.Opacity *= DistanceAlphaScale( dist );
 		#endif
 
+
+		// Depth prepass and shadow maps only need coverage and the normal. Returning here skips Shade()'s decal loop
+		// (it queries the camera's decal cluster, meaningless in a shadow map) and the sun/lighting work below.
+        #if S_MODE_DEPTH
+			AdjustAlphaToCoverage( m );
+			return DepthNormals::Output( m.Normal, m.Roughness, m.Opacity );
+		#endif
+
 		#if S_TRANSMISSIVE
 			if ( g_DirectionalLightEnabled )
 			{
