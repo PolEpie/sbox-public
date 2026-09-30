@@ -211,6 +211,39 @@ public class FileSystemTest
 		}
 	}
 
+	/// <summary>
+	/// Resource loading hashes source files decoded with ResourceSystem.DecodeText, and the file watcher
+	/// compares that to a hash of ReadAllText - both must give the same text for every encoding and
+	/// byte order mark, or every resource would look externally modified.
+	/// </summary>
+	[TestMethod]
+	public void DecodeTextMatchesReadAllText()
+	{
+		const string text = "{ \"Name\": \"héllo – 世界\" }";
+		var encodings = new System.Text.Encoding[]
+		{
+			new System.Text.UTF8Encoding( false ),
+			new System.Text.UTF8Encoding( true ),
+			new System.Text.UnicodeEncoding( false, true ),
+			new System.Text.UnicodeEncoding( true, true ),
+			new System.Text.UTF32Encoding( false, true ),
+			new System.Text.UTF32Encoding( true, true ),
+		};
+
+		var fs = new MemoryFileSystem();
+		foreach ( var encoding in encodings )
+		{
+			var bytes = encoding.GetPreamble().Concat( encoding.GetBytes( text ) ).ToArray();
+			fs.WriteAllBytes( "file.json", bytes );
+			Assert.AreEqual( fs.ReadAllText( "file.json" ), Sandbox.ResourceSystem.DecodeText( bytes ), encoding.EncodingName );
+		}
+
+		// Invalid UTF-8 is replaced the same way
+		byte[] invalid = [0x7B, 0xC3, 0x28, 0xFF, 0x7D];
+		fs.WriteAllBytes( "file.json", invalid );
+		Assert.AreEqual( fs.ReadAllText( "file.json" ), Sandbox.ResourceSystem.DecodeText( invalid ) );
+	}
+
 	class TestPayload
 	{
 		public string Name { get; set; }
