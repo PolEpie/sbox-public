@@ -663,14 +663,12 @@ public class ResourceSystem
 
 			if ( Application.IsEditor )
 			{
-				// Open directly rather than ReadAllText, which checks FileExists first and so
-				// searches every mounted filesystem twice. Decoding matches ReadAllText, the
-				// file watcher hashes that and compares it to this.
+				// Read directly rather than ReadAllText, which checks FileExists first and so
+				// searches every mounted filesystem twice. The text must match ReadAllText's,
+				// the file watcher hashes that and compares it to this.
 				try
 				{
-					using var stream = fs.OpenRead( file.Substring( 0, file.Length - 2 ) );
-					using var reader = new StreamReader( stream, System.Text.Encoding.UTF8, true );
-					se.LastSavedSourceHash = reader.ReadToEnd().FastHash();
+					se.LastSavedSourceHash = DecodeText( fs.ReadAllBytes( file.Substring( 0, file.Length - 2 ) ) ).FastHash();
 				}
 				catch ( FileNotFoundException ) { }
 				catch ( DirectoryNotFoundException ) { }
@@ -709,6 +707,27 @@ public class ResourceSystem
 			Log.Warning( ex, $"		Error when deserializing {file} ({ex.Message})" );
 			return null;
 		}
+	}
+
+	/// <summary>
+	/// Decodes a text file the way <see cref="BaseFileSystem.ReadAllText"/> does (UTF-8, byte order mark
+	/// detected and stripped), from bytes already read, instead of growing a StreamReader's buffer.
+	/// </summary>
+	internal static string DecodeText( ReadOnlySpan<byte> bytes )
+	{
+		ReadOnlySpan<byte> utf8Bom = [0xEF, 0xBB, 0xBF];
+		if ( bytes.StartsWith( utf8Bom ) )
+			return System.Text.Encoding.UTF8.GetString( bytes[utf8Bom.Length..] );
+
+		// A UTF-16 or UTF-32 byte order mark - rare, let StreamReader work out which, as ReadAllText does
+		ReadOnlySpan<byte> utf16LittleEndian = [0xFF, 0xFE], utf16BigEndian = [0xFE, 0xFF], utf32BigEndian = [0x00, 0x00, 0xFE, 0xFF];
+		if ( bytes.StartsWith( utf16LittleEndian ) || bytes.StartsWith( utf16BigEndian ) || bytes.StartsWith( utf32BigEndian ) )
+		{
+			using var reader = new StreamReader( new MemoryStream( bytes.ToArray() ), System.Text.Encoding.UTF8, true );
+			return reader.ReadToEnd();
+		}
+
+		return System.Text.Encoding.UTF8.GetString( bytes );
 	}
 
 	/// <summary>
