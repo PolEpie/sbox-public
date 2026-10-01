@@ -46,15 +46,16 @@ public class ImmutabilityTest
 		""" ).AsObject();
 
 	[TestMethod]
-	public void DifferenceCalculatorOwnsItsSourceAndCanBeReused()
+	public void DifferenceCalculatorIsReusableAndLeavesSourceUntouched()
 	{
 		var definitions = BuildDefinitions();
 		var source = Source();
 		var expectedSource = source.DeepClone().AsObject();
-		var calculate = Json.CreateDifferenceCalculator( source, definitions );
-		source["company"]["departments"][0]["employees"][0]["role"] = "Changed after capture";
 
-		foreach ( var target in new[] { Target(), expectedSource, Target() } )
+		// The calculator borrows the source rather than copying it - it must only ever read it.
+		var calculate = Json.CreateDifferenceCalculator( source, definitions );
+
+		foreach ( var target in new[] { Target(), expectedSource.DeepClone().AsObject(), Target() } )
 		{
 			var expected = target.DeepClone();
 			var patch = calculate( target );
@@ -63,6 +64,8 @@ public class ImmutabilityTest
 			patch.PropertyOverrides.Clear();
 			patch.AddedObjects.Clear();
 		}
+
+		Assert.IsTrue( JsonNode.DeepEquals( expectedSource, source ) );
 	}
 
 	[TestMethod]
