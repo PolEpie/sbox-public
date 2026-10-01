@@ -22,6 +22,39 @@ internal partial class PrefabCacheScene : PrefabScene
 
 	internal Json.Patch CalculateDifferences( JsonObject instance ) => calculateDifferences( instance );
 
+	Dictionary<Guid, JsonObject> _fullPrefabGameObjects;
+
+	/// <summary>
+	/// The json one of this prefab's GameObjects has in <see cref="FullPrefabInstanceJson"/>, by its prefab id -
+	/// what an instance's copy of it is diffed against. Null if the prefab has no such object.
+	/// </summary>
+	internal JsonObject FindFullPrefabGameObject( Guid prefabId )
+	{
+		if ( _fullPrefabGameObjects is null )
+		{
+			_fullPrefabGameObjects = new();
+			if ( FullPrefabInstanceJson is not null )
+				IndexGameObjects( FullPrefabInstanceJson );
+		}
+
+		return _fullPrefabGameObjects.GetValueOrDefault( prefabId );
+	}
+
+	void IndexGameObjects( JsonObject node )
+	{
+		if ( node[GameObject.JsonKeys.Id] is JsonValue id && id.TryGetValue<Guid>( out var guid ) )
+			_fullPrefabGameObjects.TryAdd( guid, node );
+
+		if ( node[GameObject.JsonKeys.Children] is not JsonArray children )
+			return;
+
+		foreach ( var child in children )
+		{
+			if ( child is JsonObject childObject )
+				IndexGameObjects( childObject );
+		}
+	}
+
 	/// <summary>
 	/// Contains all the prefab files that are referenced by this prefab scene.
 	/// </summary>
@@ -36,6 +69,7 @@ internal partial class PrefabCacheScene : PrefabScene
 		using var sourceScope = ActionGraph.PushSerializationOptions( resource.SerializationOptions with { ForceUpdateCached = IsEditor } );
 		using var suppressBlobs = BlobDataSerializer.Suppress();
 		FullPrefabInstanceJson = Serialize( new SerializeOptions { SerializePrefabForDiff = true } );
+		_fullPrefabGameObjects = null;
 		calculateDifferences = Json.CreateDifferenceCalculator( FullPrefabInstanceJson, DiffObjectDefinitions );
 
 		// Iterate all gameobjects in scene and find prefab instances, add them to reference set
