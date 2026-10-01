@@ -229,6 +229,110 @@ internal class PrefabInstanceData
 	}
 
 	/// <summary>
+	/// Updates the patch after only the own properties of <paramref name="changed"/> changed - name, transform,
+	/// tags, flags, enabled - with no change to their components, children or place in the hierarchy. Re-diffs
+	/// just those objects, where <see cref="RefreshPatch()"/> serializes and diffs every object and mesh in the
+	/// instance. Anything it can't handle the same way as the full refresh falls back to it.
+	/// </summary>
+	internal void RefreshPatch( IReadOnlyCollection<GameObject> changed )
+	{
+		if ( changed.Count == 0 || !TryGetPropertyOverrides( changed, out var updated ) )
+		{
+			RefreshPatch();
+			return;
+		}
+
+		// A new patch, like the full refresh makes - anything holding the old one keeps what it had
+		var overrides = new List<Json.PropertyOverride>( _patch.PropertyOverrides );
+		foreach ( var (prefabId, objectOverrides) in updated )
+		{
+			var at = overrides.FindIndex( x => Guid.Parse( x.Target.IdValue ) == prefabId );
+			overrides.RemoveAll( x => Guid.Parse( x.Target.IdValue ) == prefabId );
+			overrides.InsertRange( at < 0 ? overrides.Count : at, objectOverrides );
+		}
+
+		_patch = new Json.Patch
+		{
+			AddedObjects = new( _patch.AddedObjects ),
+			RemovedObjects = new( _patch.RemovedObjects ),
+			MovedObjects = new( _patch.MovedObjects ),
+			PropertyOverrides = overrides,
+		};
+	}
+
+	static readonly SerializeOptions _propertiesOnlyOptions = new() { IgnoreChildren = true, IgnoreComponents = true };
+
+	/// <summary>
+	/// The property overrides each of <paramref name="changed"/> has now, by prefab id. False if any of them isn't a
+	/// plain member of this instance's diffed tree, where only the full refresh gives the right answer.
+	/// </summary>
+	bool TryGetPropertyOverrides( IReadOnlyCollection<GameObject> changed, out List<(Guid PrefabId, List<Json.PropertyOverride> Overrides)> updated )
+	{
+		updated = null;
+
+		var prefabFile = ResourceLibrary.Get<PrefabFile>( PrefabSource );
+		if ( prefabFile is null || prefabFile.IsPromise || prefabFile.RootObject is null )
+			return false;
+
+		if ( GetPrefab( PrefabSource ) is not PrefabCacheScene prefabScene )
+			return false;
+
+		updated = new( changed.Count );
+
+		foreach ( var go in changed )
+		{
+			// Nested roots carry instance data of their own; added objects live in AddedObjects
+			if ( !go.IsValid() || go.IsDestroyed || go.OutermostPrefabInstanceRoot != _instanceRoot || (go.IsPrefabInstanceRoot && go != _instanceRoot) )
+				return false;
+
+			if ( !_instanceGuidToPrefabGuid.TryGetValue( go.Id, out var prefabId ) )
+				return false;
+
+			// Only objects that save, under ancestors that save, are in the diffed tree
+			for ( var o = go; o != _instanceRoot.Parent; o = o.Parent )
+			{
+				if ( o is null || !_serializeOptions.ShouldSave( o ) )
+					return false;
+			}
+
+			if ( prefabScene.FindFullPrefabGameObject( prefabId ) is not { } prefabJson )
+				return false;
+
+			var instanceJson = go.SerializeStandard( _propertiesOnlyOptions );
+			if ( instanceJson is null )
+				return false;
+
+			RemapInstanceIdsToPrefabIds( ref instanceJson );
+
+			// Diff the two objects alone, through the same comparison the full refresh does. Empty containers on
+			// both sides keep them identifiable as GameObjects without diffing their children or components.
+			var objectPatch = Json.CalculateDifferences( PropertiesOnly( prefabJson ), PropertiesOnly( instanceJson ), DiffObjectDefinitions );
+			if ( objectPatch.AddedObjects.Count > 0 || objectPatch.RemovedObjects.Count > 0 || objectPatch.MovedObjects.Count > 0 )
+				return false;
+
+			updated.Add( (prefabId, objectPatch.PropertyOverrides) );
+		}
+
+		return true;
+	}
+
+	static JsonObject PropertiesOnly( JsonObject gameObject )
+	{
+		var json = new JsonObject();
+		foreach ( var (key, value) in gameObject )
+		{
+			if ( key is JsonKeys.Children or JsonKeys.Components )
+				continue;
+
+			json[key] = value?.DeepClone();
+		}
+
+		json[JsonKeys.Components] = new JsonArray();
+		json[JsonKeys.Children] = new JsonArray();
+		return json;
+	}
+
+	/// <summary>
 	/// Clear Patch for this instance, can be used to revert back to the original state.
 	/// </summary>
 	public void ClearPatch( bool keepBasicGoOverridesOnRoot )

@@ -472,15 +472,74 @@ internal sealed class SceneUndoSnapshot : IDisposable
 			_prefabRootsToRefresh.Add( go.Parent.OutermostPrefabInstanceRoot.Id );
 	}
 
-	private static void RefreshPrefabPatches( Scene scene, IEnumerable<Guid> rootIds )
+	private static void RefreshPrefabPatches( Scene scene, IEnumerable<Guid> rootIds, Dictionary<Guid, HashSet<Guid>> propertyEdits = null )
 	{
 		foreach ( var id in rootIds )
 		{
 			var root = scene.Directory.FindByGuid( id );
-			if ( root.IsValid() && root.IsOutermostPrefabInstanceRoot )
-				root.PrefabInstance.RefreshPatch();
+			if ( !root.IsValid() || !root.IsOutermostPrefabInstanceRoot )
+				continue;
+
+			if ( propertyEdits is not null && propertyEdits.TryGetValue( id, out var editedIds ) )
+			{
+				var edited = editedIds.Select( scene.Directory.FindByGuid ).ToArray();
+				if ( edited.All( x => x.IsValid() ) )
+				{
+					root.PrefabInstance.RefreshPatch( edited );
+					continue;
+				}
+			}
+
+			root.PrefabInstance.RefreshPatch();
 		}
 	}
+
+	/// <summary>
+	/// When this scope only changed the own properties of the objects it captured, the ids of those objects by
+	/// prefab root - their patches only need those objects re-diffed, not the whole instance. Null when it did
+	/// anything else (created, destroyed, changed components or children, moved something in the hierarchy).
+	/// </summary>
+	private Dictionary<Guid, HashSet<Guid>> PropertyOnlyEdits()
+	{
+		if ( _captureDestructions || _initialCapturedComponents.Count > 0 || _destroyedGameObjects.Count > 0 || _destroyedComponents.Count > 0
+			|| _createdGameObjects.Count > 0 || _createdComponents.Count > 0 || _initialState.GameObjectSnapshot is not { } before )
+			return null;
+
+		var placeBefore = new Dictionary<Guid, (Guid Parent, Guid Next)>( before.GameObjectRefs.Count );
+		for ( int i = 0; i < before.GameObjectRefs.Count; i++ )
+			placeBefore[before.GameObjectRefs[i].GameObjectId] = (before.GameObjectParentRefs[i].GameObjectId, before.GameObjectNextSiblingRefs[i].GameObjectId);
+
+		var edits = new Dictionary<Guid, HashSet<Guid>>();
+		foreach ( var (go, flags) in _initalCapturedGameObjects )
+		{
+			if ( flags != GameObjectUndoFlags.Properties || !go.IsValid() || go.IsDestroyed )
+				return null;
+
+			if ( !placeBefore.TryGetValue( go.Id, out var place ) || place != PlaceOf( go ) )
+				return null;
+
+			if ( !go.IsPrefabInstance )
+			{
+				// Not from the prefab but inside an instance: one of its added objects, whose data is in the patch
+				if ( go.Parent.IsValid() && go.Parent.IsPrefabInstance )
+					return null;
+
+				continue;
+			}
+
+			var rootId = go.OutermostPrefabInstanceRoot.Id;
+			if ( !edits.TryGetValue( rootId, out var ids ) )
+				edits[rootId] = ids = new();
+
+			ids.Add( go.Id );
+		}
+
+		return edits;
+	}
+
+	static (Guid Parent, Guid Next) PlaceOf( GameObject go ) =>
+		(go.Parent.IsValid() ? GameObjectReference.FromInstance( go.Parent ).GameObjectId : Guid.Empty,
+		 go.GetNextSibling( false ).IsValid() ? GameObjectReference.FromInstance( go.GetNextSibling( false ) ).GameObjectId : Guid.Empty);
 
 	private bool _captureDestructions = false;
 
@@ -774,7 +833,10 @@ internal sealed class SceneUndoSnapshot : IDisposable
 		var refreshedRoots = disposeWatchedGameObjects
 			.Where( x => x.Key.IsOutermostPrefabInstanceRoot && x.Value.HasFlag( GameObjectUndoFlags.Children ) )
 			.Select( x => x.Key.Id );
-		RefreshPrefabPatches( _session.Scene, prefabRootsToRefresh.Except( refreshedRoots ) );
+		// Edits to only the captured objects' own properties re-diff just those objects - on a big instance the
+		// full refresh serializes and diffs every object and mesh in it. Undo and redo keep the full refresh: it
+		// also picks up whatever changed in the instance outside any undo scope since.
+		RefreshPrefabPatches( _session.Scene, prefabRootsToRefresh.Except( refreshedRoots ), PropertyOnlyEdits() );
 
 		// if nothing changed, don't add an undo
 		if ( _initialState == disposeState )
