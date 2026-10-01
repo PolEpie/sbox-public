@@ -653,11 +653,13 @@ public static partial class Json
 
 	/// <summary>
 	/// Captures a source once for repeated comparisons without exposing the tracking graph.
-	/// Recreate the calculator when the source or object definitions change.
+	/// The calculator borrows <paramref name="source"/> instead of copying it (a prefab's full instance
+	/// json can be hundreds of megabytes), so the caller must not mutate it afterwards - replace it and
+	/// recreate the calculator instead. Recreate it too when the object definitions change.
 	/// </summary>
 	internal static Func<JsonObject, Patch> CreateDifferenceCalculator( JsonObject source, HashSet<TrackedObjectDefinition> definitions )
 	{
-		var oldObjects = FindTrackedObjectsInJson( source?.DeepClone().AsObject(), definitions, forDiff: true );
+		var oldObjects = FindTrackedObjectsInJson( source, definitions, forDiff: true );
 		return target => CalculateDifferences( oldObjects, FindTrackedObjectsInJson( target, definitions, forDiff: true ) );
 	}
 
