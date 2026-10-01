@@ -156,6 +156,9 @@ public sealed class MeshComponent : Collider, ExecuteInEditor, ITintable, IMater
 		// Mesh needs to build before collider.
 		RebuildRenderMesh();
 
+		// Every mesh builds here when a scene loads, and almost none of them are ever painted
+		Mesh?.ReleaseVertexCache();
+
 		base.OnEnabledInternal();
 	}
 
@@ -203,9 +206,11 @@ public sealed class MeshComponent : Collider, ExecuteInEditor, ITintable, IMater
 			RebuildRenderMesh();
 			RebuildImmediately();
 		}
-		else if ( Mesh.IsVertexDataDirty )
+		else if ( Mesh.IsVertexDataDirty && !Mesh.UpdateVertexData() )
 		{
-			Mesh.UpdateVertexData();
+			// First paint since the vertex cache was released - one full rebuild brings it back
+			RebuildRenderMesh();
+			RebuildImmediately();
 		}
 	}
 

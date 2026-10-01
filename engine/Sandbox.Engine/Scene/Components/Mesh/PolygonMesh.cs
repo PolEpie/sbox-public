@@ -4412,10 +4412,30 @@ public sealed partial class PolygonMesh : IJsonConvert
 	readonly HashSet<HalfEdgeHandle> _dirtyHalfEdges = [];
 	readonly List<Submesh> _submeshes = [];
 	readonly Dictionary<FaceHandle, Vector3> _faceNormalCache = [];
+	bool _vertexCacheReleased;
 
-	internal void UpdateVertexData()
+	/// <summary>
+	/// Drops the render vertices <see cref="Rebuild"/> keeps so vertex colours and blends can be patched into
+	/// the vertex buffers in place - a copy of every render vertex per mesh. Meshes nobody paints never use
+	/// it; the next paint does one full rebuild, which brings it back.
+	/// </summary>
+	internal void ReleaseVertexCache()
 	{
-		if ( _dirtyHalfEdges.Count == 0 ) return;
+		_submeshes.Clear();
+		_submeshes.TrimExcess();
+		_halfEdgeToMeshVertices.Clear();
+		_halfEdgeToMeshVertices.TrimExcess();
+		_vertexCacheReleased = true;
+	}
+
+	/// <summary>
+	/// Patch changed vertex colours and blends into the vertex buffers.
+	/// </summary>
+	/// <returns>False if the vertex cache was released - the mesh needs a full <see cref="Rebuild"/> instead.</returns>
+	internal bool UpdateVertexData()
+	{
+		if ( _dirtyHalfEdges.Count == 0 ) return true;
+		if ( _vertexCacheReleased ) return false;
 
 		var dirtySubmeshes = new HashSet<int>();
 
@@ -4447,6 +4467,7 @@ public sealed partial class PolygonMesh : IJsonConvert
 		}
 
 		_dirtyHalfEdges.Clear();
+		return true;
 	}
 
 	/// <summary>
@@ -4466,6 +4487,10 @@ public sealed partial class PolygonMesh : IJsonConvert
 		_meshTriangleMaterials.Clear();
 		_halfEdgeToMeshVertices.Clear();
 		_faceNormalCache.Clear();
+
+		// A full rebuild picks up every colour and blend, and brings the vertex cache back
+		_dirtyHalfEdges.Clear();
+		_vertexCacheReleased = false;
 
 		// A quad face produces 4 vertices and 6 indices; use that as a rough capacity hint.
 		_meshVertices.EnsureCapacity( faceCount * 4 );

@@ -106,4 +106,38 @@ public class MeshComponentCollisionTest
 		component.Collision = MeshComponent.CollisionType.Mesh;
 		AssertCollision( component, MeshComponent.CollisionType.Mesh );
 	}
+
+	/// <summary>
+	/// A loaded mesh doesn't keep its render vertices around for in-place colour patching. The first paint
+	/// rebuilds it once, which brings them back, and later paints patch the vertex buffers in place again.
+	/// </summary>
+	[TestMethod]
+	public void PaintingALoadedMeshRebuildsOnceThenPatchesInPlace()
+	{
+		var scene = Scene.CreateEditorScene();
+		using var sceneScope = scene.Push();
+
+		var go = new GameObject( true, "box" );
+		var component = go.Components.Create<MeshComponent>( false );
+		component.Mesh = CreateBox();
+		component.Enabled = true;
+
+		var loaded = component.Model;
+		Assert.IsNotNull( loaded );
+		component.Mesh.GetFaceVerticesConnectedToFace( component.Mesh.FaceHandles.First(), out var faceVertices );
+
+		component.Mesh.SetVertexColor( faceVertices[0], new Color32( 255, 0, 0 ) );
+		component.RebuildMesh();
+
+		Assert.IsFalse( component.Mesh.IsVertexDataDirty );
+		Assert.AreNotSame( loaded, component.Model, "The first paint after loading rebuilds the mesh" );
+		Assert.IsTrue( component.Model.MeshCount > 0 );
+
+		var rebuilt = component.Model;
+		component.Mesh.SetVertexColor( faceVertices[1], new Color32( 0, 0, 255 ) );
+		component.RebuildMesh();
+
+		Assert.IsFalse( component.Mesh.IsVertexDataDirty );
+		Assert.AreSame( rebuilt, component.Model, "Later paints patch the vertex buffers in place" );
+	}
 }
