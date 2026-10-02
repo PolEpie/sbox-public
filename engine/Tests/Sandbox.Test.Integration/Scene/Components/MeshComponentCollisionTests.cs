@@ -140,4 +140,37 @@ public class MeshComponentCollisionTest
 		Assert.IsFalse( component.Mesh.IsVertexDataDirty );
 		Assert.AreSame( rebuilt, component.Model, "Later paints patch the vertex buffers in place" );
 	}
+
+	/// <summary>
+	/// A built mesh drops what only the build needed, but trace hits on its model still resolve to faces -
+	/// editor picking depends on it - and rebuilding it gives the same result.
+	/// </summary>
+	[TestMethod]
+	public void BuiltMeshStillResolvesTraceTrianglesToFaces()
+	{
+		var scene = Scene.CreateEditorScene();
+		using var sceneScope = scene.Push();
+
+		var go = new GameObject( true, "box" );
+		var component = go.Components.Create<MeshComponent>( false );
+		component.Mesh = CreateBox();
+		component.Enabled = true;
+
+		// Six quads, two triangles each. The second pass is after an edit's full rebuild.
+		var faces = component.Mesh.FaceHandles.ToHashSet();
+		for ( int build = 0; build < 2; build++ )
+		{
+			var built = component.Model;
+			var hit = Enumerable.Range( 0, 12 ).Select( component.Mesh.TriangleToFace ).ToArray();
+			Assert.IsTrue( hit.All( faces.Contains ), $"Build {build}: every triangle maps to one of the mesh's faces" );
+			Assert.AreEqual( 6, hit.Distinct().Count(), $"Build {build}: every face is reachable" );
+			Assert.IsFalse( component.Mesh.TriangleToFace( 12 ).IsValid );
+			AssertCollision( component, MeshComponent.CollisionType.Mesh );
+
+			var vertex = component.Mesh.VertexHandles.First();
+			component.Mesh.SetVertexPosition( vertex, component.Mesh.GetVertexPosition( vertex ) + Vector3.Up );
+			component.RebuildMesh();
+			Assert.AreNotSame( built, component.Model );
+		}
+	}
 }
