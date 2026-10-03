@@ -119,6 +119,7 @@ internal partial class PrefabCacheScene : PrefabScene
 		foreach ( var dependant in ordered )
 		{
 			dependant.CachedScene?.Load( dependant );
+			dependant.ReleaseRootObject();
 		}
 	}
 
