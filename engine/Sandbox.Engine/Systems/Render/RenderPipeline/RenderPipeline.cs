@@ -58,6 +58,12 @@ internal static class RenderPipeline
 	internal static bool OverlapReflections { get; set; }
 
 	/// <summary>
+	/// View attribute set when the view draws the depth normal prepass, so opaque passes know an earlier pass in the
+	/// same view already drew every prepass object.
+	/// </summary>
+	internal const string DepthNormalPrepassAttribute = "HasDepthNormalPrepass";
+
+	/// <summary>
 	/// The pipeline that adds the layers.
 	/// </summary>
 	internal static INativeRenderPipeline Current { get; set; }
