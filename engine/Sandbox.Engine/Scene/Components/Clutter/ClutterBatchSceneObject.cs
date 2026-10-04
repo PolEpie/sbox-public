@@ -407,6 +407,8 @@ internal class ClutterBatchSceneObject : SceneCustomObject
 		if ( _instances == null || _count == 0 )
 			return;
 
+		bool shadow = Graphics.LayerType == SceneLayerType.Shadow;
+
 		if ( PassNeedsCull() )
 		{
 			// Per-view inputs, read by the cull dispatch during replay.
@@ -416,10 +418,14 @@ internal class ClutterBatchSceneObject : SceneCustomObject
 			Graphics.Attributes.Set( "ClutterLodViewportWidth", Lod.ViewportWidth );
 			Graphics.Attributes.Set( "ClutterLodOrthoWidth", Lod.OrthoWidth );
 			Graphics.Attributes.Set( "ClutterWorldToProjection", Graphics.ViewFrustum.GetReverseZViewProjTranspose() );
-			Graphics.Attributes.Set( "ClutterMaxDistance", Graphics.LayerType == SceneLayerType.Shadow ? EffectiveShadowDistance : 0.0f );
+			Graphics.Attributes.Set( "ClutterMaxDistance", shadow ? EffectiveShadowDistance : 0.0f );
 
 			_cullCommands.ExecuteOnRenderThread();
 		}
+
+		// Lets clutter materials take a coverage-only path in shadow maps. Set every pass, as terrain does with
+		// TerrainShadowPass, so it never carries over from another draw.
+		Graphics.Attributes.Set( "ClutterShadowPass", shadow );
 
 		_drawCommands.ExecuteOnRenderThread();
 	}
