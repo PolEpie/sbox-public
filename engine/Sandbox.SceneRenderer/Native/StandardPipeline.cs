@@ -472,6 +472,7 @@ internal sealed class StandardPipeline
 		// Pass that DepthNormals are enabled to the rest of the pipeline
 		view.GetRenderAttributesPtr().SetIntValue( "NormalsTextureIndex", normals.ColorTarget.Index );
 		view.GetRenderAttributesPtr().SetTextureValue( "NormalsGBuffer", normals.ColorTarget.native, -1 );
+		view.GetRenderAttributesPtr().SetBoolValue( RenderPipeline.DepthNormalPrepassAttribute, true );
 		return normalsHandle;
 	}
 
