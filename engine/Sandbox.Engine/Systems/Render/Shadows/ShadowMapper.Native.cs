@@ -142,7 +142,7 @@ internal partial class ShadowMapper
 				exclusion = exclusionFrustum;
 			}
 
-			CSceneSystem.AddShadowView( view.Name,
+			var sceneView = CSceneSystem.AddShadowView( view.Name,
 				mapper.SceneView,
 				frustum,
 				new( 0, 0, view.Resolution, view.Resolution ),
@@ -154,6 +154,9 @@ internal partial class ShadowMapper
 				view.SlopeScaledDepthBias,
 				exclusion,
 				cachedShadowTexture: view.CachedStatic is null ? default : view.CachedStatic.Texture.native );
+
+			if ( view.Receivers is { } receivers && sceneView.IsValid )
+				receivers.WriteTo( sceneView.GetRenderAttributesPtr() );
 
 			return frustum.GetReverseZViewProjTranspose()._numerics;
 		}
