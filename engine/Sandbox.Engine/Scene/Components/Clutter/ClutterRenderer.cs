@@ -21,12 +21,28 @@ internal sealed class ClutterRenderer : SceneCustomObject
 	[ConVar( "r_clutter_shadow_distance", ConVarFlags.Saved, Min = 0, Help = "Clutter farther than this from the camera casts no shadows. 0 = r.shadows.csm.distance." )]
 	internal static float ShadowDistance { get; set; } = 0.0f;
 
+	[ConVar( "r_clutter_shadow_receiver_cull", ConVarFlags.Saved, Help = "Skip clutter in a sun cascade when its shadow can't land on a pixel that samples that cascade. Reflections and probes that reuse the cascades lose clutter shadows the camera doesn't see." )]
+	internal static bool ShadowReceiverCulling { get; set; } = true;
+
 	/// <summary>
 	/// Shadows end at the cascade distance anyway, so the clutter limit never goes past it.
 	/// </summary>
 	private static float EffectiveShadowDistance => ShadowDistance > 0.0f
 		? MathF.Min( ShadowDistance, ShadowMapper.CascadeDistance )
 		: ShadowMapper.CascadeDistance;
+
+	/// <summary>
+	/// In a sun cascade, where the pixels that sample it can be. Other shadow views don't publish one.
+	/// </summary>
+	private static bool TryGetReceivers( bool shadow, out ShadowReceiverRegion region )
+	{
+		region = default;
+		if ( !shadow || !ShadowReceiverCulling )
+			return false;
+
+		var view = Graphics.SceneView;
+		return view.IsValid && ShadowReceiverRegion.TryRead( view.GetRenderAttributesPtr(), out region );
+	}
 
 	internal record struct LodParams
 	{
@@ -602,6 +618,8 @@ internal sealed class ClutterRenderer : SceneCustomObject
 		private readonly bool _testPlanes;
 		private readonly float _maxDistance;
 		private readonly bool _masksValid;
+		private readonly ShadowReceiverRegion _receivers;
+		private readonly bool _testReceivers;
 
 		public ViewBounds( bool shadow, bool masksValid )
 		{
@@ -616,6 +634,7 @@ internal sealed class ClutterRenderer : SceneCustomObject
 
 			_maxDistance = shadow ? EffectiveShadowDistance * (1.0f + LodSlack) : 0.0f;
 			_masksValid = masksValid;
+			_testReceivers = TryGetReceivers( shadow, out _receivers );
 		}
 
 		/// <summary>
@@ -639,6 +658,10 @@ internal sealed class ClutterRenderer : SceneCustomObject
 
 				var spheres = tile.Spheres;
 				if ( _testPlanes && !(_left.IsInFront( spheres, true ) && _right.IsInFront( spheres, true ) && _top.IsInFront( spheres, true ) && _bottom.IsInFront( spheres, true )) )
+					continue;
+
+				// A sphere around the tile holds every instance's sphere, so it passes wherever any of them does
+				if ( _testReceivers && !_receivers.MayShadow( spheres.Center, spheres.Size.Length * 0.5f ) )
 					continue;
 
 				mask |= tile.LodMask;
@@ -677,6 +700,16 @@ internal sealed class ClutterRenderer : SceneCustomObject
 		attributes.Set( "ClutterWorldToProjection", Graphics.ViewFrustum.GetReverseZViewProjTranspose() );
 		attributes.Set( "ClutterMaxDistance", shadow ? EffectiveShadowDistance : 0.0f );
 		attributes.Set( "ClutterShadowPass", shadow ? 1 : 0 );
+
+		bool receivers = TryGetReceivers( shadow, out var region );
+		attributes.Set( "ClutterCullReceivers", receivers ? 1 : 0 );
+		attributes.Set( "ClutterReceiverLight", region.LightDirection );
+		attributes.Set( "ClutterReceiverPlane0", new Vector4( region.Left.Normal, region.Left.Distance ) );
+		attributes.Set( "ClutterReceiverPlane1", new Vector4( region.Right.Normal, region.Right.Distance ) );
+		attributes.Set( "ClutterReceiverPlane2", new Vector4( region.Top.Normal, region.Top.Distance ) );
+		attributes.Set( "ClutterReceiverPlane3", new Vector4( region.Bottom.Normal, region.Bottom.Distance ) );
+		attributes.Set( "ClutterReceiverSphere", region.Sphere );
+		attributes.Set( "ClutterReceiverExcluded", region.Excluded );
 
 		Graphics.ResourceBarrierTransition( _counts, ResourceState.CopyDestination );
 		_counts.Clear();

@@ -160,10 +160,10 @@ internal partial class ShadowMapper
 	}
 
 	/// <summary>
-	/// Given a camera view frustum, computes cascade frustums into the provided span.
-	/// Returns the number of cascades written.
+	/// Given a camera view frustum, computes cascade frustums into the provided span, and the camera's side planes
+	/// (left, right, top, bottom, facing in) into <paramref name="sidePlanes"/>. Returns the number of cascades written.
 	/// </summary>
-	static int GetCascades( Span<Cascade> result, in System.Numerics.Matrix4x4 invViewProj, Rotation rotation, int numCascades, float NearClip, float FarClip, float lambda, int shadowmapSize, Vector3 cameraPosition )
+	static int GetCascades( Span<Cascade> result, Span<Plane> sidePlanes, in System.Numerics.Matrix4x4 invViewProj, Rotation rotation, int numCascades, float NearClip, float FarClip, float lambda, int shadowmapSize, Vector3 cameraPosition )
 	{
 		// Project frustum corners into world space from clip space
 		Span<Vector3> viewFrustumCorners = stackalloc Vector3[8];
@@ -172,6 +172,21 @@ internal partial class ShadowMapper
 			var corner = System.Numerics.Vector4.Transform( Corners[i], invViewProj );
 			viewFrustumCorners[i] = new Vector3( corner.X, corner.Y, corner.Z ) / corner.W;
 		}
+
+		// The camera's side planes, from its near and far corners
+		Vector3 inside = Vector3.Zero;
+		for ( int i = 0; i < 8; i++ )
+			inside += viewFrustumCorners[i];
+		inside /= 8;
+
+		sidePlanes[0] = FacingIn( new Plane( viewFrustumCorners[0], viewFrustumCorners[1], viewFrustumCorners[5] ), inside );
+		sidePlanes[1] = FacingIn( new Plane( viewFrustumCorners[2], viewFrustumCorners[3], viewFrustumCorners[7] ), inside );
+		sidePlanes[2] = FacingIn( new Plane( viewFrustumCorners[0], viewFrustumCorners[3], viewFrustumCorners[7] ), inside );
+		sidePlanes[3] = FacingIn( new Plane( viewFrustumCorners[1], viewFrustumCorners[2], viewFrustumCorners[6] ), inside );
+
+		static Plane FacingIn( Plane plane, Vector3 inside ) => plane.GetDistance( inside ) >= 0.0f
+			? plane
+			: new Plane { Normal = -plane.Normal, Distance = -plane.Distance };
 
 		// Compute camera forward from frustum geometry (near plane center → far plane center)
 		Vector3 nearCenter = (viewFrustumCorners[0] + viewFrustumCorners[1] + viewFrustumCorners[2] + viewFrustumCorners[3]) * 0.25f;
@@ -266,6 +281,30 @@ internal partial class ShadowMapper
 	}
 
 	/// <summary>
+	/// Where a cascade's pixels can be: inside the camera's side planes and its selection sphere, outside the earlier
+	/// cascade's. Grown by the filter's reach, so casters whose shadows land just outside are still drawn.
+	/// </summary>
+	static ShadowReceiverRegion GetReceivers( ReadOnlySpan<Plane> sidePlanes, Vector3 lightDirection, in Cascade cascade, float selectionRadius, Vector4 excluded, int shadowmapSize )
+	{
+		// PCF kernel at full softness plus normal offset, in this cascade's texels
+		const float marginTexels = 32.0f;
+		float margin = cascade.Width / shadowmapSize * marginTexels;
+
+		return new ShadowReceiverRegion
+		{
+			LightDirection = lightDirection.Normal,
+			Left = Grow( sidePlanes[0], margin ),
+			Right = Grow( sidePlanes[1], margin ),
+			Top = Grow( sidePlanes[2], margin ),
+			Bottom = Grow( sidePlanes[3], margin ),
+			Sphere = new Vector4( cascade.SphereCenter, selectionRadius + margin ),
+			Excluded = excluded.w > 0.0f ? new Vector4( excluded.x, excluded.y, excluded.z, MathF.Max( excluded.w - margin, 0.0f ) ) : default,
+		};
+
+		static Plane Grow( Plane plane, float margin ) => new() { Normal = plane.Normal, Distance = plane.Distance - margin };
+	}
+
+	/// <summary>
 	/// Snaps a position to the nearest shadowmap texel to prevent view-dependent aliasing.
 	/// </summary>
 	static Vector3 SnapToTexel( Vector3 position, Vector3 lightRight, Vector3 lightUp, Vector3 lightForward, float frustumRadius, int shadowmapSize )
@@ -352,9 +391,19 @@ internal partial class ShadowMapper
 		// The cascades face the way the light travels
 		var rotation = light.Direction.EulerAngles.ToRotation();
 		Span<Cascade> cascades = stackalloc Cascade[numCascades];
-		int cascadeCount = GetCascades( cascades, View.InverseViewProjection, rotation, numCascades, 1.0f, farClip, splitRatio, shadowmapSize, cameraPosition );
+		Span<Plane> sidePlanes = stackalloc Plane[4];
+		int cascadeCount = GetCascades( cascades, sidePlanes, View.InverseViewProjection, rotation, numCascades, 1.0f, farClip, splitRatio, shadowmapSize, cameraPosition );
 		cascades = cascades[..cascadeCount];
 		float baseHardness = 1.0f + light.Hardness * 4.0f;
+
+		// Cascade bounding spheres for GPU selection: a pixel samples the first one it's inside.
+		// Shrink non-last cascades by a PCF margin so the selection boundary stays
+		// inside the valid shadow map area. Without this, PCF near the sphere edge
+		// averages in cleared depth texels (no geometry), causing shadows to fade out.
+		float pcfMarginFraction = 4.0f * 2.0f / shadowmapSize;
+		Span<float> selectionRadii = stackalloc float[cascades.Length];
+		for ( int i = 0; i < cascades.Length; i++ )
+			selectionRadii[i] = i < cascades.Length - 1 ? cascades[i].SphereRadius * (1.0f - pcfMarginFraction) : cascades[i].SphereRadius;
 
 		for ( int i = 0; i < cascades.Length; i++ )
 		{
@@ -384,6 +433,8 @@ internal partial class ShadowMapper
 				HasExclusion = i > 0,
 				ExclusionCenter = i > 0 ? cascades[i - 1].SphereCenter : default,
 				ExclusionSize = i > 0 ? cascades[i - 1].SphereRadius / MathF.Sqrt( 2.0f ) : 0,
+				Receivers = GetReceivers( sidePlanes, rotation.Forward, cascade, selectionRadii[i],
+					i > 0 ? new Vector4( cascades[i - 1].SphereCenter, selectionRadii[i - 1] ) : default, shadowmapSize ),
 			};
 
 			Matrix viewProjection = Renderer.RenderShadowView( shadowView );
@@ -399,16 +450,7 @@ internal partial class ShadowMapper
 			gpuShadowData.CascadeHardness[i] = i == 0 ? baseHardness
 				: CalculateCascadeHardness( light.Hardness, cascade.Width / cascades[0].Width, ShadowFilter );
 
-			// Cascade bounding sphere for GPU selection (xyz = center, w = radiusSquared).
-			// Shrink non-last cascades by a PCF margin so the selection boundary stays
-			// inside the valid shadow map area. Without this, PCF near the sphere edge
-			// averages in cleared depth texels (no geometry), causing shadows to fade out.
-			float pcfMarginTexels = 4.0f;
-			float pcfMarginFraction = pcfMarginTexels * 2.0f / shadowmapSize;
-			float selectionRadius = (i < cascades.Length - 1)
-				? cascade.SphereRadius * (1.0f - pcfMarginFraction)
-				: cascade.SphereRadius;
-			gpuShadowData.CascadeSpheres[i] = new Vector4( cascade.SphereCenter, selectionRadius * selectionRadius );
+			gpuShadowData.CascadeSpheres[i] = new Vector4( cascade.SphereCenter, selectionRadii[i] * selectionRadii[i] );
 
 			// Per-cascade depth bias: scale by texel-to-depth ratio relative to cascade 0.
 			// Width/Far captures world-space texel size normalized by the cascade's depth range,

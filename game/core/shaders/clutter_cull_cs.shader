@@ -76,6 +76,17 @@ CS
 	// Shadow views skip batches that don't cast shadows.
 	int ClutterShadowPass < Attribute( "ClutterShadowPass" ); >;
 
+	// Sun cascades: skip casters whose shadow can't reach a pixel that samples this cascade. The pixels are inside the
+	// camera's side planes and the receiver sphere, and outside the excluded sphere (an earlier cascade's).
+	int    ClutterCullReceivers    < Attribute( "ClutterCullReceivers" ); >;
+	float3 ClutterReceiverLight    < Attribute( "ClutterReceiverLight" ); >; // the way the light travels
+	float4 ClutterReceiverPlane0   < Attribute( "ClutterReceiverPlane0" ); >; // xyz = normal facing in, w = distance
+	float4 ClutterReceiverPlane1   < Attribute( "ClutterReceiverPlane1" ); >;
+	float4 ClutterReceiverPlane2   < Attribute( "ClutterReceiverPlane2" ); >;
+	float4 ClutterReceiverPlane3   < Attribute( "ClutterReceiverPlane3" ); >;
+	float4 ClutterReceiverSphere   < Attribute( "ClutterReceiverSphere" ); >; // xyz = center, w = radius
+	float4 ClutterReceiverExcluded < Attribute( "ClutterReceiverExcluded" ); >; // w = 0 for none
+
 	// Plain float4x4: attribute matrices are stored raw and read column-major, so the CPU uploads
 	// the transpose and we consume it as mul( M, pos ). A row_major qualifier here breaks the planes.
 	float4x4 ClutterWorldToProjection < Attribute( "ClutterWorldToProjection" ); >;
@@ -120,6 +131,62 @@ CS
 		return true;
 	}
 
+	// Clips the sphere's path along the light to the receiver region and checks something is left.
+	// Matches ShadowReceiverRegion.MayShadow.
+	bool MayShadowReceivers( float3 center, float radius )
+	{
+		float3 light = ClutterReceiverLight;
+
+		// Where the path is within the receiver sphere grown by the caster's radius
+		float3 toCenter = center - ClutterReceiverSphere.xyz;
+		float reach = ClutterReceiverSphere.w + radius;
+		float b = dot( toCenter, light );
+		float discriminant = b * b - ( dot( toCenter, toCenter ) - reach * reach );
+		if ( discriminant < 0.0 )
+			return false;
+
+		float root = sqrt( discriminant );
+		float t0 = max( -b - root, 0.0 );
+		float t1 = -b + root;
+
+		// Then in front of every side plane, grown by the radius
+		float4 planes[4] = { ClutterReceiverPlane0, ClutterReceiverPlane1, ClutterReceiverPlane2, ClutterReceiverPlane3 };
+
+		[unroll]
+		for ( int i = 0; i < 4; i++ )
+		{
+			float distance = dot( planes[i].xyz, center ) - planes[i].w + radius;
+			float rate = dot( planes[i].xyz, light );
+
+			if ( abs( rate ) < 1e-6 )
+			{
+				if ( distance < 0.0 )
+					return false;
+				continue;
+			}
+
+			float t = -distance / rate;
+			if ( rate > 0.0 ) t0 = max( t0, t );
+			else t1 = min( t1, t );
+		}
+
+		if ( t0 > t1 )
+			return false;
+
+		// Pixels in the earlier cascade's sphere never sample this one. The sphere is convex, so the path is inside
+		// it if both ends are.
+		float inner = ClutterReceiverExcluded.w - radius;
+		if ( inner > 0.0 )
+		{
+			float3 a = center + light * t0 - ClutterReceiverExcluded.xyz;
+			float3 e = center + light * t1 - ClutterReceiverExcluded.xyz;
+			if ( dot( a, a ) <= inner * inner && dot( e, e ) <= inner * inner )
+				return false;
+		}
+
+		return true;
+	}
+
 	// Matches the native LOD metric: screen coverage of a 0.5-radius sphere, then walk switch distances.
 	uint ComputeLod( float3 worldPos, float scale, ClutterBatch_t batch )
 	{
@@ -160,6 +227,9 @@ CS
 			return Culled;
 
 		if ( ClutterMaxDistance > 0.0 && length( sphere.xyz - ClutterLodCameraPos ) - sphere.w > ClutterMaxDistance )
+			return Culled;
+
+		if ( ClutterCullReceivers != 0 && !MayShadowReceivers( sphere.xyz, sphere.w ) )
 			return Culled;
 
 		float scale = ( batch.ModelRadius > 1e-6 ) ? ( sphere.w / batch.ModelRadius ) : 1.0;

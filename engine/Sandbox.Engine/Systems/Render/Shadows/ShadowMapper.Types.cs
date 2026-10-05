@@ -148,6 +148,12 @@ internal struct ShadowViewDesc
 	public float ExclusionSize;
 
 	/// <summary>
+	/// Sun cascades: where the pixels that sample this view can be, published on the view for renderers that cull
+	/// casters themselves.
+	/// </summary>
+	public ShadowReceiverRegion? Receivers;
+
+	/// <summary>
 	/// Static casters already rendered into this map: it's copied in instead of clearing, and only
 	/// dynamic casters are rendered on top.
 	/// </summary>
