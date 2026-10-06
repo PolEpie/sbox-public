@@ -82,6 +82,12 @@ internal partial class ShadowMapper
 
 	private static readonly string[] CascadeNames = ["CSM Cascade 0", "CSM Cascade 1", "CSM Cascade 2", "CSM Cascade 3"];
 
+	/// <summary>
+	/// Outer fraction of a cascade's selection radius that cross-fades into the next cascade.
+	/// Must match CASCADE_BLEND_FRACTION in DirectionalLightShadow.hlsl.
+	/// </summary>
+	const float CascadeBlendFraction = 0.1f;
+
 	internal static float CalculateCascadeHardness( float shadowHardness, float cascadeScale, int shadowFilter )
 	{
 		float hardness = Math.Clamp( shadowHardness, 0.0f, 1.0f );
@@ -433,8 +439,9 @@ internal partial class ShadowMapper
 				HasExclusion = i > 0,
 				ExclusionCenter = i > 0 ? cascades[i - 1].SphereCenter : default,
 				ExclusionSize = i > 0 ? cascades[i - 1].SphereRadius / MathF.Sqrt( 2.0f ) : 0,
+				// Pixels in the previous cascade's blend band sample this one too, so only exclude inside the band.
 				Receivers = GetReceivers( sidePlanes, rotation.Forward, cascade, selectionRadii[i],
-					i > 0 ? new Vector4( cascades[i - 1].SphereCenter, selectionRadii[i - 1] ) : default, shadowmapSize ),
+					i > 0 ? new Vector4( cascades[i - 1].SphereCenter, selectionRadii[i - 1] * (1.0f - CascadeBlendFraction) ) : default, shadowmapSize ),
 			};
 
 			Matrix viewProjection = Renderer.RenderShadowView( shadowView );
