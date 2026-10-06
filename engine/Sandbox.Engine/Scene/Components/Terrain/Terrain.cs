@@ -130,7 +130,7 @@ public sealed partial class Terrain : Collider, Component.ExecuteInEditor
 		// Storage is set while the scene is still loading - OnEnabled creates right after, and a
 		// prefab cache scene never enables at all. Creating here too inflates the maps, uploads the
 		// textures and bakes normals for nothing.
-		if ( !Active || !HasRunOnEnabled )
+		if ( !Active )
 			return;
 
 		DisposeRenderResources();
