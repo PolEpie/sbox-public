@@ -152,6 +152,17 @@ public sealed partial class ClutterGridSystem : GameObjectSystem
 	}
 
 	/// <summary>
+	/// Called by <see cref="Model.OnReloaded"/>: every layer drawing the model rebuilds its batches from the new data.
+	/// </summary>
+	internal void OnModelReloaded( Model model )
+	{
+		_painted?.OnModelReloaded( model );
+
+		foreach ( var layer in _componentToLayer.Values )
+			layer.OnModelReloaded( model );
+	}
+
+	/// <summary>
 	/// Pushes the active camera's LOD parameters to the clutter scene objects for GPU LOD selection.
 	/// </summary>
 	private static void PublishLodParameters( CameraComponent camera )
