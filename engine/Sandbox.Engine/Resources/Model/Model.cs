@@ -96,6 +96,8 @@ public sealed partial class Model : Resource
 
 				c.OnModelReloaded();
 			}
+
+			scene.GetSystem<Sandbox.Clutter.ClutterGridSystem>()?.OnModelReloaded( this );
 		}
 	}
 
