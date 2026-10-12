@@ -384,6 +384,45 @@ class ClutterLayer
 		_dirty = false;
 	}
 
+	/// <summary>
+	/// Rebuilds the batches drawing <paramref name="model"/> after it recompiles. A batch reads the model's LOD count,
+	/// switch distances, draw ranges and bounds once, when it's created, so without this a recompiled model keeps
+	/// drawing with the old ones until the scene reloads.
+	/// </summary>
+	public void OnModelReloaded( Model model )
+	{
+		List<ClutterBatchKey> stale = null;
+		foreach ( var key in _batches.Keys )
+		{
+			if ( key.Model == model )
+				(stale ??= []).Add( key );
+		}
+
+		if ( stale is null )
+			return;
+
+		foreach ( var key in stale )
+		{
+			_renderer?.RemoveBatch( _batches[key] );
+			_batches.Remove( key );
+		}
+
+		// Re-prepare every tile holding the model: its instance spheres were sized from the old bounds.
+		foreach ( var (coord, prepared) in _preparedTiles )
+		{
+			foreach ( var key in stale )
+			{
+				if ( prepared.ContainsKey( key ) )
+				{
+					_renderDirtyTiles.Add( coord );
+					break;
+				}
+			}
+		}
+
+		RebuildBatches();
+	}
+
 	public void ClearAllTiles()
 	{
 		foreach ( var tile in Tiles.Values )
