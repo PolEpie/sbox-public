@@ -103,6 +103,7 @@ internal static partial class ConVarSystem
 		foreach ( var (name, member) in Members.Where( x => x.Value.IsFromAssembly( assembly ) ).ToArray() )
 		{
 			RememberValue( member );
+			Sandbox.Engine.Settings.CustomPostProcessEffect.OnConVarRemoved( member );
 			Members.Remove( name );
 		}
 	}
@@ -151,6 +152,12 @@ internal static partial class ConVarSystem
 		if ( command.IsCheat && command.DefaultValue is not null && !Game.CheatsEnabled )
 		{
 			command.Value = command.DefaultValue;
+		}
+
+		// Last, so it sees whatever the ConVar loaded and can put the stored setting over it
+		if ( command is ManagedCommand managed )
+		{
+			Sandbox.Engine.Settings.CustomPostProcessEffect.OnConVarAdded( managed );
 		}
 	}
 
