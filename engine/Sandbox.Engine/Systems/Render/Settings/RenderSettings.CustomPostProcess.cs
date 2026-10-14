@@ -36,7 +36,7 @@ public sealed class CustomPostProcessEffect
 	/// <summary>Called by <see cref="ConVarSystem"/> for every managed ConVar it registers.</summary>
 	internal static void OnConVarAdded( ManagedCommand command )
 	{
-		if ( command.member is not PropertyInfo property || !property.IsDefined( typeof( PostProcessSettingAttribute ) ) )
+		if ( command.member is not PropertyInfo property || !HasPostProcessSettingAttribute( property ) )
 			return;
 
 		if ( property.PropertyType != typeof( int ) )
@@ -59,6 +59,21 @@ public sealed class CustomPostProcessEffect
 		// The ConVar just loaded its own saved value. The stored setting wins, the same way the
 		// built-in effects get their quality profiles pushed at boot.
 		effect.Push( RenderSettings.Instance.GetEffectQuality( command.Name ) );
+	}
+
+	/// <summary>
+	/// Matched by name, not type, so a game can declare its own <c>PostProcessSettingAttribute</c>
+	/// and still compile on engines that predate ours.
+	/// </summary>
+	static bool HasPostProcessSettingAttribute( PropertyInfo property )
+	{
+		foreach ( var attribute in property.CustomAttributes )
+		{
+			if ( attribute.AttributeType.Name == nameof( PostProcessSettingAttribute ) )
+				return true;
+		}
+
+		return false;
 	}
 
 	/// <summary>Called by <see cref="ConVarSystem"/> as it drops a ConVar.</summary>
