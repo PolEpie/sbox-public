@@ -9,6 +9,10 @@ namespace Sandbox;
 /// the same scale as <c>r_ao_quality</c>. The row takes its name and description from
 /// <see cref="TitleAttribute"/> and <see cref="DescriptionAttribute"/> on the property.
 /// </para>
+/// <para>
+/// It's matched by name, so a game that must also run on engines without it can declare its own
+/// <c>PostProcessSettingAttribute</c> and use that instead. Older engines treat it as a plain ConVar.
+/// </para>
 /// </summary>
 /// <example>
 /// <code>
