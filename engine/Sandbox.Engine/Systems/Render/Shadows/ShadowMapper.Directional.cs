@@ -167,33 +167,43 @@ internal partial class ShadowMapper
 	}
 
 	/// <summary>
-	/// Given a camera view frustum, computes cascade frustums into the provided span, and the camera's side planes
+	/// Given a camera view, computes cascade frustums into the provided span, and the camera's side planes
 	/// (left, right, top, bottom, facing in) into <paramref name="sidePlanes"/>. Returns the number of cascades written.
+	///
+	/// Cascades are fit in view space, where the camera is at the origin, and only their centers move into the world.
+	/// Their size then only depends on the projection, so it's the same every frame however far the camera is from the
+	/// world origin. Fit in world space, float error resized them as the camera moved, and that slides the texel grid.
 	/// </summary>
-	static int GetCascades( Span<Cascade> result, Span<Plane> sidePlanes, in System.Numerics.Matrix4x4 invViewProj, Rotation rotation, int numCascades, float NearClip, float FarClip, float lambda, int shadowmapSize, Vector3 cameraPosition )
+	static int GetCascades( Span<Cascade> result, Span<Plane> sidePlanes, in ShadowViewInfo view, Rotation rotation, int numCascades, float NearClip, float FarClip, float lambda, int shadowmapSize )
 	{
-		// Project frustum corners into world space from clip space
+		// Project frustum corners into view space from clip space
 		Span<Vector3> viewFrustumCorners = stackalloc Vector3[8];
 		for ( int i = 0; i < 8; i++ )
 		{
-			var corner = System.Numerics.Vector4.Transform( Corners[i], invViewProj );
+			var corner = System.Numerics.Vector4.Transform( Corners[i], view.ProjectionToView );
 			viewFrustumCorners[i] = new Vector3( corner.X, corner.Y, corner.Z ) / corner.W;
 		}
 
-		// The camera's side planes, from its near and far corners
+		// The camera's side planes, from its near and far corners, moved into the world
 		Vector3 inside = Vector3.Zero;
 		for ( int i = 0; i < 8; i++ )
 			inside += viewFrustumCorners[i];
 		inside /= 8;
 
-		sidePlanes[0] = FacingIn( new Plane( viewFrustumCorners[0], viewFrustumCorners[1], viewFrustumCorners[5] ), inside );
-		sidePlanes[1] = FacingIn( new Plane( viewFrustumCorners[2], viewFrustumCorners[3], viewFrustumCorners[7] ), inside );
-		sidePlanes[2] = FacingIn( new Plane( viewFrustumCorners[0], viewFrustumCorners[3], viewFrustumCorners[7] ), inside );
-		sidePlanes[3] = FacingIn( new Plane( viewFrustumCorners[1], viewFrustumCorners[2], viewFrustumCorners[6] ), inside );
+		sidePlanes[0] = ToWorld( FacingIn( new Plane( viewFrustumCorners[0], viewFrustumCorners[1], viewFrustumCorners[5] ), inside ), view );
+		sidePlanes[1] = ToWorld( FacingIn( new Plane( viewFrustumCorners[2], viewFrustumCorners[3], viewFrustumCorners[7] ), inside ), view );
+		sidePlanes[2] = ToWorld( FacingIn( new Plane( viewFrustumCorners[0], viewFrustumCorners[3], viewFrustumCorners[7] ), inside ), view );
+		sidePlanes[3] = ToWorld( FacingIn( new Plane( viewFrustumCorners[1], viewFrustumCorners[2], viewFrustumCorners[6] ), inside ), view );
 
 		static Plane FacingIn( Plane plane, Vector3 inside ) => plane.GetDistance( inside ) >= 0.0f
 			? plane
 			: new Plane { Normal = -plane.Normal, Distance = -plane.Distance };
+
+		static Plane ToWorld( Plane plane, in ShadowViewInfo view )
+		{
+			Vector3 normal = System.Numerics.Vector3.TransformNormal( plane.Normal, view.ViewToWorldRotation );
+			return new Plane { Normal = normal, Distance = plane.Distance + Vector3.Dot( normal, view.CameraPosition ) };
+		}
 
 		// Compute camera forward from frustum geometry (near plane center → far plane center)
 		Vector3 nearCenter = (viewFrustumCorners[0] + viewFrustumCorners[1] + viewFrustumCorners[2] + viewFrustumCorners[3]) * 0.25f;
@@ -202,14 +212,14 @@ internal partial class ShadowMapper
 		Vector3 camForward = fwd / fwd.Length;
 
 		// View-space depth of the camera's actual near/far clip planes
-		float cameraNearDepth = Vector3.Dot( camForward, nearCenter - cameraPosition );
-		float cameraFarDepth = Vector3.Dot( camForward, farCenter - cameraPosition );
+		float cameraNearDepth = Vector3.Dot( camForward, nearCenter );
+		float cameraFarDepth = Vector3.Dot( camForward, farCenter );
 		float cameraDepthRange = cameraFarDepth - cameraNearDepth;
 
 		// FOV compensation: scale the effective shadow far distance using sphere-frustum
 		// intersection so cascade sizes remain stable across different camera FOVs.
 		// See: Valient, "The Rendering Technology of Killzone 2", GDC 2009
-		float diagonalRatio = (viewFrustumCorners[4] - cameraPosition).Length / cameraFarDepth;
+		float diagonalRatio = viewFrustumCorners[4].Length / cameraFarDepth;
 		float fov = 2.0f * MathF.Atan2( (viewFrustumCorners[0] - viewFrustumCorners[1]).Length * 0.5f, cameraNearDepth ) * (180.0f / MathF.PI);
 		float farPlaneScale = CalculateFarPlaneScale( fov, diagonalRatio );
 		FarClip *= farPlaneScale;
@@ -258,6 +268,9 @@ internal partial class ShadowMapper
 				frustumRadius = Math.Max( frustumRadius, (splitFrustumCorners[l] - splitFrustumCenter).LengthSquared );
 			frustumRadius = MathF.Ceiling( MathF.Sqrt( frustumRadius ) * 16.0f ) / 16.0f;
 
+			// The radius stays in view space, only the center moves into the world
+			Vector3 sphereCenter = ViewToWorld( splitFrustumCenter, view );
+
 			// Pull the shadow camera back toward the light beyond the bounding sphere to catch
 			// off-screen casters (tall buildings, trees behind the camera, etc.)
 			const float casterExtension = 4096f;
@@ -266,7 +279,7 @@ internal partial class ShadowMapper
 
 			// Place camera at the light-facing edge of the bounding sphere, pulled back further for casters.
 			// Near = 0 (at camera), Far = full sphere diameter + pullback.
-			Vector3 cascadeOrigin = splitFrustumCenter - lightForward * (frustumRadius + casterExtension);
+			Vector3 cascadeOrigin = sphereCenter - lightForward * (frustumRadius + casterExtension);
 
 			// Snap to nearest texel to prevent view-dependent shadow shimmer
 			cascadeOrigin = SnapToTexel( cascadeOrigin, rotation.Right, rotation.Up, lightForward, frustumRadius, shadowmapSize );
@@ -279,13 +292,16 @@ internal partial class ShadowMapper
 				Far = frustumRadius * 2f + casterExtension,
 				Width = frustumRadius * 2f,
 				Height = frustumRadius * 2f,
-				SphereCenter = splitFrustumCenter,
+				SphereCenter = sphereCenter,
 				SphereRadius = frustumRadius
 			};
 		}
 
 		return count;
 	}
+
+	static Vector3 ViewToWorld( Vector3 position, in ShadowViewInfo view )
+		=> (Vector3)System.Numerics.Vector3.TransformNormal( position, view.ViewToWorldRotation ) + view.CameraPosition;
 
 	/// <summary>
 	/// Where a cascade's pixels can be: inside the camera's side planes and its selection sphere, outside the earlier
@@ -402,7 +418,7 @@ internal partial class ShadowMapper
 		var rotation = light.Direction.EulerAngles.ToRotation();
 		Span<Cascade> cascades = stackalloc Cascade[numCascades];
 		Span<Plane> sidePlanes = stackalloc Plane[4];
-		int cascadeCount = GetCascades( cascades, sidePlanes, View.InverseViewProjection, rotation, numCascades, 1.0f, farClip, splitRatio, shadowmapSize, cameraPosition );
+		int cascadeCount = GetCascades( cascades, sidePlanes, View, rotation, numCascades, 1.0f, farClip, splitRatio, shadowmapSize );
 		cascades = cascades[..cascadeCount];
 		float baseHardness = 1.0f + light.Hardness * 4.0f;
 
