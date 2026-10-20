@@ -24,6 +24,9 @@ public partial class Menu
 	Menu _hoverRow;
 	float _hoverSince;
 
+	// A key moved the highlight; the mouse resting where it is mustn't undo that until it moves
+	bool _keyboardHighlight;
+
 	/// <summary>
 	/// The row with the keyboard or hover highlight, in this menu's list.
 	/// </summary>
@@ -62,6 +65,11 @@ public partial class Menu
 	protected override void OnMouseOut( MousePanelEvent e )
 	{
 		base.OnMouseOut( e );
+
+		// Leaving a child, such as the icon, bubbles up here too. The row still has :hover then -
+		// dropping the highlight would blink it off until the next mouse move put it back.
+		if ( HasHovered ) return;
+
 		ParentMenu?.OnRowLeft( this );
 	}
 
@@ -103,6 +111,7 @@ public partial class Menu
 	void OnRowHovered( Menu row )
 	{
 		SetHighlighted( row );
+		_keyboardHighlight = false;
 
 		if ( _hoverRow == row ) return;
 
@@ -116,7 +125,12 @@ public partial class Menu
 	/// </summary>
 	void OnRowLeft( Menu row )
 	{
-		if ( _hoverRow == row ) _hoverRow = null;
+		if ( _hoverRow == row )
+		{
+			_hoverRow = null;
+			_hoverSince = RealTime.Now;
+		}
+
 		if ( Highlighted == row && !row.IsOpen ) SetHighlighted( null );
 	}
 
@@ -126,12 +140,10 @@ public partial class Menu
 	/// </summary>
 	void TickHover()
 	{
-		if ( _hoverRow is null ) return;
-
 		var openChild = _options.FirstOrDefault( x => x.IsOpen );
 		var waited = RealTime.Now - _hoverSince;
 
-		if ( _hoverRow.HasOptions && _hoverRow.Enabled && !_hoverRow.IsOpen )
+		if ( _hoverRow is { HasOptions: true, Enabled: true, IsOpen: false } )
 		{
 			if ( waited < SubmenuOpenDelay ) return;
 
@@ -140,10 +152,14 @@ public partial class Menu
 			return;
 		}
 
-		if ( openChild is null || openChild == _hoverRow ) return;
+		if ( openChild is null || openChild == _hoverRow || _keyboardHighlight ) return;
 
 		// The cursor made it into the submenu - leave it up
 		if ( openChild.ListPanel is { } list && list.HasHovered ) return;
+
+		// No row under the cursor: still elsewhere if it's on this list - a separator, the padding,
+		// or a row whose hover we lost track of. Off the menu entirely, the submenu stays up.
+		if ( _hoverRow is null && (_list is not { HasHovered: true } || openChild.HasHovered) ) return;
 
 		if ( waited >= SubmenuCloseDelay )
 		{
@@ -158,6 +174,7 @@ public partial class Menu
 	{
 		// The keyboard has the highlight now - the mouse gets it back when it moves
 		_hoverRow = null;
+		_keyboardHighlight = true;
 
 		switch ( e.Button )
 		{

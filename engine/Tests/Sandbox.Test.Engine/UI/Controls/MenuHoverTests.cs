@@ -156,6 +156,71 @@ public class MenuHoverTest
 	}
 
 	/// <summary>
+	/// Moving between parts of one row - its text, its icon - fires mouse-out on the part left,
+	/// which bubbles to the row. The row is still under the cursor, so it stays highlighted.
+	/// </summary>
+	[TestMethod]
+	public void MovingWithinARowKeepsItHighlighted()
+	{
+		var source = new Panel { Parent = surface.Root };
+		source.Style.Width = 100;
+		source.Style.Height = 30;
+
+		var menu = new Menu( "File" );
+		menu.AddOption( "New" );
+		var row = menu.AddOption( "Open", "folder_open" );
+
+		Frame();
+		menu.Open( source, Popup.PositionMode.BelowLeft );
+		Frame();
+
+		HoverAt( row.Box.Rect.Center );
+		var first = surface.Hovered;
+		Assert.AreEqual( row, menu.Highlighted );
+
+		HoverAt( new Vector2( row.Box.Rect.Left + 12, row.Box.Rect.Center.y ) );
+		Assert.AreNotEqual( first, surface.Hovered, "moved onto another part of the row" );
+		Assert.AreEqual( row, surface.Hovered?.AncestorsAndSelf.OfType<Menu>().FirstOrDefault() );
+		Assert.AreEqual( row, menu.Highlighted );
+
+		HoverAt( row.Box.Rect.Center );
+		Assert.AreEqual( row, menu.Highlighted );
+	}
+
+	/// <summary>
+	/// The cursor goes from a submenu's row onto the list but no row - its padding here, a
+	/// separator's margin in practice. It's still in the menu, elsewhere, so the submenu closes.
+	/// </summary>
+	[TestMethod]
+	public void LeavingASubmenuRowForTheListClosesTheSubmenu()
+	{
+		var source = new Panel { Parent = surface.Root };
+		source.Style.Width = 100;
+		source.Style.Height = 30;
+
+		var menu = new Menu( "File" );
+		var recent = menu.AddMenu( "Recent" );
+		recent.AddOption( "a.txt" );
+		menu.AddOption( "Save" );
+
+		Frame();
+		menu.Open( source, Popup.PositionMode.BelowLeft );
+		Frame();
+
+		HoverAt( recent.Box.Rect.Center );
+		Frame();
+		Assert.IsTrue( recent.IsOpen );
+
+		var list = menu.ListPanel.Box.Rect;
+		HoverAt( new Vector2( list.Center.x, list.Top + 2 ) );
+		Frame();
+
+		Assert.AreEqual( menu.ListPanel, surface.Hovered, "on the list, not a row" );
+		Assert.IsFalse( recent.IsOpen );
+		Assert.IsTrue( menu.IsOpen );
+	}
+
+	/// <summary>
 	/// Backing out of a submenu in-surface: its list was focused and is now deleted, which
 	/// clears the focus. The parent list has to end up with it or the keyboard goes dead.
 	/// </summary>
