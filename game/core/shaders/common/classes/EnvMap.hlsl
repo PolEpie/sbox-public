@@ -57,7 +57,7 @@ struct EnvMap
 
             // Specular environment map sampling
             float3 vNormalWarpWs = normalize(lerp(vParallaxReflectionCubemapLocal, WorldNormal, vLevel.x)); // Used to reduce specular aliasing
-            float3 vCubeSample = SampleEnvironmentMapLevel(vNormalWarpWs, vLevel.x, UniformIndex(index));
+            float3 vCubeSample = SampleEnvironmentMapLevel(vNormalWarpWs, vLevel.x, asDynamicUniform(UniformIndex(index)));
 
             // Accumulate color contribution
             vColor = lerp(vColor, vCubeSample, 1.0f - flDistAccumulated);

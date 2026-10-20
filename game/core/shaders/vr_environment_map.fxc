@@ -75,7 +75,7 @@ float3 SampleEnvironmentMapLevel( float3 vReflectionDirWs, float flLevel, uint n
 // Fast path for a wave-uniform envmap, e.g. inside ClusterForEach
 float3 SampleEnvironmentMapLevel( float3 vReflectionDirWs, float flLevel, dynamic_uniform UniformIndex nEnvMap )
 {
-	TextureCube tEnvMap = Bindless::GetTextureCube( UniformIndex( BinnedEnvMapBuffer[ nEnvMap.index ].GetCubemapIndex() ) );
+	TextureCube tEnvMap = Bindless::GetTextureCube( asDynamicUniform( UniformIndex( BinnedEnvMapBuffer[ nEnvMap.index ].GetCubemapIndex() ) ) );
 	return SampleEnvMapLevel( vReflectionDirWs.xyz, flLevel, tEnvMap ).rgb * EnvMapColor( nEnvMap.index );
 }
 
