@@ -86,6 +86,10 @@ namespace Sandbox.Upgraders
 
 		public MethodInfo GetMatchingLambdaMethod( MethodInfo oldMethod )
 		{
+			// Lambdas from non-swapped assemblies never change, even inside generic types (e.g. BCL socket callbacks).
+			// IsSwappedType checks generic arguments too, so display classes closed over swapped types still get matched.
+			if ( !IsSwappedType( oldMethod.DeclaringType ) ) return oldMethod;
+
 			if ( CachedUpgrader.TryGetCachedInstance( oldMethod, out var cached ) ) return (MethodInfo)cached;
 
 			if ( !GetLambdaMethodInfo( oldMethod,

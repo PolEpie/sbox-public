@@ -4,6 +4,7 @@ extern alias Before;
 using System;
 using System.Linq;
 using System.Reflection;
+using System.Threading;
 using System.Threading.Tasks;
 using Facepunch.ActionGraphs;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
@@ -46,6 +47,44 @@ namespace HotloadTests
 			After::TestClass1.Instance.ActionSimple();
 
 			Assert.AreEqual( "Action Simple!", testString );
+		}
+
+		public class NonSwappedOperation
+		{
+			public bool Cancelled;
+			public void TryCancel() => Cancelled = true;
+		}
+
+		// Mirrors SocketAsyncContext.OperationQueue<TOperation>.StartAsyncOperation, which backs pipe/socket reads on Unix.
+		private struct NonSwappedQueue<TOperation> where TOperation : NonSwappedOperation
+		{
+			public CancellationTokenRegistration Start( TOperation operation, CancellationToken cancellationToken )
+			{
+				return cancellationToken.UnsafeRegister( s => ((TOperation)s!).TryCancel(), operation );
+			}
+		}
+
+		/// <summary>
+		/// A pending cancellation callback from a generic non-swapped type must survive a hotload,
+		/// not be replaced with an error delegate.
+		/// </summary>
+		[TestMethod]
+		public void NonSwappedGenericCancellation()
+		{
+			var operation = new NonSwappedOperation();
+			using var cts = new CancellationTokenSource();
+			new NonSwappedQueue<NonSwappedOperation>().Start( operation, cts.Token );
+
+			Before::TestClass1.Instance = new Before::TestClass1();
+			Before::TestClass1.Instance.ActionSimple = cts.Cancel;
+
+			var result = Hotload();
+
+			Assert.AreEqual( 0, result.Warnings.Count() );
+
+			After::TestClass1.Instance.ActionSimple();
+
+			Assert.IsTrue( operation.Cancelled );
 		}
 
 		/// <summary>
