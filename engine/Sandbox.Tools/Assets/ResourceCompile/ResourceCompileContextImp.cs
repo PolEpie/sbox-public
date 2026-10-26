@@ -200,8 +200,8 @@ unsafe class ResourceCompileContextImp : ResourceCompileContext, IDisposable
 
 			foreach ( var e in jsonobj )
 			{
-				// component type names aren't asset references, but can look like one (eg Sandbox.Decal)
-				if ( e.Key.Equals( "__type", StringComparison.OrdinalIgnoreCase ) )
+				// type names aren't asset references, but can look like one (eg Sandbox.Decal, or Sandbox.Scene in action graph "_type")
+				if ( e.Key.Equals( "__type", StringComparison.OrdinalIgnoreCase ) || e.Key == "_type" )
 					continue;
 
 				//

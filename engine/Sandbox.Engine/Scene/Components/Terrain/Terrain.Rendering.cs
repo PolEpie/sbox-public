@@ -69,7 +69,8 @@ public partial class Terrain
 
 	void CreateClipmapSceneObject()
 	{
-		if ( !Active || !Graphics.IsAvailable )
+		// Clipmap setters run during deserialization, possibly before Storage is assigned; Create() builds it once Storage lands
+		if ( !Active || !Graphics.IsAvailable || Storage is null )
 			return;
 
 		// These get created once
