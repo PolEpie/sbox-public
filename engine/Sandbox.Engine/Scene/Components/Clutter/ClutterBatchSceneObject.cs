@@ -15,6 +15,11 @@ internal class ClutterBatchSceneObject : SceneCustomObject
 	[ConVar( "clutter_cull_frustum_scale", ConVarFlags.Cheat )]
 	internal static float CullFrustumScale { get; set; } = 1.0f;
 
+	[ConVar( "clutter_shadow_caster_cull", ConVarFlags.Cheat, Help = "Cull clutter shadow casters that can't shadow anything the camera sees." )]
+	internal static bool ShadowCasterCull { get; set; } = true;
+
+	private static readonly string[] CasterPlaneNames = ["ClutterCasterPlane0", "ClutterCasterPlane1", "ClutterCasterPlane2", "ClutterCasterPlane3", "ClutterCasterPlane4", "ClutterCasterPlane5", "ClutterCasterPlane6", "ClutterCasterPlane7", "ClutterCasterPlane8", "ClutterCasterPlane9", "ClutterCasterPlane10", "ClutterCasterPlane11"];
+
 	private const int MaxLods = 4; // dont think we need more than that
 	private const uint EmptySphereBits = 0xBF800000; // -1.0f radius marks an unused slot.
 
@@ -366,6 +371,20 @@ internal class ClutterBatchSceneObject : SceneCustomObject
 		Graphics.Attributes.Set( "ClutterLodViewportWidth", Lod.ViewportWidth );
 		Graphics.Attributes.Set( "ClutterLodOrthoWidth", Lod.OrthoWidth );
 		Graphics.Attributes.Set( "ClutterWorldToProjection", Graphics.ViewFrustum.GetReverseZViewProjTranspose() );
+
+		// Directional shadow views also cull against the camera frustum swept toward the light (ShadowMapper.BuildCasterVolume).
+		int casterPlanes = 0;
+		if ( ShadowCasterCull && Graphics.LayerType == SceneLayerType.Shadow && ShadowMapper.DirectionalCasterVolume is { } volume )
+		{
+			var cf = Graphics.ViewFrustum;
+			if ( cf.IsOrthographic() && volume.Covers( cf.GetCameraPosition() ) )
+			{
+				casterPlanes = volume.PlaneCount;
+				for ( int i = 0; i < casterPlanes; i++ )
+					Graphics.Attributes.Set( CasterPlaneNames[i], volume.Planes[i] );
+			}
+		}
+		Graphics.Attributes.Set( "ClutterCasterPlaneCount", casterPlanes );
 
 		_commandList.ExecuteOnRenderThread();
 	}

@@ -24,6 +24,7 @@ the same world through native too, to compare the two.
 | `NativeReference.cs` | `NativeScene` mirrors the world as native `SceneModel`s, lights, cubemaps and fog. `NativeReference.Compare` is the per-pixel comparison. |
 | `HeavyScene.cs` | The Heavy Scene preset (Stress group): 900 varied citizen props (overrides, attributes of their own, a tenth moving), 40 animating citizens, 24 circling shadowed point and spot lights, the sun's contact shadows, glass, sprites, particles, tonemapping and bloom - a busy game's frame, GPU included. `-width 3840 -height 2160` makes it GPU-bound. Heavy Scene AO adds ambient occlusion, without the particles, since it compares isolated. |
 | `OcclusionScene.cs` | The Occlusion City preset (Stress group): a street-level lap of a city of hollow buildings with props along the pavements and props and dense sculptures (about 200k triangles each) in their courtyards, one lap per 600 frames - the case culling is for, so a regression shows in its GPU time. View > Occlusion Culling (or `+r_managed_occlusion 1` / `+r_occlusion_culling 1`) switches culling and shows the occluded count. The benchmark runs presets marked `CompareOcclusion` with culling off and then on. |
+| `TerrainScenes.cs` | Terrain and Clutter (rolling terrain under scattered boxes and spheres), and the Clutter Forest preset (Stress group): about 100k clutter spheres over a flat 32768 square, seen from just above the canopy with a 90° field of view and a 100k far plane, turning a full circle per 600 frames so the sun comes from every side. View > Clutter Shadow Caster Culling (or `+clutter_shadow_caster_cull 0`) switches the sun cascades' caster volume cull; the benchmark runs presets marked `CompareCasterCull` with it off and then on. |
 | `Benchmark.cs`, `FrameTimer.cs` | `-benchmark`: both renderers, warm-up, measured frames, results table, and the managed main thread by section (collect, prepare, setup, recording wall time and wait, the workers' total, stages, submit) from `RenderStats`. `-gpuprofile` adds GPU time by layer, from the engine's GPU profiler. |
 | `SceneViewport.cs` | The see-through panel the world renders into: orbiting and zooming. |
 | `LodTestModel.cs`, `SkyCube.cs` | Test assets built at runtime: a model whose LODs are different shapes, and a real cubemap for fog. |
@@ -46,6 +47,7 @@ From `game/`:
 bin/managed/scenelab.exe -scene "All Shadows"                          # interactive
 bin/managed/scenelab.exe -scene "Reflections" -capture out.png -native # parity; exit code 2 on failure
 bin/managed/scenelab.exe -benchmark "10k Boxes;50k Mixed" -novsync     # ; separates scenes
+bin/managed/scenelab.exe -benchmark "Clutter Forest" -novsync -gpuprofile # caster cull off vs on, GPU by layer
 bin/managed/scenelab.exe -parity                                    # compare every preset
 bin/managed/scenelab.exe -parity "Sun Shadows;Reflections"            # compare selected presets
 ```

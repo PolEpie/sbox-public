@@ -81,6 +81,103 @@ internal partial class ShadowMapper
 		new(  1, -1, 0, 1 ), // far tr
 	];
 
+	// Faces of the corner hexahedron (indices into Corners order): near, far, then the four sides.
+	private static readonly int[][] HullFaces =
+	[
+		[0, 1, 2, 3],
+		[4, 5, 6, 7],
+		[0, 1, 5, 4],
+		[1, 2, 6, 5],
+		[2, 3, 7, 6],
+		[3, 0, 4, 7],
+	];
+
+	// Edges of the corner hexahedron: two corners and the two faces sharing them.
+	private static readonly (int A, int B, int FaceA, int FaceB)[] HullEdges =
+	[
+		(0, 1, 0, 2), (1, 2, 0, 3), (2, 3, 0, 4), (3, 0, 0, 5),
+		(4, 5, 1, 2), (5, 6, 1, 3), (6, 7, 1, 4), (7, 4, 1, 5),
+		(0, 4, 2, 5), (1, 5, 2, 3), (2, 6, 3, 4), (3, 7, 4, 5),
+	];
+
+	/// <summary>
+	/// Planes of the shadow caster volume for a directional light: the convex hull of <paramref name="corners"/> swept
+	/// toward the light (along -lightDirection) to infinity. Only casters inside it can shadow anything inside the hull.
+	/// Corners are the 8 frustum corners in <see cref="Corners"/> order (near ring 0-3, far ring 4-7). Output planes point
+	/// inward: xyz = unit normal, w = -distance, so dot(xyz, p) + w is the signed distance. Returns the plane count (≤ 12).
+	/// </summary>
+	internal static int BuildCasterVolume( ReadOnlySpan<Vector3> corners, Vector3 lightDirection, Span<Vector4> planes )
+	{
+		Vector3 centroid = Vector3.Zero;
+		for ( int i = 0; i < 8; i++ )
+			centroid += corners[i];
+		centroid /= 8;
+
+		int count = 0;
+		Span<bool> kept = stackalloc bool[HullFaces.Length];
+		for ( int f = 0; f < HullFaces.Length; f++ )
+		{
+			var face = HullFaces[f];
+			var plane = Inward( new Plane( corners[face[0]], corners[face[1]], corners[face[2]] ), centroid );
+
+			// A face looking toward the light still bounds the volume once it is swept away from the light
+			kept[f] = Vector3.Dot( plane.Normal, lightDirection ) <= 0;
+			if ( kept[f] && count < planes.Length )
+				planes[count++] = new Vector4( plane.Normal, -plane.Distance );
+		}
+
+		// Silhouette edges, seen from the light, close the sides of the sweep
+		foreach ( var edge in HullEdges )
+		{
+			if ( kept[edge.FaceA] == kept[edge.FaceB] )
+				continue;
+
+			var plane = new Plane( corners[edge.A], corners[edge.B], corners[edge.A] - lightDirection );
+			if ( plane.Normal.LengthSquared < 0.5f ) // Edge parallel to the light, its faces already bound it
+				continue;
+
+			plane = Inward( plane, centroid );
+			if ( count < planes.Length )
+				planes[count++] = new Vector4( plane.Normal, -plane.Distance );
+		}
+
+		return count;
+
+		static Plane Inward( Plane plane, Vector3 inside )
+		{
+			if ( plane.GetDistance( inside ) < 0 )
+			{
+				plane.Normal = -plane.Normal;
+				plane.Distance = -plane.Distance;
+			}
+			return plane;
+		}
+	}
+
+	/// <summary>
+	/// Caster volume of the cascades last fit (<see cref="BuildCasterVolume"/>) and the ortho origins of those cascades,
+	/// so a shadow view can tell whether the volume is its own. Replaced whole on each fit: readers on the render thread
+	/// never see a half-written one.
+	/// </summary>
+	internal sealed class CasterVolume
+	{
+		public readonly Vector4[] Planes = new Vector4[12];
+		public int PlaneCount;
+		public readonly Vector3[] CascadeOrigins = new Vector3[4];
+		public int CascadeCount;
+
+		/// <summary>True when <paramref name="cascadeOrigin"/> is one of this fit's cascade camera positions.</summary>
+		public bool Covers( Vector3 cascadeOrigin )
+		{
+			for ( int i = 0; i < CascadeCount; i++ )
+				if ( CascadeOrigins[i].DistanceSquared( cascadeOrigin ) < 1f ) return true;
+			return false;
+		}
+	}
+
+	// ponytail: single slot like LastCascades; a cascade view whose origin isn't in it just skips the extra cull
+	internal static CasterVolume DirectionalCasterVolume { get; private set; }
+
 	private static readonly string[] CascadeNames = ["CSM Cascade 0", "CSM Cascade 1", "CSM Cascade 2", "CSM Cascade 3"];
 
 	internal static float CalculateCascadeHardness( float shadowHardness, float cascadeScale, int shadowFilter )
@@ -168,7 +265,7 @@ internal partial class ShadowMapper
 	/// Their size then only depends on the projection, so it's the same every frame however far the camera is from the
 	/// world origin. Fit in world space, float error resized them as the camera moved, and that slides the texel grid.
 	/// </summary>
-	static int GetCascades( Span<Cascade> result, in ShadowViewInfo view, Rotation rotation, int numCascades, float NearClip, float FarClip, float lambda, int shadowmapSize )
+	static int GetCascades( Span<Cascade> result, in ShadowViewInfo view, Rotation rotation, int numCascades, float NearClip, float FarClip, float lambda, int shadowmapSize, Span<Vector4> casterPlanes, out int casterPlaneCount )
 	{
 		// Project frustum corners into view space from clip space
 		Span<Vector3> viewFrustumCorners = stackalloc Vector3[8];
@@ -227,6 +324,12 @@ internal partial class ShadowMapper
 			viewFrustumCorners[i] = Vector3.Lerp( origNear, origFar, tNear );
 			viewFrustumCorners[i + 4] = Vector3.Lerp( origNear, origFar, tFar );
 		}
+
+		// Casters that can shadow the shadowed part of the view: that range swept toward the light
+		Span<Vector3> worldCorners = stackalloc Vector3[8];
+		for ( int i = 0; i < 8; i++ )
+			worldCorners[i] = ViewToWorld( viewFrustumCorners[i], view );
+		casterPlaneCount = BuildCasterVolume( worldCorners, rotation.Forward, casterPlanes );
 
 		int count = Math.Min( numCascades, result.Length );
 
@@ -377,9 +480,16 @@ internal partial class ShadowMapper
 		// The cascades face the way the light travels
 		var rotation = light.Direction.EulerAngles.ToRotation();
 		Span<Cascade> cascades = stackalloc Cascade[numCascades];
-		int cascadeCount = GetCascades( cascades, View, rotation, numCascades, 1.0f, farClip, splitRatio, shadowmapSize );
+		var volume = new CasterVolume();
+		int cascadeCount = GetCascades( cascades, View, rotation, numCascades, 1.0f, farClip, splitRatio, shadowmapSize, volume.Planes, out volume.PlaneCount );
 		cascades = cascades[..cascadeCount];
 		float baseHardness = 1.0f + light.Hardness * 4.0f;
+
+		// Published before the cascade views render, those may cull against it right away
+		for ( int i = 0; i < cascadeCount; i++ )
+			volume.CascadeOrigins[i] = cascades[i].Origin;
+		volume.CascadeCount = cascadeCount;
+		DirectionalCasterVolume = volume;
 
 		for ( int i = 0; i < cascades.Length; i++ )
 		{

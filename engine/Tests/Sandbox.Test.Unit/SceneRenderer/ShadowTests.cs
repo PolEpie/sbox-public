@@ -108,6 +108,40 @@ public class ShadowTests
 	}
 
 	/// <summary>
+	/// The caster volume is the corner hull swept toward the light: points the light reaches the hull from are in,
+	/// points beside or downstream of it are out.
+	/// </summary>
+	[TestMethod]
+	public void CasterVolumeSweepsTowardLight()
+	{
+		// Unit cube in frustum corner order: ring 0-3 at z=1, ring 4-7 at z=0, same xy order
+		Vector3[] c = [new( 0, 0, 1 ), new( 0, 1, 1 ), new( 1, 1, 1 ), new( 1, 0, 1 ), new( 0, 0, 0 ), new( 0, 1, 0 ), new( 1, 1, 0 ), new( 1, 0, 0 )];
+		var planes = new Vector4[12];
+
+		bool Inside( int count, Vector3 p )
+		{
+			for ( int i = 0; i < count; i++ )
+				if ( Vector3.Dot( new Vector3( planes[i].x, planes[i].y, planes[i].z ), p ) + planes[i].w < -1e-4f ) return false;
+			return true;
+		}
+
+		// Straight down: bottom and four sides kept, the four top edges are the silhouette
+		int count = Sandbox.Rendering.ShadowMapper.BuildCasterVolume( c, new Vector3( 0, 0, -1 ), planes );
+		Assert.AreEqual( 9, count );
+		Assert.IsTrue( Inside( count, new Vector3( 0.5f, 0.5f, 0.5f ) ) );
+		Assert.IsTrue( Inside( count, new Vector3( 0.5f, 0.5f, 50 ) ) );
+		Assert.IsFalse( Inside( count, new Vector3( 0.5f, 0.5f, -5 ) ) );
+		Assert.IsFalse( Inside( count, new Vector3( 5, 0.5f, 0.5f ) ) );
+		Assert.IsFalse( Inside( count, new Vector3( 5, 0.5f, 50 ) ) );
+
+		// Slanted: in only along the light's path into the cube
+		count = Sandbox.Rendering.ShadowMapper.BuildCasterVolume( c, new Vector3( 1, 0, -1 ).Normal, planes );
+		Assert.IsTrue( Inside( count, new Vector3( -2.5f, 0.5f, 3.5f ) ) );
+		Assert.IsFalse( Inside( count, new Vector3( 2.5f, 0.5f, 3.5f ) ) );
+		Assert.IsFalse( Inside( count, new Vector3( 3.5f, 0.5f, -2.5f ) ) );
+	}
+
+	/// <summary>
 	/// A baked sun's shadows are in the lightmaps and probes, so its cascades leave static casters out and only what moves casts
 	/// in real time - as <c>ShadowMapper.FindOrCreateDirectionalShadowMaps</c> excludes <c>StaticObject</c> for a baked light.
 	/// </summary>

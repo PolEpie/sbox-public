@@ -440,6 +440,7 @@ internal partial class ShadowMapper
 		Entries.Clear();
 		Schedule.Clear();
 		LastCascades = default;
+		DirectionalCasterVolume = null;
 	}
 
 	/// <summary>

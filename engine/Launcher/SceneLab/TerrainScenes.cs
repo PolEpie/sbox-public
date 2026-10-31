@@ -68,6 +68,59 @@ internal static class TerrainScenes
 		scene.GetAllComponents<ClutterComponent>().All( x => x.Storage?.TotalCount > 0 )
 		&& scene.SceneWorld.SceneObjects.OfType<SceneCustomObject>().Count() > 1;
 
+	const float ForestSize = 32768;
+	const float TreeScaleMax = 5;
+
+	// A turn takes the benchmark's default measured run, so every run sees the sun from every side
+	const int TurnFrames = 600;
+	static int forestFrame;
+
+	/// <summary>
+	/// A flat forest 32768 units across, about 100k spheres scattered by one clutter volume in 4096 tiles, seen from just
+	/// above the canopy with a 90° field of view and a 100k far plane: the sun's cascades are full of clutter, most of it
+	/// off-screen - what <c>clutter_shadow_caster_cull</c> is for. The camera turns (<see cref="TurnAround"/>).
+	/// </summary>
+	public static Scene ClutterForest()
+	{
+		var tree = Model.Load( "models/dev/sphere.vmdl" );
+		var eye = tree.Bounds.Maxs.z * TreeScaleMax + 100;
+		var scene = GameScenes.Stage( out var camera, new Vector3( 0, 0, eye ), new Vector3( 1000, 0, eye ) );
+		using var _ = scene.Push();
+
+		camera.FieldOfView = 90;
+		camera.ZFar = 100000;
+		var floorScale = ForestSize / Model.Load( "models/dev/plane.vmdl" ).Bounds.Size.x;
+		scene.Directory.FindByName( "Floor" ).First().WorldScale = new Vector3( floorScale, floorScale, 1 );
+
+		var volume = new GameObject( true, "Forest" ).Components.Create<ClutterComponent>();
+		volume.Seed = 7;
+		volume.Bounds = new BBox( new Vector3( -ForestSize / 2, -ForestSize / 2, -100 ), new Vector3( ForestSize / 2, ForestSize / 2, 100 ) );
+		volume.Clutter = new ClutterDefinition
+		{
+			TileSizeEnum = ClutterDefinition.TileSizeOption.Size4096,
+			Scatterer = new SimpleScatterer { Density = 1.5f, Scale = new RangedFloat( 2, TreeScaleMax ), PlaceOnGround = false },
+			Entries = [new ClutterEntry { Model = tree }],
+		};
+		volume.Generate();
+
+		forestFrame = 0;
+		return scene;
+	}
+
+	/// <summary>
+	/// Turns the camera a frame around its circle, by frame count so every run is the same.
+	/// </summary>
+	public static void TurnAround( Scene scene )
+	{
+		scene.Camera.WorldRotation = Rotation.FromYaw( (float)(forestFrame++ % TurnFrames) / TurnFrames * 360 );
+	}
+
+	/// <summary>
+	/// Ready once every tile has scattered, so no run measures a forest still filling in.
+	/// </summary>
+	public static bool ForestReady( Scene scene ) =>
+		scene.GetAllComponents<ClutterComponent>().All( x => !x.Generating && x.Storage?.TotalCount > 0 );
+
 	/// <summary>
 	/// The terrain raised in the middle and the clutter scattered again with another seed - the terrain rebuilds its
 	/// height texture, and clutter makes new batches.

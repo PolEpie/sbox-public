@@ -295,6 +295,8 @@ internal sealed partial class SceneLabWindow : PanelWindow
 		viewMenu.AboutToShow += m => prepass.Checked = renderer.DepthPrepass;
 		var occlusion = viewMenu.AddOption( "Occlusion Culling", on => { Sandbox.Rendering.ManagedSceneRendering.Occlusion = on; Sandbox.Rendering.RenderPipeline.OcclusionCulling = on; timer.Clear(); } );
 		viewMenu.AboutToShow += m => occlusion.Checked = Renderer == RendererKind.Managed ? Sandbox.Rendering.ManagedSceneRendering.Occlusion : Sandbox.Rendering.RenderPipeline.OcclusionCulling;
+		var casterCull = viewMenu.AddOption( "Clutter Shadow Caster Culling", on => { Sandbox.Clutter.ClutterBatchSceneObject.ShadowCasterCull = on; timer.Clear(); } );
+		viewMenu.AboutToShow += m => casterCull.Checked = Sandbox.Clutter.ClutterBatchSceneObject.ShadowCasterCull;
 		var sizeCull = viewMenu.AddOption( "Size Culling", on => view.SizeCullThreshold = on ? SizeCullThreshold : 0 );
 		viewMenu.AboutToShow += m => sizeCull.Checked = view.SizeCullThreshold > 0;
 		var shadows = viewMenu.AddOption( "Shadows", on => Shadows = on );
