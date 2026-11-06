@@ -22,9 +22,7 @@ internal class BuildContent( string onlyRoot = null, bool force = false )
 		{
 			Roots = roots,
 			MaxJobs = ResourceCompiler.DefaultMaxJobs,
-
-			// Game resources generate their textures into the engine's shipped transients, which every project mounts
-			OutputRoots = new Dictionary<string, string> { ["transient"] = Path.Combine( gameDir, "addons", "menu", "Transients" ) },
+			OutputRoots = ContentRoots.EngineOutputRoots( gameDir ),
 			Select = onlyRoot is null ? null : [Path.Combine( gameDir, onlyRoot )],
 			Force = force,
 			JobFinished = ( _, done, total ) => BuildDisplay.Progress( done, total, $"{done}/{total} assets compiled" ),
