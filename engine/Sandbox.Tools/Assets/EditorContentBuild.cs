@@ -33,6 +33,8 @@ internal static class EditorContentBuild
 	static Task incrementalBuild;
 	static CancellationTokenSource cancellation;
 	static RealTimeSince buildStarted;
+	static RealTimeSince sinceBuild;
+	static bool workersIdle;
 	static PopupToast progress;
 
 	/// <summary>
@@ -49,6 +51,12 @@ internal static class EditorContentBuild
 	/// Content workers at once. Each is a resource compiler with the editor's managed code and a GPU device (~1.3 GB).
 	/// </summary>
 	const int Workers = 4;
+
+	/// <summary>
+	/// Seconds without a build before the idle workers go, giving back their memory. The next build starts new ones,
+	/// which costs it a few seconds; edits in a row reuse them.
+	/// </summary>
+	const float WorkerIdleTime = 60.0f;
 
 	public static bool IsBuilding => building;
 
@@ -87,6 +95,15 @@ internal static class EditorContentBuild
 			pruneOrphans = false;
 			AssetSystem.Tick();
 			AssetSystem.DeleteOrphans();
+		}
+
+		if ( workersIdle && sinceBuild > WorkerIdleTime )
+		{
+			// Off the main thread: each worker takes seconds to shut its engine down. A build starting meanwhile only
+			// starts new ones, Finished takes nothing but idle workers.
+			workersIdle = false;
+			var idle = compiler;
+			_ = Task.Run( () => idle?.Finished() );
 		}
 
 		var epoch = IAssetSystem.GetContentChangeEpoch();
@@ -192,6 +209,8 @@ internal static class EditorContentBuild
 			cancellation = null;
 			IAssetSystem.SuspendOnDemandCompiles( false );
 			building = false;
+			sinceBuild = 0;
+			workersIdle = true;
 		}
 	}
 
