@@ -275,14 +275,21 @@ public sealed class ResourceCompiler( string executable, AssetTypeTable types, I
 	/// Every idle worker goes (a build has none busy once it returns), all at once: each takes seconds to shut its
 	/// engine down. The compiler can be used again afterwards and starts new ones.
 	/// </summary>
-	public void Finished()
+	public void Finished() => StopIdle( 0 );
+
+	/// <summary>
+	/// Idle workers beyond <paramref name="keep"/> go, the longest idle first, giving back their memory (~1.3 GB each).
+	/// The ones kept spare the next build a worker's start (~20 s with a project's compilers to load).
+	/// </summary>
+	public void StopIdle( int keep )
 	{
-		List<CompilerWorker> all;
+		List<CompilerWorker> stop;
 		lock ( gate )
 		{
-			all = [.. idle];
-			idle.Clear();
+			var count = Math.Max( 0, idle.Count - keep );
+			stop = idle.GetRange( 0, count );
+			idle.RemoveRange( 0, count );
 		}
-		Parallel.ForEach( all, worker => worker.Stop() );
+		Parallel.ForEach( stop, worker => worker.Stop() );
 	}
 }

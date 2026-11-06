@@ -53,10 +53,16 @@ internal static class EditorContentBuild
 	const int Workers = 4;
 
 	/// <summary>
-	/// Seconds without a build before the idle workers go, giving back their memory. The next build starts new ones,
-	/// which costs it a few seconds; edits in a row reuse them.
+	/// Seconds without a build before the idle workers beyond <see cref="WarmWorkers"/> go, giving back their memory.
+	/// Edits in a row reuse them all.
 	/// </summary>
 	const float WorkerIdleTime = 60.0f;
+
+	/// <summary>
+	/// Workers kept however long the editor waits: a new one takes ~20 s to start (engine, render device, the project's
+	/// compilers), which a save that compiles one asset would otherwise wait for every time.
+	/// </summary>
+	const int WarmWorkers = 1;
 
 	public static bool IsBuilding => building;
 
@@ -100,10 +106,10 @@ internal static class EditorContentBuild
 		if ( workersIdle && sinceBuild > WorkerIdleTime )
 		{
 			// Off the main thread: each worker takes seconds to shut its engine down. A build starting meanwhile only
-			// starts new ones, Finished takes nothing but idle workers.
+			// starts new ones, StopIdle takes nothing but idle workers.
 			workersIdle = false;
 			var idle = compiler;
-			_ = Task.Run( () => idle?.Finished() );
+			_ = Task.Run( () => idle?.StopIdle( WarmWorkers ) );
 		}
 
 		var epoch = IAssetSystem.GetContentChangeEpoch();
