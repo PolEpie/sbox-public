@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.IO.Enumeration;
 using System.Text;
 
 namespace Sandbox.ContentBuild;
@@ -340,6 +341,13 @@ public static class ContentBuilder
 		readonly IReadOnlyList<(string Mod, string Path)> mounts = request.Mounts;
 		readonly Dictionary<string, string> arguments = ParseArguments( request.CompilerArgs );
 		readonly List<(string Source, string Visible)> hidden = [];
+
+		// Size and time of every file under the roots, from the inventory's listing: reading a folder gives them for all
+		// its files in one call, where a check per file costs one each (~0.7 ms behind an antivirus filter, ~85k a build).
+		// Written by the inventory and by publications, which never run while checks do.
+		readonly Dictionary<string, (long Size, long Time)> listed = new( StringComparer.OrdinalIgnoreCase );
+		readonly List<string> listedRoots = [];
+		readonly ConcurrentDictionary<string, (bool Exists, long Size, long Time)> outside = new( StringComparer.OrdinalIgnoreCase );
 		long clock;
 		int jobs;
 
@@ -459,7 +467,21 @@ public static class ContentBuilder
 
 		void Inventory( RootState root )
 		{
-			foreach ( var file in Directory.EnumerateFiles( root.Def.Path, "*", SearchOption.AllDirectories ) )
+			listedRoots.Add( Path.TrimEndingDirectorySeparator( Path.GetFullPath( root.Def.Path ) ) + Path.DirectorySeparatorChar );
+
+			// As Directory.EnumerateFiles( AllDirectories ) lists, keeping each file's size and time on the way
+			var options = new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = 0, IgnoreInaccessible = false };
+			var files = new FileSystemEnumerable<string>( root.Def.Path, ( ref FileSystemEntry x ) =>
+			{
+				var path = x.ToFullPath();
+				listed[path] = (x.Length, x.LastWriteTimeUtc.UtcTicks);
+				return path;
+			}, options )
+			{
+				ShouldIncludePredicate = ( ref FileSystemEntry x ) => !x.IsDirectory
+			};
+
+			foreach ( var file in files )
 			{
 				var source = root.Relative( file );
 				if ( source.EndsWith( "_c", StringComparison.OrdinalIgnoreCase ) ) continue;
@@ -480,6 +502,22 @@ public static class ContentBuilder
 				root.SourceOf[output] = source;
 				root.Inventory[source] = (output, kind);
 			}
+		}
+
+		/// <summary>
+		/// A file as the inventory listed it, or as it was first seen this build when it's outside every root (the
+		/// engine's core that many records read the same files of). A file under a root that the listing doesn't have
+		/// doesn't exist.
+		/// </summary>
+		/// <remarks>shortcut: a folder's listing can lag a hard-linked file written through another of its links; stat
+		/// every file again if hard-linked sources show up.</remarks>
+		(bool Exists, long Size, long Time) Stat( string path )
+		{
+			var full = Path.GetFullPath( path );
+			if ( listed.TryGetValue( full, out var known ) ) return (true, known.Size, known.Time);
+			if ( listedRoots.Any( x => full.StartsWith( x, StringComparison.OrdinalIgnoreCase ) ) ) return (false, 0, 0);
+
+			return outside.GetOrAdd( full, x => new FileInfo( x ) is { Exists: true } file ? (true, file.Length, file.LastWriteTimeUtc.Ticks) : (false, 0, 0) );
 		}
 
 		/// <summary>
@@ -679,7 +717,7 @@ public static class ContentBuilder
 		/// </summary>
 		void RemoveDeletedSources( RootState root )
 		{
-			foreach ( var record in root.Store.All.Values.Where( x => !File.Exists( Path.Combine( root.Def.Path, x.Source ) ) ).ToList() )
+			foreach ( var record in root.Store.All.Values.Where( x => !Stat( Path.Combine( root.Def.Path, x.Source ) ).Exists ).ToList() )
 			{
 				var outputs = Unshared( root, record.Outputs.Keys, record.Source ).ToList();
 				try
@@ -699,6 +737,15 @@ public static class ContentBuilder
 		{
 			var list = paths.Where( x => x is not null ).ToList();
 			report.Changed.AddRange( list );
+
+			// The listing follows what this build moved, so later checks see the published files
+			foreach ( var path in list )
+			{
+				var file = new FileInfo( path );
+				outside.TryRemove( file.FullName, out _ );
+				if ( file.Exists ) listed[file.FullName] = (file.Length, file.LastWriteTimeUtc.Ticks);
+				else listed.Remove( file.FullName );
+			}
 			if ( list.Count > 0 ) request.Published?.Invoke( list );
 		}
 
@@ -1074,9 +1121,9 @@ public static class ContentBuilder
 
 			foreach ( var input in record.Inputs )
 			{
-				var file = new FileInfo( input.Path );
+				var file = Stat( input.Path );
 				if ( file.Exists != input.Exists ) return $"{input.Path} {(file.Exists ? "appeared" : "is gone")}";
-				if ( file.Exists && (file.Length != input.Size || file.LastWriteTimeUtc.Ticks != input.Time) && Hashing.Checksum( file.FullName ) != input.Checksum ) return $"{input.Path} changed";
+				if ( file.Exists && (file.Size != input.Size || file.Time != input.Time) && Hashing.Checksum( input.Path ) != input.Checksum ) return $"{input.Path} changed";
 			}
 
 			foreach ( var dependency in record.Special )
@@ -1136,12 +1183,12 @@ public static class ContentBuilder
 				// An output in a root this build doesn't mount can't be checked or rebuilt here
 				if ( node.Root.Resolve( key ) is not { } path ) continue;
 
-				// Locate only for a missing file: it stats the resolved path first, which FileInfo already did
-				var file = new FileInfo( path );
+				// Locate only for a missing file: it looks for the resolved path first, which the listing already did
+				var file = Stat( path );
 				if ( !file.Exists && node.Root.Locate( key ) is null ) { reason ??= $"{key} is missing"; continue; }
 				if ( Shared( key ) ) continue;
 
-				if ( (file.Length != stamp.Size || file.LastWriteTimeUtc.Ticks != stamp.Time) && Hashing.File( file.FullName ) != stamp.Hash )
+				if ( (file.Size != stamp.Size || file.Time != stamp.Time) && Hashing.File( path ) != stamp.Hash )
 				{
 					reason ??= $"{key} was modified";
 					rebuilt = true;
@@ -1157,7 +1204,7 @@ public static class ContentBuilder
 		{
 			foreach ( var prerequisite in node.Record.Prerequisites )
 			{
-				var file = new FileInfo( prerequisite.File );
+				var file = Stat( prerequisite.File );
 				if ( prerequisite.OrderOnly )
 				{
 					if ( file.Exists != (prerequisite.Hash != "0") ) return $"{prerequisite.File} {(file.Exists ? "appeared" : "is gone")}";
@@ -1168,7 +1215,7 @@ public static class ContentBuilder
 				var stamp = producer?.Record?.Outputs.GetValueOrDefault( producer.Output );
 				// The producer already records these bytes. Reuse that hash only while the file still matches
 				// its stamp; external edits and reads without a producer still check the actual contents.
-				var current = !file.Exists ? "0" : stamp is not null && file.Length == stamp.Size && file.LastWriteTimeUtc.Ticks == stamp.Time
+				var current = !file.Exists ? "0" : stamp is not null && file.Size == stamp.Size && file.Time == stamp.Time
 					? stamp.Hash : Hashing.File( prerequisite.File );
 				if ( current != prerequisite.Hash ) return $"{prerequisite.File} changed";
 			}
