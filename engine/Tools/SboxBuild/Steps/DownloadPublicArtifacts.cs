@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
+using Sandbox.ContentBuild;
 using static Facepunch.Constants;
 
 namespace Facepunch.Steps;
@@ -138,6 +139,27 @@ internal class DownloadPublicArtifacts( bool nativeBinariesOnly = false, bool sh
 			|| (shadersOnly && artifactPath.EndsWith( ".shader_c", StringComparison.OrdinalIgnoreCase ));
 	}
 
+	/// <summary>
+	/// Files the local content build published that are still as it left them. Restoring the artifact over one makes
+	/// the next content build compile it again; that build already recompiles whatever its sources made out of date.
+	/// </summary>
+	private static HashSet<string> LocallyBuilt( string repoRoot )
+	{
+		var game = Path.Combine( repoRoot, "game" );
+		var built = new HashSet<string>( OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal );
+		foreach ( var root in ContentRoots.Engine( game ) )
+		{
+			try { built.UnionWith( ContentBuilder.Published( root, ContentRoots.EngineOutputRoots( game ) ) ); }
+			catch ( Exception e ) when ( e is IOException or JsonException )
+			{
+				Log.Warning( $"Couldn't read the {root.Mod} content records, restoring its artifacts: {e.Message}" );
+			}
+		}
+
+		if ( built.Count > 0 ) Log.Info( $"Keeping {built.Count} files the local content build published." );
+		return built;
+	}
+
 	private static ExitCode DownloadArtifacts( HttpClient httpClient, ArtifactManifest manifest, string repoRoot, Func<string, bool> isWanted )
 	{
 		if ( manifest.Files.Any( entry => entry is null || string.IsNullOrWhiteSpace( entry.Path ) || string.IsNullOrWhiteSpace( entry.Sha256 ) ) )
@@ -149,6 +171,7 @@ internal class DownloadPublicArtifacts( bool nativeBinariesOnly = false, bool sh
 		var rootPrefix = Path.EndsInDirectorySeparator( repoRoot ) ? repoRoot : repoRoot + Path.DirectorySeparatorChar;
 		var pathComparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
 		var pending = new ConcurrentBag<(ArtifactFileInfo Entry, string Destination)>();
+		var built = LocallyBuilt( repoRoot );
 		var progress = new DownloadProgress();
 		var skippedCount = 0;
 		var cachedCount = 0;
@@ -182,6 +205,13 @@ internal class DownloadPublicArtifacts( bool nativeBinariesOnly = false, bool sh
 				var destination = Path.GetFullPath( Path.Combine( repoRoot, relative ) );
 				if ( Path.IsPathRooted( relative ) || relative.Contains( ':' ) || !destination.StartsWith( rootPrefix, pathComparison ) )
 					throw new InvalidOperationException( $"Artifact path is outside the repository: '{entry.Path}'." );
+
+				// The content build's record says it's current: the artifact would only undo that build
+				if ( built.Contains( destination ) )
+				{
+					Interlocked.Increment( ref skippedCount );
+					return;
+				}
 
 				if ( knownState.TryGetValue( entry.Path, out var known ) && IsUnchanged( destination, known, entry ) )
 				{

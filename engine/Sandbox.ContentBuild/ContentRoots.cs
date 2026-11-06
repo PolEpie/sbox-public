@@ -14,6 +14,13 @@ public static class ContentRoots
 			.Select( x => new ContentRoot( x.Item1, Path.GetFullPath( Path.Combine( gameDirectory, x.Item2 ) ), Path.Combine( gameDirectory, ".source2", "contentbuild", x.Item1 ) ) )];
 
 	/// <summary>
+	/// Where the engine roots' builds write other output roots: game resources generate their textures into the
+	/// engine's shipped transients, which every project mounts.
+	/// </summary>
+	public static Dictionary<string, string> EngineOutputRoots( string gameDirectory ) =>
+		new() { ["transient"] = Path.Combine( gameDirectory, "addons", "menu", "Transients" ) };
+
+	/// <summary>
 	/// The engine roots followed by projects (libraries, then the open project), each mounted after the ones before.
 	/// A project whose assets are an engine root's folder (the menu project itself) is mounted again under its own
 	/// ident, which is the mod its compiles write to: that root takes the ident and the project's place in the
