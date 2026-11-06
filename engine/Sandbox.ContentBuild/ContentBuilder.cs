@@ -196,6 +196,7 @@ public static class ContentBuilder
 		public string Self;        // SelfDirty ?? Shadowed, null when both hold
 		public string Outputs;     // first "{key} is missing" / "{key} was modified", null when every owned output matches
 		public bool OutputRebuilt; // an owned output exists with a stamp and hash that differ from the record (RebuiltOutside's file test)
+		public bool Restamped;     // an owned output's size or time moved but its bytes didn't: the record has its new stamp, to write once it's clean
 		public bool Final => State is State.Clean or State.Committed or State.Failed or State.Blocked;
 	}
 
@@ -813,7 +814,12 @@ public static class ContentBuilder
 						}
 
 						var reason = Dirty( node );
-						if ( reason is null ) { node.State = State.Clean; continue; }
+						if ( reason is null )
+						{
+							node.State = State.Clean;
+							if ( node.Restamped ) Restamp( node );
+							continue;
+						}
 
 						report.Log.AppendLine( $"{node.Name}: {reason}" );
 						node.State = State.Queued;
@@ -946,7 +952,7 @@ public static class ContentBuilder
 			{
 				node.CheckedRecord = node.Record;
 				node.Self = SelfDirty( node ) ?? Shadowed( node );
-				(node.Outputs, node.OutputRebuilt) = node.Record is null ? (null, false) : CheckOutputs( node );
+				(node.Outputs, node.OutputRebuilt, node.Restamped) = node.Record is null ? (null, false, false) : CheckOutputs( node );
 				node.Checked = true;
 			}
 			void All() => Parallel.ForEach( stale, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, Check );
@@ -1172,12 +1178,15 @@ public static class ContentBuilder
 
 		/// <summary>
 		/// Why an owned output no longer matches its record, or null. Also whether one exists with other bytes, which
-		/// RebuiltOutside needs. Reads only the record and disk: safe on any thread.
+		/// RebuiltOutside needs. An output whose size or time moved with its bytes unchanged (a copy, a checkout, a
+		/// restore) gets its new stamp in the record, so it's hashed this once, not every build. Reads the disk and
+		/// writes only this node's record: safe on any thread.
 		/// </summary>
-		(string Reason, bool Rebuilt) CheckOutputs( Node node )
+		(string Reason, bool Rebuilt, bool Restamped) CheckOutputs( Node node )
 		{
 			string reason = null;
 			var rebuilt = false;
+			List<(string Key, FileStamp Stamp)> restamp = null;
 			foreach ( var (key, stamp) in node.Record.Outputs )
 			{
 				// An output in a root this build doesn't mount can't be checked or rebuilt here
@@ -1186,15 +1195,31 @@ public static class ContentBuilder
 				// Locate only for a missing file: it looks for the resolved path first, which the listing already did
 				var file = Stat( path );
 				if ( !file.Exists && node.Root.Locate( key ) is null ) { reason ??= $"{key} is missing"; continue; }
-				if ( Shared( key ) ) continue;
+				if ( Shared( key ) || (file.Size == stamp.Size && file.Time == stamp.Time) ) continue;
 
-				if ( (file.Size != stamp.Size || file.Time != stamp.Time) && Hashing.File( path ) != stamp.Hash )
+				if ( Hashing.File( path ) == stamp.Hash )
 				{
-					reason ??= $"{key} was modified";
-					rebuilt = true;
+					(restamp ??= []).Add( (key, stamp with { Size = file.Size, Time = file.Time }) );
+					continue;
 				}
+
+				reason ??= $"{key} was modified";
+				rebuilt = true;
 			}
-			return (reason, rebuilt);
+
+			foreach ( var (key, stamp) in restamp ?? [] ) node.Record.Outputs[key] = stamp;
+			return (reason, rebuilt, restamp is not null);
+		}
+
+		/// <summary>
+		/// Writes a clean node's record with its outputs' new stamps. Nothing moves; a record that can't be written is
+		/// only hashed again next build.
+		/// </summary>
+		void Restamp( Node node )
+		{
+			node.Restamped = false;
+			try { node.Root.Store.Publish( node.Source, node.Record.Job, node.Record, new Dictionary<string, string>(), [] ); }
+			catch ( PublishFailedException ) { }
 		}
 
 		/// <summary>

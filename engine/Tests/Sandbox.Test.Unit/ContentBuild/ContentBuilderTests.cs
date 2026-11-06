@@ -277,6 +277,25 @@ public class ContentBuilderTests
 	}
 
 	[TestMethod]
+	public void OutputTouchedWithSameBytesIsHashedOnce()
+	{
+		using var fx = new Fixture();
+		fx.Write( "a.vtex", "red" );
+		Assert.IsTrue( fx.Build().Success );
+
+		// A checkout or copy moves its time, not its bytes: still current, and its new stamp is recorded
+		var output = Path.Combine( fx.Root, "a.vtex_c" );
+		File.SetLastWriteTimeUtc( output, File.GetLastWriteTimeUtc( output ).AddHours( 1 ) );
+		AssertJobs( fx.Build() );
+
+		// Hashing it again would fail on Windows while it's held
+		using var held = new FileStream( output, FileMode.Open, FileAccess.Read, FileShare.None );
+		var warm = fx.Build();
+		Assert.IsTrue( warm.Success, warm.Log.ToString() );
+		AssertJobs( warm );
+	}
+
+	[TestMethod]
 	[DataRow( JobMode.Describe )]
 	[DataRow( JobMode.Adopt )]
 	[DataRow( JobMode.Compile )]
