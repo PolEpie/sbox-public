@@ -334,6 +334,26 @@ public class ContentBuilderTests
 	}
 
 	[TestMethod]
+	public void KeptRecordsFollowThisBuildsWritesAndAnotherBuilds()
+	{
+		using var fx = new Fixture();
+		fx.Write( "a.vtex", "red" );
+		BuildReport Build( bool keep ) => ContentBuilder.Build( new BuildRequest { Roots = [new ContentRoot( "unit", fx.Root, fx.State )], KeepRecords = keep }, fx.Compiler );
+		AssertJobs( Build( true ), "a.vtex" );
+
+		// Its own new record is what the next build starts from
+		fx.Write( "a.vtex", "blue" );
+		AssertJobs( Build( true ), "a.vtex" );
+		AssertJobs( Build( true ) );
+
+		// A record written by a build that doesn't keep them (SboxBuild, another editor) replaces the kept one
+		fx.Write( "a.vtex", "green" );
+		AssertJobs( Build( false ), "a.vtex" );
+		AssertJobs( Build( true ) );
+		StringAssert.Contains( fx.Read( "a.vtex_c" ), "green" );
+	}
+
+	[TestMethod]
 	public async Task AsyncCancellationReleasesRootsAndKeepsLastGoodOutput()
 	{
 		using var fx = new Fixture();

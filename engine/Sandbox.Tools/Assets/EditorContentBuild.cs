@@ -139,6 +139,7 @@ internal static class EditorContentBuild
 				// What each job publishes is known before the next frame runs, so its file events aren't changes
 				Published = paths => IAssetSystem.RegisterBuildOutputs( string.Join( "\n", paths ) ),
 				MaxJobs = Workers,
+				KeepRecords = true,
 
 				// Only startup waits for another build, with the splash screen up; the editor never freezes on one
 				LockTimeout = startup ? TimeSpan.FromMinutes( 30 ) : TimeSpan.Zero,

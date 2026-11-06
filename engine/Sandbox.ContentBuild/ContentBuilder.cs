@@ -60,6 +60,13 @@ public sealed class BuildRequest
 	public IReadOnlyList<string> CompilerArgs { get; init; } = [];
 
 	/// <summary>
+	/// Keep the roots' records in memory for the next build in this process, which reuses them while each records
+	/// folder is unchanged instead of reading thousands of files again. For a process that builds again and again (the
+	/// editor). A record edited in place, not through a build, isn't noticed until the folder changes.
+	/// </summary>
+	public bool KeepRecords { get; init; }
+
+	/// <summary>
 	/// Compiles at once. 1 hands them out one at a time, from the calling thread.
 	/// </summary>
 	public int MaxJobs { get; init; } = Environment.ProcessorCount;
@@ -368,7 +375,7 @@ public static class ContentBuilder
 
 				foreach ( var root in roots )
 				{
-					root.Store = new RecordStore( root.Resolve, root.Def.StateDirectory );
+					root.Store = new RecordStore( root.Resolve, root.Def.StateDirectory, request.KeepRecords );
 					DeleteStaging( Path.Combine( root.Def.StateDirectory, "staging" ) );
 					Inventory( root );
 					if ( request.Select is null ) RemoveDeletedSources( root );

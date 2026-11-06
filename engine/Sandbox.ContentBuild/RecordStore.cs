@@ -54,14 +54,22 @@ sealed class RecordStore
 {
 	readonly Func<string, string> resolve;
 	readonly string records, journals, backups;
+	readonly bool keep;
 	static readonly JsonSerializerOptions Json = new() { WriteIndented = true };
 
-	public Dictionary<string, AssetRecord> All { get; } = new( StringComparer.OrdinalIgnoreCase );
+	// Records folder -> its last write time when the records were last known current, and the records.
+	// shortcut: entries for roots no longer built stay until the process ends (~5 KB a record); drop them if the editor
+	// switches between many large projects in one session.
+	static readonly Dictionary<string, (DateTime Time, Dictionary<string, AssetRecord> All)> kept = new( StringComparer.OrdinalIgnoreCase );
+
+	public Dictionary<string, AssetRecord> All { get; }
 
 	/// <param name="resolve">Where an output key is on disk, or null if its root isn't mounted in this build.</param>
-	public RecordStore( Func<string, string> resolve, string state )
+	/// <param name="keep">Keep the records in memory for the next build in this process (see <see cref="BuildRequest.KeepRecords"/>).</param>
+	public RecordStore( Func<string, string> resolve, string state, bool keep = false )
 	{
 		this.resolve = resolve;
+		this.keep = keep;
 		records = Directory.CreateDirectory( Path.Combine( state, "records" ) ).FullName;
 		journals = Directory.CreateDirectory( Path.Combine( state, "journal" ) ).FullName;
 		backups = Path.Combine( state, "backup" );
@@ -70,7 +78,21 @@ sealed class RecordStore
 		foreach ( var partial in Directory.GetFiles( journals, "*.tmp" ) ) File.Delete( partial );
 		foreach ( var journal in Directory.GetFiles( journals, "*.json" ) ) Recover( journal );
 
+		// Every record is written or removed by a rename in its folder, which changes the folder's time: the same time
+		// means the same records. Taken before reading, so a write while reading reloads next time.
+		var time = Directory.GetLastWriteTimeUtc( records );
+		lock ( kept )
+		{
+			if ( keep && kept.TryGetValue( records, out var known ) && known.Time == time )
+			{
+				All = known.All;
+				return;
+			}
+		}
+
+		All = new( StringComparer.OrdinalIgnoreCase );
 		foreach ( var record in Load( state ) ) All[record.Source] = record;
+		if ( keep ) lock ( kept ) kept[records] = (time, All);
 	}
 
 	/// <summary>
@@ -158,6 +180,10 @@ sealed class RecordStore
 
 		if ( record is null ) All.Remove( source );
 		else All[source] = record;
+
+		// This write is the only change since the records were current; any other one (a failed write's temp file,
+		// another build) changes the folder's time again and reloads them
+		if ( keep ) lock ( kept ) kept[records] = (Directory.GetLastWriteTimeUtc( records ), All);
 
 		File.Delete( journal );
 		if ( Directory.Exists( backup ) ) Directory.Delete( backup, true );
