@@ -175,6 +175,13 @@ public static class ContentBuilder
 		public long Started, Committed;
 		public DateTime Launched;
 		public int Misses;
+
+		// Pure checks, computed once per record by Precheck on worker threads; valid while CheckedRecord == Record
+		public AssetRecord CheckedRecord;
+		public bool Checked;
+		public string Self;        // SelfDirty ?? Shadowed, null when both hold
+		public string Outputs;     // first "{key} is missing" / "{key} was modified", null when every owned output matches
+		public bool OutputRebuilt; // an owned output exists with a stamp and hash that differ from the record (RebuiltOutside's file test)
 		public bool Final => State is State.Clean or State.Committed or State.Failed or State.Blocked;
 	}
 
@@ -504,8 +511,9 @@ public static class ContentBuilder
 			for ( var pending = nodes.Values.ToList(); pending.Count > 0; pending = nodes.Values.Where( x => !x.Planned ).ToList() )
 			{
 				LoadFingerprints( pending );
+				await Precheck( pending );
 
-				var describe = pending.Where( x => x.Kind == AssetKind.Described && (SelfDirty( x ) ?? Shadowed( x )) is not null ).ToList();
+				var describe = pending.Where( x => x.Kind == AssetKind.Described && x.Self is not null ).ToList();
 				var results = await RunJobs( describe, node => Compile( Job( node, JobMode.Describe ) ) );
 				var described = new Dictionary<Node, IReadOnlyList<PrerequisiteRead>>();
 				for ( var i = 0; i < describe.Count; i++ )
@@ -611,13 +619,7 @@ public static class ContentBuilder
 		/// changed since, so another compile may have rebuilt it. Changed bytes with nothing else changed are damage,
 		/// which the record's hash catches and a compile repairs.
 		/// </summary>
-		bool RebuiltOutside( Node node ) => node.Record.Outputs.Any( x =>
-		{
-			if ( Shared( x.Key ) || node.Root.Resolve( x.Key ) is not { } path ) return false;
-
-			var file = new FileInfo( path );
-			return file.Exists && (file.Length != x.Value.Size || file.LastWriteTimeUtc.Ticks != x.Value.Time) && Hashing.File( path ) != x.Value.Hash;
-		} ) && (SelfDirty( node ) ?? Shadowed( node ) ?? ReadChanged( node )) is not null;
+		bool RebuiltOutside( Node node ) => node.OutputRebuilt && (node.Self ?? ReadChanged( node )) is not null;
 
 		/// <summary>
 		/// A record of a compile: what it read, stamped as it is now, and the outputs it published.
@@ -709,6 +711,9 @@ public static class ContentBuilder
 			{
 				// Producers a compile turned out to read are planned like the rest before they run
 				if ( nodes.Values.Any( x => !x.Planned ) ) await Plan();
+
+				// Adopted and describe-missed nodes have a new record; everything Ready() may ask about is checked here, together
+				await Precheck( nodes.Values.Where( x => x.State == State.Waiting ) );
 
 				// Everything whose prerequisites are settled is current, blocked or queued; settling one can
 				// make others ready, so repeat until nothing changes
@@ -840,6 +845,30 @@ public static class ContentBuilder
 					report.JobTime[key] = (jobs + 1, total + time.Elapsed);
 				}
 			}
+		}
+
+		/// <summary>
+		/// Computes every pending node's pure checks (its own inputs, its reads' resolution, its outputs' stamps) once per
+		/// record, on worker threads: they only read the record, the roots and the disk. ReadChanged isn't here, it adds
+		/// producers to the graph. The async build resumes on the caller's context afterwards, like RunJobs.
+		/// </summary>
+		Task Precheck( IEnumerable<Node> candidates )
+		{
+			var stale = candidates.Where( x => !x.Checked || !ReferenceEquals( x.CheckedRecord, x.Record ) ).ToList();
+			if ( stale.Count == 0 ) return Task.CompletedTask;
+
+			void Check( Node node )
+			{
+				node.CheckedRecord = node.Record;
+				node.Self = SelfDirty( node ) ?? Shadowed( node );
+				(node.Outputs, node.OutputRebuilt) = node.Record is null ? (null, false) : CheckOutputs( node );
+				node.Checked = true;
+			}
+			void All() => Parallel.ForEach( stale, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, Check );
+
+			if ( asynchronous ) return Task.Run( All );
+			All();
+			return Task.CompletedTask;
 		}
 
 		Task<List<CompileResult>> RunJobs( List<Node> items, Func<Node, CompileResult> run ) =>
@@ -1052,21 +1081,35 @@ public static class ContentBuilder
 		string Dirty( Node node )
 		{
 			if ( request.Force ) return "forced";
-			if ( (SelfDirty( node ) ?? Shadowed( node )) is { } reason ) return reason;
+			if ( !node.Checked || !ReferenceEquals( node.CheckedRecord, node.Record ) ) throw new InvalidOperationException( $"{node.Name} wasn't prechecked" );
+			return node.Self ?? node.Outputs ?? ReadChanged( node );
+		}
 
+		/// <summary>
+		/// Why an owned output no longer matches its record, or null. Also whether one exists with other bytes, which
+		/// RebuiltOutside needs. Reads only the record and disk: safe on any thread.
+		/// </summary>
+		(string Reason, bool Rebuilt) CheckOutputs( Node node )
+		{
+			string reason = null;
+			var rebuilt = false;
 			foreach ( var (key, stamp) in node.Record.Outputs )
 			{
 				// An output in a root this build doesn't mount can't be checked or rebuilt here
 				if ( node.Root.Resolve( key ) is not { } path ) continue;
 
-				if ( node.Root.Locate( key ) is null ) return $"{key} is missing";
+				// Locate only for a missing file: it stats the resolved path first, which FileInfo already did
+				var file = new FileInfo( path );
+				if ( !file.Exists && node.Root.Locate( key ) is null ) { reason ??= $"{key} is missing"; continue; }
 				if ( Shared( key ) ) continue;
 
-				var file = new FileInfo( path );
-				if ( (file.Length != stamp.Size || file.LastWriteTimeUtc.Ticks != stamp.Time) && Hashing.File( file.FullName ) != stamp.Hash ) return $"{key} was modified";
+				if ( (file.Length != stamp.Size || file.LastWriteTimeUtc.Ticks != stamp.Time) && Hashing.File( file.FullName ) != stamp.Hash )
+				{
+					reason ??= $"{key} was modified";
+					rebuilt = true;
+				}
 			}
-
-			return ReadChanged( node );
+			return (reason, rebuilt);
 		}
 
 		/// <summary>
