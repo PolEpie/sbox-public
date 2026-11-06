@@ -216,6 +216,30 @@ public static class ContentBuilder
 	public static string LockFile( ContentRoot root ) => Path.Combine( root.StateDirectory, "lock" );
 
 	/// <summary>
+	/// The files a build of the root published that are still as it published them (same size and time), from records
+	/// whose own inputs are untouched too. SboxBuild's artifact restore leaves these alone: otherwise each restore would
+	/// undo the last content build, and the next one would compile all of it again. An asset whose source changed (a
+	/// pull) isn't listed, so its newer artifact is restored and the content build adopts it rather than compiling it.
+	/// </summary>
+	public static IEnumerable<string> Published( ContentRoot root, IReadOnlyDictionary<string, string> outputRoots )
+	{
+		var state = new RootState( root, outputRoots, new Dictionary<string, string>() );
+		foreach ( var record in RecordStore.Load( root.StateDirectory ) )
+		{
+			// shortcut: compiler versions and arguments aren't checked (they need the compiler), so an artifact rebuilt
+			// only for a new compiler stays local and is recompiled; check them here if that shows up after updates
+			if ( record.ChangedWhileCompiling || record.Inputs.Any( x => new FileInfo( x.Path ) is var input && (input.Exists != x.Exists || input.Exists && (input.Length != x.Size || input.LastWriteTimeUtc.Ticks != x.Time)) ) ) continue;
+
+			foreach ( var (key, stamp) in record.Outputs )
+			{
+				if ( state.Resolve( key ) is not { } path ) continue;
+				var file = new FileInfo( path );
+				if ( file.Exists && file.Length == stamp.Size && file.LastWriteTimeUtc.Ticks == stamp.Time ) yield return path;
+			}
+		}
+	}
+
+	/// <summary>
 	/// One root of the build: its sources, its records, and where its files go.
 	/// </summary>
 	sealed class RootState( ContentRoot def, IReadOnlyDictionary<string, string> outputRoots, IReadOnlyDictionary<string, string> fallbacks )

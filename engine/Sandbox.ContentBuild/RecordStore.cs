@@ -70,11 +70,18 @@ sealed class RecordStore
 		foreach ( var partial in Directory.GetFiles( journals, "*.tmp" ) ) File.Delete( partial );
 		foreach ( var journal in Directory.GetFiles( journals, "*.json" ) ) Recover( journal );
 
-		foreach ( var file in Directory.GetFiles( records, "*.json" ) )
-		{
-			var record = JsonSerializer.Deserialize<AssetRecord>( File.ReadAllText( file ) );
-			All[record.Source] = record;
-		}
+		foreach ( var record in Load( state ) ) All[record.Source] = record;
+	}
+
+	/// <summary>
+	/// The records under a state directory, as written, without recovering an interrupted publication first.
+	/// </summary>
+	public static IEnumerable<AssetRecord> Load( string state )
+	{
+		var dir = Path.Combine( state, "records" );
+		if ( !Directory.Exists( dir ) ) yield break;
+
+		foreach ( var file in Directory.GetFiles( dir, "*.json" ) ) yield return JsonSerializer.Deserialize<AssetRecord>( File.ReadAllText( file ) );
 	}
 
 	public IEnumerable<string> Owners( string output ) => All.Values.Where( x => x.Outputs.ContainsKey( output ) ).Select( x => x.Source );
