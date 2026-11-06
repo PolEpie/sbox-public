@@ -63,7 +63,13 @@ public sealed class BuildRequest
 	/// Compiles at once. 1 hands them out one at a time, from the calling thread.
 	/// </summary>
 	public int MaxJobs { get; init; } = Environment.ProcessorCount;
-	public Action<string> JobFinished { get; init; }
+
+	/// <summary>
+	/// Called on the thread that settles jobs as each compile finishes: its source, the compiles finished so far, and
+	/// the compiles known so far (started, queued, or found out of date and waiting). The total grows when a compile
+	/// makes what reads it out of date.
+	/// </summary>
+	public Action<string, int, int> JobFinished { get; init; }
 
 	/// <summary>
 	/// The files a publication just replaced, added or deleted, as soon as it has, on the thread that settles jobs.
@@ -775,7 +781,8 @@ public static class ContentBuilder
 				try { Finish( finished, done.Result, finishedJob.Staging ); }
 				finally { DeleteStaging( finishedJob.Staging ); }
 
-				request.JobFinished?.Invoke( finished.Name );
+				var known = report.Jobs.Count + queue.Count + nodes.Values.Count( x => x.State == State.Waiting && (request.Force || x.Self is not null || x.Outputs is not null) );
+				request.JobFinished?.Invoke( finished.Name, report.Jobs.Count - running.Count, known );
 			}
 		}
 
