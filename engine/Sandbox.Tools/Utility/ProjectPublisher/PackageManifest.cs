@@ -194,8 +194,11 @@ public partial class ProjectPublisher
 			return FindStaleBakedScenes( assets.Distinct() );
 		}
 
+		// A bake beside the scene means it was compiled; once the scene changes, the bake can't be used and any recompile
+		// (the editor's content build on save, publish's own) leaves .scene_c without the geometry, so .scene_c can't tell
 		static List<string> FindStaleBakedScenes( IEnumerable<Asset> assets ) => assets
-			.Where( x => x.AssetType?.ResourceType == typeof( SceneFile ) && !x.IsCompiled && SceneCompiler.HasCompiledOutput( x ) && !SceneBake.IsCurrent( x.GetSourceFile( true ) ) )
+			.Where( x => x.AssetType?.ResourceType == typeof( SceneFile ) && x.GetSourceFile( true ) is { Length: > 0 } source
+				&& File.Exists( SceneBake.FilePath( source ) ) && !SceneBake.IsCurrent( source ) )
 			.Select( x => $"Compiled scene '{x.Path}' is out of date; it will be published without compiled geometry. Compile it again in the editor before publishing." )
 			.ToList();
 
