@@ -236,6 +236,10 @@ partial class PublishWizard
 				BuildWorkshop();
 			}
 
+			// Not blocking: the scene still publishes, just without its compiled geometry
+			foreach ( var message in ProjectPublisher.PackageManifest.FindStaleBakedScenes( Project ) )
+				BodyLayout.Add( new WarningBox( System.Net.WebUtility.HtmlEncode( message ), this ) );
+
 			UploadWarning = new WarningBox( WarningText, this );
 			UploadWarning.BackgroundColor = Theme.Red;
 			UploadWarning.Visible = false;

@@ -165,7 +165,7 @@ public partial class ProjectPublisher
 			}
 		}
 
-		IEnumerable<string> AllAssetPaths( Project project )
+		static IEnumerable<string> AllAssetPaths( Project project )
 		{
 			if ( project.HasAssetsPath() )
 				yield return project.GetAssetsPath();
@@ -177,6 +177,27 @@ public partial class ProjectPublisher
 					yield return library.Project.GetAssetsPath();
 			}
 		}
+
+		/// <summary>
+		/// Messages for the project's compiled scenes that can no longer be rebuilt from their bake, so publish would ship them without compiled geometry.
+		/// </summary>
+		public static List<string> FindStaleBakedScenes( Project project )
+		{
+			var assets = new List<Asset>();
+
+			foreach ( var path in AllAssetPaths( project ) )
+			{
+				var assetPath = path.Replace( '\\', '/' ).TrimEnd( '/' ) + '/';
+				assets.AddRange( AssetSystem.All.Where( x => x.AbsolutePath.StartsWith( assetPath, StringComparison.OrdinalIgnoreCase ) ) );
+			}
+
+			return FindStaleBakedScenes( assets.Distinct() );
+		}
+
+		static List<string> FindStaleBakedScenes( IEnumerable<Asset> assets ) => assets
+			.Where( x => x.AssetType?.ResourceType == typeof( SceneFile ) && !x.IsCompiled && SceneCompiler.HasCompiledOutput( x ) && !SceneBake.IsCurrent( x.GetSourceFile( true ) ) )
+			.Select( x => $"Compiled scene '{x.Path}' is out of date; it will be published without compiled geometry. Compile it again in the editor before publishing." )
+			.ToList();
 
 		internal async Task BuildFrom( Asset singleAsset, Project project = null, CancellationToken cancel = default )
 		{
@@ -243,15 +264,12 @@ public partial class ProjectPublisher
 			assets = assets.Distinct().ToList();
 
 			// Must run before any CompileIfNeededAsync on these assets: a stale native state makes that call replace the bake with a plain compile.
-			foreach ( var asset in assets )
+			foreach ( var message in FindStaleBakedScenes( assets ) )
 			{
-				if ( asset.AssetType?.ResourceType != typeof( SceneFile ) || asset.IsCompiled || !SceneCompiler.HasCompiledOutput( asset ) || SceneBake.IsCurrent( asset.GetSourceFile( true ) ) )
-					continue;
-
-				var message = $"Compiled scene '{asset.Path}' is out of date; it will be published without compiled geometry. Compile it again in the editor before publishing.";
 				Warnings.Add( message );
 				Log.Warning( message );
 			}
+
 			var candidates = assets;
 
 			if ( project.Config.Type == "game" )
