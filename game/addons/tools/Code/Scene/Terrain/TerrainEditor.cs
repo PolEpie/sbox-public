@@ -280,9 +280,32 @@ public partial class TerrainEditorTool : EditorTool
 		}
 	}
 
-	// What each terrain was last written as. Writing one compresses its maps (seconds for a large terrain), so a scene
-	// save only writes the terrains that changed since.
+	// What each terrain was last written as, or read as when its scene opened. Writing one compresses its maps (seconds
+	// for a large terrain), so a scene save only writes the terrains that changed since.
 	static readonly System.Runtime.CompilerServices.ConditionalWeakTable<TerrainStorage, string> savedTerrains = new();
+	static Scene baselineScene;
+
+	/// <summary>
+	/// A scene that becomes active with nothing unsaved has its terrain assets as they are on disk: edits only ever
+	/// happen to the active scene, a frame later. One with unsaved changes (a tab switch, a hotload that reset these
+	/// fields mid-edit) may hold unsaved terrain edits, so it gets no baseline and its next save writes. A terrain
+	/// already known (shared with a scene opened before) keeps what it had.
+	/// </summary>
+	[EditorEvent.Frame]
+	static void BaselineTerrains()
+	{
+		var session = SceneEditorSession.Active;
+		var scene = session?.Scene;
+		if ( scene == baselineScene ) return;
+		baselineScene = scene;
+		if ( scene is null || session.HasUnsavedChanges ) return;
+
+		foreach ( var terrain in scene.Components.GetAll<Terrain>( FindMode.EverythingInDescendants ) )
+		{
+			if ( terrain.Storage is null || string.IsNullOrEmpty( terrain.Storage.ResourcePath ) ) continue;
+			if ( !savedTerrains.TryGetValue( terrain.Storage, out _ ) ) savedTerrains.Add( terrain.Storage, Fingerprint( terrain.Storage ) );
+		}
+	}
 
 	[Event( "scene.saved" )]
 	static void OnSceneSaved( Scene scene )
@@ -292,8 +315,7 @@ public partial class TerrainEditorTool : EditorTool
 			if ( terrain.Storage is null ) continue;
 			if ( string.IsNullOrEmpty( terrain.Storage.ResourcePath ) ) continue;
 
-			// shortcut: nothing tells the first save of a session whether the terrain changed since it was loaded, so
-			// that one always writes it; fingerprint it on load if the first save shows up as slow
+			// A terrain added to the scene after it opened has no baseline yet, so its first save writes it
 			var fingerprint = Fingerprint( terrain.Storage );
 			if ( savedTerrains.TryGetValue( terrain.Storage, out var saved ) && saved == fingerprint ) continue;
 
