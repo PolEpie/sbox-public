@@ -57,6 +57,16 @@ internal static class SceneSource
 		if ( !asset.SaveSource( file ) )
 			return false;
 
+		// Saving compiled the scene here, from what was just written. Its files are taken in now as already built, so
+		// they don't start a content build that would only describe and adopt the same compile. Nothing reads a
+		// .scene_c, and the build's record of the scene catches up the next time another change starts one. A failed
+		// compile is left to the content build to report.
+		if ( asset.IsCompiledAndUpToDate && !asset.IsCompileFailed )
+		{
+			var source = asset.GetSourceFile( true );
+			IAssetSystem.RegisterBuildOutputs( string.Join( "\n", source, source + "_d", asset.GetCompiledFile( true ) ) );
+		}
+
 		if ( asset.LoadResource<SceneFile>() is null )
 			return false;
 

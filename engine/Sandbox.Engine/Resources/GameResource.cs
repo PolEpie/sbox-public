@@ -458,8 +458,11 @@ public abstract partial class GameResource : Resource, ISourceLineProvider
 		{
 			try
 			{
+				// Unchanged blobs (a scene saved after moving an object) aren't written again: a write is a change on
+				// disk, which starts a content build
 				var blobPath = filename + "_d";
-				System.IO.File.WriteAllBytes( blobPath, BinaryData );
+				if ( !System.IO.File.Exists( blobPath ) || new System.IO.FileInfo( blobPath ).Length != BinaryData.Length || !BinaryData.AsSpan().SequenceEqual( System.IO.File.ReadAllBytes( blobPath ) ) )
+					System.IO.File.WriteAllBytes( blobPath, BinaryData );
 			}
 			catch ( Exception e )
 			{
