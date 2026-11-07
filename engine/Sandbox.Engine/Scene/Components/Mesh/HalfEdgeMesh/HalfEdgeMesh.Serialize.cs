@@ -1,43 +1,38 @@
 using System.IO;
+using System.Runtime.InteropServices;
+using Sandbox;
 
 namespace HalfEdgeMesh;
 
 partial class Mesh
 {
-	public byte[] Serialize()
-	{
-		using var ms = new MemoryStream();
-		using ( var bw = new BinaryWriter( ms ) )
-		{
-			Serialize( bw );
-		}
+	/// <summary>
+	/// Size in bytes of what <see cref="Serialize"/> writes.
+	/// </summary>
+	internal int SerializedSize => 12 + MemoryMarshal.AsBytes( VertexList.AsSpan() ).Length + MemoryMarshal.AsBytes( HalfEdgeList.AsSpan() ).Length + MemoryMarshal.AsBytes( FaceList.AsSpan() ).Length;
 
-		return ms.ToArray();
+	/// <summary>
+	/// The counts, then every vertex's edge, every half edge's vertex, opposite, next and face, and every face's edge,
+	/// as little-endian ints. The structs are those ints in that order, so each list is written as it is in memory.
+	/// </summary>
+	internal void Serialize( ref ByteStream stream )
+	{
+		stream.Write( VertexCount );
+		stream.Write( HalfEdgeCount );
+		stream.Write( FaceCount );
+		stream.Write( MemoryMarshal.AsBytes( VertexList.AsSpan() ) );
+		stream.Write( MemoryMarshal.AsBytes( HalfEdgeList.AsSpan() ) );
+		stream.Write( MemoryMarshal.AsBytes( FaceList.AsSpan() ) );
 	}
 
-	public void Serialize( BinaryWriter writer )
+	/// <summary>
+	/// <paramref name="seed"/> mixed with everything <see cref="Serialize"/> writes, without writing it.
+	/// </summary>
+	internal ulong Hash( ulong seed )
 	{
-		writer.Write( VertexCount );
-		writer.Write( HalfEdgeCount );
-		writer.Write( FaceCount );
-
-		foreach ( var v in VertexList )
-		{
-			writer.Write( v.Edge );
-		}
-
-		foreach ( var he in HalfEdgeList )
-		{
-			writer.Write( he.Vertex );
-			writer.Write( he.OppositeEdge );
-			writer.Write( he.NextEdge );
-			writer.Write( he.Face );
-		}
-
-		foreach ( var f in FaceList )
-		{
-			writer.Write( f.Edge );
-		}
+		seed = PolygonMesh.HashSpan( seed, VertexList.AsSpan() );
+		seed = PolygonMesh.HashSpan( seed, HalfEdgeList.AsSpan() );
+		return PolygonMesh.HashSpan( seed, FaceList.AsSpan() );
 	}
 
 	public void Deserialize( BinaryReader reader )
