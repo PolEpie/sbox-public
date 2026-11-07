@@ -25,16 +25,6 @@ partial class Mesh
 		stream.Write( MemoryMarshal.AsBytes( FaceList.AsSpan() ) );
 	}
 
-	/// <summary>
-	/// <paramref name="seed"/> mixed with everything <see cref="Serialize"/> writes, without writing it.
-	/// </summary>
-	internal ulong Hash( ulong seed )
-	{
-		seed = PolygonMesh.HashSpan( seed, VertexList.AsSpan() );
-		seed = PolygonMesh.HashSpan( seed, HalfEdgeList.AsSpan() );
-		return PolygonMesh.HashSpan( seed, FaceList.AsSpan() );
-	}
-
 	public void Deserialize( BinaryReader reader )
 	{
 		var vertexCount = reader.ReadInt32();

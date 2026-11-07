@@ -272,23 +272,4 @@ public class PolygonMeshSerializationTest
 			Assert.AreEqual( s1, s2, $"Face {i} TextureScale drifted after round-trip" );
 		}
 	}
-
-	/// <summary>
-	/// Saving reuses a mesh's blob while its data is unchanged; an edit after a save must still be saved.
-	/// </summary>
-	[TestMethod]
-	public void EditAfterSaveIsSaved()
-	{
-		var mesh = Json.Deserialize<PolygonMesh>( LegacyMeshJson );
-		Json.Serialize( mesh );
-
-		mesh.SetVertexPosition( mesh.VertexHandles.First(), new Vector3( 1, 2, 3 ) );
-		mesh.RemoveFaces( [mesh.FaceHandles.Last()] );
-		var faces = mesh.FaceHandles.Count();
-
-		var restored = Json.Deserialize<PolygonMesh>( Json.Serialize( mesh ) );
-
-		Assert.AreEqual( new Vector3( 1, 2, 3 ), restored.GetVertexPosition( restored.VertexHandles.First() ) );
-		Assert.AreEqual( faces, restored.FaceHandles.Count() );
-	}
 }

@@ -3,7 +3,6 @@ using System.IO.Compression;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text.Json;
-using Sandbox.Hashing;
 
 namespace Sandbox;
 
@@ -180,7 +179,7 @@ public partial class PolygonMesh
 		// serialized because they are world-space dependent and derived at runtime.
 		// MeshComponent sets Mesh.Transform = WorldTransform on enable/transform change, which
 		// triggers ComputeFaceTextureParametersFromCoordinates() to recompute them from TextureCoord.
-		var data = mesh.BlobBytes();
+		var data = MeshBlob.Write( mesh );
 		writer.WritePropertyName( "Data" );
 
 		if ( BlobDataSerializer.IsActive )
@@ -191,55 +190,13 @@ public partial class PolygonMesh
 		if ( mesh._materialsById.Count > 0 )
 		{
 			writer.WritePropertyName( "Materials" );
-			JsonSerializer.Serialize( writer, Enumerable.Range( 0, mesh._materialsById.Count )
-				.Select( x => mesh._materialsById[x] )
-				.Select( x => x.Name ) );
+			JsonSerializer.Serialize( writer, mesh.MaterialNames() );
 		}
 
 		writer.WriteEndObject();
 	}
 
-	sealed record WrittenBlob( ulong Hash, byte[] Data );
-
-	// The blob as last written and a hash of the streams it was made from. A scene save writes every mesh, and most
-	// haven't changed since the last one: hashing their streams is far cheaper than writing them again.
-	WrittenBlob _written;
-
-	/// <summary>
-	/// The mesh blob's data (version prefix + payload), written from the streams unless they're as last written.
-	/// </summary>
-	byte[] BlobBytes()
-	{
-		var hash = HashStreams();
-		if ( _written is { } written && written.Hash == hash )
-			return written.Data;
-
-		var data = MeshBlob.Write( this );
-		_written = new WrittenBlob( hash, data );
-		return data;
-	}
-
-	/// <summary>
-	/// A change check over everything the blob holds. Not cryptographic: a 64-bit collision between two states of the
-	/// same mesh would write the older bytes.
-	/// </summary>
-	ulong HashStreams()
-	{
-		var hash = Topology.Hash( 0 );
-		hash = HashSpan( hash, Positions.AsSpan() );
-		hash = HashSpan( hash, Blends.AsSpan() );
-		hash = HashSpan( hash, Colors.AsSpan() );
-		hash = HashSpan( hash, TextureCoord.AsSpan() );
-		hash = HashSpan( hash, MaterialIndex.AsSpan() );
-		return HashSpan( hash, EdgeFlags.AsSpan() );
-	}
-
-	/// <summary>
-	/// <paramref name="seed"/> mixed with a span's bytes and its length, so data moving from one span to the next
-	/// changes the result.
-	/// </summary>
-	internal static ulong HashSpan<T>( ulong seed, ReadOnlySpan<T> data ) where T : struct =>
-		XxHash3.HashToUInt64( MemoryMarshal.AsBytes( data ), unchecked((long)(seed ^ ((ulong)data.Length * 0x9E3779B97F4A7C15UL))) );
+	IEnumerable<string> MaterialNames() => Enumerable.Range( 0, _materialsById.Count ).Select( x => _materialsById[x].Name );
 
 	/// <summary>
 	/// Heavy <see cref="PolygonMesh"/> data (topology + per-element streams) serialized as a
