@@ -280,6 +280,10 @@ public partial class TerrainEditorTool : EditorTool
 		}
 	}
 
+	// What each terrain was last written as. Writing one compresses its maps (seconds for a large terrain), so a scene
+	// save only writes the terrains that changed since.
+	static readonly System.Runtime.CompilerServices.ConditionalWeakTable<TerrainStorage, string> savedTerrains = new();
+
 	[Event( "scene.saved" )]
 	static void OnSceneSaved( Scene scene )
 	{
@@ -288,9 +292,34 @@ public partial class TerrainEditorTool : EditorTool
 			if ( terrain.Storage is null ) continue;
 			if ( string.IsNullOrEmpty( terrain.Storage.ResourcePath ) ) continue;
 
+			// shortcut: nothing tells the first save of a session whether the terrain changed since it was loaded, so
+			// that one always writes it; fingerprint it on load if the first save shows up as slow
+			var fingerprint = Fingerprint( terrain.Storage );
+			if ( savedTerrains.TryGetValue( terrain.Storage, out var saved ) && saved == fingerprint ) continue;
+
 			var asset = AssetSystem.FindByPath( terrain.Storage.ResourcePath );
-			asset?.SaveToDisk( terrain.Storage );
+			if ( asset?.SaveToDisk( terrain.Storage ) == true ) savedTerrains.AddOrUpdate( terrain.Storage, fingerprint );
 		}
+	}
+
+	/// <summary>
+	/// Everything a terrain asset saves: its maps and its settings. A setting added to <see cref="TerrainStorage"/> has
+	/// to be added here, or changing only it won't save the terrain.
+	/// </summary>
+	static string Fingerprint( TerrainStorage storage )
+	{
+		using var hash = System.Security.Cryptography.IncrementalHash.CreateHash( System.Security.Cryptography.HashAlgorithmName.SHA256 );
+		hash.AppendData( System.Runtime.InteropServices.MemoryMarshal.AsBytes( storage.HeightMap.AsSpan() ) );
+		hash.AppendData( System.Runtime.InteropServices.MemoryMarshal.AsBytes( storage.ControlMap.AsSpan() ) );
+		hash.AppendData( System.Text.Encoding.UTF8.GetBytes( Json.Serialize( new
+		{
+			storage.Resolution,
+			storage.TerrainSize,
+			storage.TerrainHeight,
+			Materials = storage.Materials.Select( x => x?.ResourcePath ),
+			storage.MaterialSettings,
+		} ) ) );
+		return Convert.ToHexString( hash.GetHashAndReset() );
 	}
 }
 
