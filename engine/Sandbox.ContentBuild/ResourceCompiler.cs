@@ -62,7 +62,7 @@ public sealed class ResourceCompiler( string executable, AssetTypeTable types, I
 	readonly List<CompilerWorker> idle = [];
 	readonly ConcurrentQueue<string> ended = new();
 	SemaphoreSlim slots;
-	int launches, evicted;
+	int launches, evicted, finishes;
 	Dictionary<string, string> managed;
 
 	/// <summary>
@@ -262,6 +262,22 @@ public sealed class ResourceCompiler( string executable, AssetTypeTable types, I
 	}
 
 	/// <summary>
+	/// Starts a worker for these mounts and arguments if none is idle, so the next job doesn't wait for one to start
+	/// (~20 s on a large project: engine, render device, the project's compilers). Blocks while every slot is busy.
+	/// </summary>
+	public void Prewarm( IReadOnlyList<(string Mod, string Path)> mounted, IReadOnlyList<string> compilerArgs )
+	{
+		var finished = Volatile.Read( ref finishes );
+
+		// An idle one is taken and put back; otherwise a new one starts and waits for its first job
+		if ( Take( mounted, compilerArgs, default ) is not { } worker ) return;
+
+		// Its owner let the workers go meanwhile (a hotload, the editor closing): none may outlive that
+		if ( Volatile.Read( ref finishes ) != finished ) End( worker, "finished while starting" );
+		else Return( worker );
+	}
+
+	/// <summary>
 	/// A worker leaves early; its slot is free again however stopping it goes.
 	/// </summary>
 	void End( CompilerWorker worker, string reason )
@@ -275,7 +291,11 @@ public sealed class ResourceCompiler( string executable, AssetTypeTable types, I
 	/// Every idle worker goes (a build has none busy once it returns), all at once: each takes seconds to shut its
 	/// engine down. The compiler can be used again afterwards and starts new ones.
 	/// </summary>
-	public void Finished() => StopIdle( 0 );
+	public void Finished()
+	{
+		Interlocked.Increment( ref finishes );
+		StopIdle( 0 );
+	}
 
 	/// <summary>
 	/// Idle workers beyond <paramref name="keep"/> go, the longest idle first, giving back their memory (~1.3 GB each).

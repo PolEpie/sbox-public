@@ -201,6 +201,10 @@ internal static class EditorContentBuild
 			Publish( report, epoch );
 			if ( generation == codeGeneration ) builtEpoch = epoch;
 			pruneOrphans |= report.Changed.Count > 0;
+
+			// The first save after the editor opens (or after a build whose worker had to go) would otherwise wait for a
+			// worker to start before its one compile. One kept warm is what WarmWorkers holds on to anyway.
+			_ = Task.Run( () => assetCompiler.Prewarm( request.Mounts, request.CompilerArgs ) );
 		}
 		catch ( Exception e )
 		{
