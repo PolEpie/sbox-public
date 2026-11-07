@@ -1,4 +1,5 @@
-﻿using Sandbox.Engine;
+﻿using System.Buffers;
+using Sandbox.Engine;
 using Facepunch.ActionGraphs;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -58,37 +59,172 @@ public abstract partial class Component : BytePack.ISerializer
 
 		if ( ComponentVersion != 0 ) json[JsonKeys.Version] = ComponentVersion;
 
-		foreach ( var member in ReflectionQueryCache.OrderedSerializableMembers( GetType() ) )
+		var values = ValueBuffers.Rent();
+		try
 		{
-			if ( member is FieldDescription field )
+			foreach ( var member in ReflectionQueryCache.OrderedSerializableMembers( GetType() ) )
 			{
-				var value = field.GetValue( this );
-				if ( skipNulls && value is null ) continue;
-				try
+				if ( member is FieldDescription field )
 				{
-					json.Add( field.Name, Json.ToNode( value, field.FieldType ) );
+					var value = field.GetValue( this );
+					if ( skipNulls && value is null ) continue;
+					try
+					{
+						values.Add( json, field.Name, value, field.FieldType );
+					}
+					catch ( System.Exception e )
+					{
+						Log.Warning( e, $"Error when serializing {this}.{field.Name} ({e.Message})\n{value}" );
+					}
 				}
-				catch ( System.Exception e )
+				else if ( member is PropertyDescription prop )
 				{
-					Log.Warning( e, $"Error when serializing {this}.{field.Name} ({e.Message})\n{value}" );
+					var value = prop.GetValue( this );
+					if ( skipNulls && value is null ) continue;
+					try
+					{
+						values.Add( json, prop.Name, value, prop.PropertyType );
+					}
+					catch ( System.Exception e )
+					{
+						Log.Warning( e, $"Error when serializing {this}.{prop.Name} ({e.Message})\n{value}" );
+					}
 				}
 			}
-			else if ( member is PropertyDescription prop )
-			{
-				var value = prop.GetValue( this );
-				if ( skipNulls && value is null ) continue;
-				try
-				{
-					json.Add( prop.Name, Json.ToNode( value, prop.PropertyType ) );
-				}
-				catch ( System.Exception e )
-				{
-					Log.Warning( e, $"Error when serializing {this}.{prop.Name} ({e.Message})\n{value}" );
-				}
-			}
+
+			values.Fill( json );
+		}
+		finally
+		{
+			ValueBuffers.Return( values );
 		}
 
 		return json;
+	}
+
+	/// <summary>
+	/// Serializes a component's member values into one buffer and parses it once, instead of a buffer, a parse and a
+	/// document per member (<see cref="Json.ToNode(object, Type)"/>). Each member gets the same kind of node that would
+	/// have made, backed by the shared document.
+	/// </summary>
+	sealed class ValueBuffers : IBufferWriter<byte>
+	{
+		// Reused per thread; taken while in use, so a member that serializes a component gets its own.
+		[ThreadStatic] static ValueBuffers _cached;
+
+		// The member values as a JSON array, written straight from the serializer. Rented like the serializer's own buffer.
+		byte[] _bytes = ArrayPool<byte>.Shared.Rent( 4096 );
+		int _count;
+		readonly List<string> _names = new();
+		Utf8JsonWriter _writer;
+
+		public static ValueBuffers Rent()
+		{
+			var buffers = _cached ?? new ValueBuffers();
+			_cached = null;
+			return buffers;
+		}
+
+		public static void Return( ValueBuffers buffers )
+		{
+			// Don't keep a large buffer (a big mesh's base64) for the thread's lifetime.
+			if ( buffers._bytes.Length > 1 << 20 )
+			{
+				ArrayPool<byte>.Shared.Return( buffers._bytes );
+				return;
+			}
+
+			buffers._count = 0;
+			buffers._names.Clear();
+			_cached = buffers;
+		}
+
+		/// <summary>
+		/// Adds <paramref name="name"/> to <paramref name="json"/>, with its value filled in by <see cref="Fill"/>.
+		/// Throws, adding nothing, if the value can't be serialized.
+		/// </summary>
+		public void Add( JsonObject json, string name, object value, Type type )
+		{
+			if ( value is IJsonPopulator jss )
+			{
+				json.Add( name, jss.Serialize() );
+				return;
+			}
+
+			var start = _count;
+			try
+			{
+				GetSpan( 1 )[0] = (byte)(_names.Count == 0 ? '[' : ',');
+				Advance( 1 );
+
+				var options = Json.options;
+				if ( _writer is null )
+					_writer = new Utf8JsonWriter( this, new JsonWriterOptions { Encoder = options.Encoder, MaxDepth = options.MaxDepth } );
+				else
+					_writer.Reset( this );
+
+				System.Text.Json.JsonSerializer.Serialize( _writer, value, type, options );
+				_writer.Flush();
+				if ( _count == start + 1 ) throw new JsonException( "No value was written" );
+
+				json.Add( name, null );
+				_names.Add( name );
+			}
+			catch
+			{
+				_count = start;
+				throw;
+			}
+		}
+
+		public void Fill( JsonObject json )
+		{
+			if ( _names.Count == 0 ) return;
+
+			GetSpan( 1 )[0] = (byte)']';
+			Advance( 1 );
+
+			var options = Json.options;
+			var reader = new Utf8JsonReader( _bytes.AsSpan( 0, _count ), new JsonReaderOptions { MaxDepth = options.MaxDepth + 1 } );
+			var values = JsonElement.ParseValue( ref reader );
+			var nodeOptions = new JsonNodeOptions { PropertyNameCaseInsensitive = options.PropertyNameCaseInsensitive };
+
+			var i = 0;
+			foreach ( var value in values.EnumerateArray() )
+			{
+				json[_names[i++]] = value.ValueKind switch
+				{
+					JsonValueKind.Object => JsonObject.Create( value, nodeOptions ),
+					JsonValueKind.Array => JsonArray.Create( value, nodeOptions ),
+					_ => JsonValue.Create( value, nodeOptions ),
+				};
+			}
+		}
+
+		public void Advance( int count ) => _count += count;
+
+		public Memory<byte> GetMemory( int sizeHint = 0 )
+		{
+			Reserve( sizeHint );
+			return _bytes.AsMemory( _count );
+		}
+
+		public Span<byte> GetSpan( int sizeHint = 0 )
+		{
+			Reserve( sizeHint );
+			return _bytes.AsSpan( _count );
+		}
+
+		void Reserve( int sizeHint )
+		{
+			sizeHint = Math.Max( sizeHint, 1 );
+			if ( _bytes.Length - _count >= sizeHint ) return;
+
+			var bigger = ArrayPool<byte>.Shared.Rent( Math.Max( _bytes.Length * 2, _count + sizeHint ) );
+			_bytes.AsSpan( 0, _count ).CopyTo( bigger );
+			ArrayPool<byte>.Shared.Return( _bytes );
+			_bytes = bigger;
+		}
 	}
 
 	JsonObject jsonData;
