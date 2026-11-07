@@ -316,20 +316,30 @@ unsafe class ResourceCompileContextImp : ResourceCompileContext, IDisposable
 	}
 
 
+	// A scene names the same few hundred assets thousands of times; each lookup is a file check (~1 ms behind an
+	// antivirus filter). The answer can't change while one resource compiles.
+	readonly Dictionary<string, string> mountedPaths = new( StringComparer.Ordinal );
+
 	/// <summary>
 	/// Where the mounts (generated resources' too) have an asset's file: its path in the root that has it (a later
 	/// root's shadowing an earlier one's), or null if none does. A compiled file is an asset's by its absolute path only,
 	/// as the asset system knows them.
 	/// </summary>
-	static string MountedPath( string path )
+	string MountedPath( string path )
 	{
+		if ( mountedPaths.TryGetValue( path, out var known ) )
+			return known;
+
+		string found;
 		if ( System.IO.Path.IsPathFullyQualified( path ) )
-			return System.IO.File.Exists( path ) ? FileSystem.Mounted?.GetRelativePath( path )?.TrimStart( '/' ) : null;
+			found = System.IO.File.Exists( path ) ? FileSystem.Mounted?.GetRelativePath( path )?.TrimStart( '/' ) : null;
+		else if ( path.EndsWith( "_c", StringComparison.OrdinalIgnoreCase ) )
+			found = null;
+		else
+			found = FileSystem.Mounted?.FileExists( path ) == true ? path.TrimStart( '/', '\\' ) : null;
 
-		if ( path.EndsWith( "_c", StringComparison.OrdinalIgnoreCase ) )
-			return null;
-
-		return FileSystem.Mounted?.FileExists( path ) == true ? path.TrimStart( '/', '\\' ) : null;
+		mountedPaths[path] = found;
+		return found;
 	}
 
 	class ChildImplementation : ResourceCompileContext.Child
