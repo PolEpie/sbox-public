@@ -330,18 +330,39 @@ public partial class TerrainEditorTool : EditorTool
 	/// </summary>
 	static string Fingerprint( TerrainStorage storage )
 	{
-		using var hash = System.Security.Cryptography.IncrementalHash.CreateHash( System.Security.Cryptography.HashAlgorithmName.SHA256 );
-		hash.AppendData( System.Runtime.InteropServices.MemoryMarshal.AsBytes( storage.HeightMap.AsSpan() ) );
-		hash.AppendData( System.Runtime.InteropServices.MemoryMarshal.AsBytes( storage.ControlMap.AsSpan() ) );
-		hash.AppendData( System.Text.Encoding.UTF8.GetBytes( Json.Serialize( new
+		var settings = Json.Serialize( new
 		{
 			storage.Resolution,
 			storage.TerrainSize,
 			storage.TerrainHeight,
 			Materials = storage.Materials.Select( x => x?.ResourcePath ),
 			storage.MaterialSettings,
-		} ) ) );
-		return Convert.ToHexString( hash.GetHashAndReset() );
+		} );
+		return $"{HashMap( System.Runtime.InteropServices.MemoryMarshal.AsBytes( storage.HeightMap.AsSpan() ) ):x16}{HashMap( System.Runtime.InteropServices.MemoryMarshal.AsBytes( storage.ControlMap.AsSpan() ) ):x16}{settings}";
+	}
+
+	/// <summary>
+	/// A change check over a map, not a cryptographic hash: SHA-256 took a second on a large terrain. Four lanes of
+	/// xor-multiply-rotate, each step a bijection of the lane, so a change confined to one lane always changes the result.
+	/// </summary>
+	static ulong HashMap( ReadOnlySpan<byte> data )
+	{
+		static ulong Mix( ulong h, ulong x ) => System.Numerics.BitOperations.RotateLeft( (h ^ x) * 0x9E3779B97F4A7C15UL, 31 );
+
+		var words = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ulong>( data );
+		ulong a = 1, b = 2, c = 3, d = 4;
+		var i = 0;
+		for ( ; i + 4 <= words.Length; i += 4 )
+		{
+			a = Mix( a, words[i] );
+			b = Mix( b, words[i + 1] );
+			c = Mix( c, words[i + 2] );
+			d = Mix( d, words[i + 3] );
+		}
+		for ( ; i < words.Length; i++ ) a = Mix( a, words[i] );
+		foreach ( var x in data[(words.Length * 8)..] ) b = Mix( b, x );
+
+		return Mix( Mix( Mix( Mix( (ulong)data.Length, a ), b ), c ), d );
 	}
 }
 
