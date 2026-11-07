@@ -154,14 +154,31 @@ internal static class ResourceLoader
 		if ( string.IsNullOrEmpty( type.Extension ) )
 			return;
 
+		// Keyed and captured without the assembly version: a hotloaded game type keeps its watcher, and the callback
+		// looks the type up when files change. Capturing the type pinned the unloaded assembly it came from, with every
+		// older version that one still referenced, and kept loading changed files with the old type.
+		var assemblyName = type.TargetType.Assembly.GetName().Name;
+		var typeName = type.TargetType.FullName;
+		var key = $"{assemblyName}:{typeName}";
+
 		// Watcher already set up for this type - no need to allocate another one.
-		if ( Watchers.ContainsKey( type.TargetType.AssemblyQualifiedName ) )
+		if ( Watchers.ContainsKey( key ) )
 			return;
 
-		var watcher = EngineFileSystem.Mounted.Watch( $"*.{type.Extension}_c" );
-		watcher.OnChanges += ( w ) => OnAssetFilesChanged( w, type );
+		var library = GlobalContext.Current.TypeLibrary;
+		var extension = type.Extension;
 
-		Watchers[type.TargetType.AssemblyQualifiedName] = watcher;
+		var watcher = EngineFileSystem.Mounted.Watch( $"*.{extension}_c" );
+		watcher.OnChanges += ( w ) =>
+		{
+			var current = library.GetAttributes<AssetTypeAttribute>().FirstOrDefault( x => x.Extension == extension
+				&& x.TargetType.FullName == typeName && x.TargetType.Assembly.GetName().Name == assemblyName );
+
+			if ( current is not null )
+				OnAssetFilesChanged( w, current );
+		};
+
+		Watchers[key] = watcher;
 	}
 
 	private static void OnAssetFilesChanged( FileWatch watch, AssetTypeAttribute type )
