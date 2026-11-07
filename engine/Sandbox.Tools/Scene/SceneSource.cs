@@ -57,16 +57,6 @@ internal static class SceneSource
 		if ( !asset.SaveSource( file ) )
 			return false;
 
-		// Saving compiled the scene here, from what was just written. Its files are taken in now as already built, so
-		// they don't start a content build that would only describe and adopt the same compile. Nothing reads a
-		// .scene_c, and the build's record of the scene catches up the next time another change starts one. A failed
-		// compile is left to the content build to report.
-		if ( asset.IsCompiledAndUpToDate && !asset.IsCompileFailed )
-		{
-			var source = asset.GetSourceFile( true );
-			IAssetSystem.RegisterBuildOutputs( string.Join( "\n", source, source + "_d", asset.GetCompiledFile( true ) ) );
-		}
-
 		if ( asset.LoadResource<SceneFile>() is null )
 			return false;
 
@@ -94,8 +84,12 @@ internal static class SceneSource
 			if ( !editor.IsMounted && FindAsset( source ) is { } asset )
 			{
 				var path = asset.GetCompiledFile( true );
-				if ( string.IsNullOrEmpty( path ) )
-					throw new FileNotFoundException( $"No compiled file exists for '{asset.Path}'." );
+
+				// Saving doesn't compile the scene, the content build does on a worker: playing before it has compiles
+				// it here, and while a build is running (which won't let it) plays the saved scene without its bake
+				if ( IsStale( asset, path ) && (!asset.Compile( false ) || IsStale( asset, path )) )
+					return editor.Scene.CreateSceneFile();
+
 				return SceneFile.FromCompiled( asset.Path, asset.Guid, File.ReadAllBytes( path ) );
 			}
 
@@ -110,4 +104,10 @@ internal static class SceneSource
 			return null;
 		}
 	}
+
+	/// <summary>
+	/// The compiled scene is older than its source: saved since it was last compiled.
+	/// </summary>
+	static bool IsStale( Asset asset, string compiled ) =>
+		string.IsNullOrEmpty( compiled ) || !File.Exists( compiled ) || File.GetLastWriteTimeUtc( compiled ) < File.GetLastWriteTimeUtc( asset.GetSourceFile( true ) );
 }
