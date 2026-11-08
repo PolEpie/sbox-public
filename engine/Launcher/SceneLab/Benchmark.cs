@@ -240,7 +240,7 @@ internal sealed class Benchmark
 		if ( run.Renderer == SceneLabWindow.RendererKind.Managed ) ManagedSceneRendering.Occlusion = run.Occlusion;
 		else RenderPipeline.OcclusionCulling = run.Occlusion;
 		ShadowMapper.CasterCull = run.CasterCull;
-		ClutterBatchSceneObject.ShadowCasterCull = run.CasterCull;
+		ClutterRenderer.ShadowCasterCull = run.CasterCull;
 
 		frames = 0;
 		measured = -1;
