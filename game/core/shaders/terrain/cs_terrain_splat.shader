@@ -90,18 +90,32 @@ CS
 		}
 		else if ( brushValue > 0.0 )
 		{
-			if ( baseWeight <= overlayWeight )
+			// Only two materials fit in a texel. Fade what's there by the brush amount, add the new material, and
+			// drop whichever of the three ends up lightest. Throwing out the weaker existing material instead handed
+			// its weight to the other one, so a light stroke brought back a material that had been painted over.
+			float keepBase = baseWeight * ( 1.0 - brushAmount );
+			float keepOverlay = overlayWeight * ( 1.0 - brushAmount );
+
+			// The new material would be the one dropped: storing it would mean erasing a heavier one
+			if ( brushAmount <= min( keepBase, keepOverlay ) )
+				return;
+
+			if ( keepBase < keepOverlay )
 			{
 				material.BaseTextureId = paintMaterialId;
-				baseWeight = lerp( 0.0, 1.0, brushAmount );
-				overlayWeight = 1.0 - baseWeight;
+				baseWeight = brushAmount;
+				overlayWeight = keepOverlay;
 			}
 			else
 			{
 				material.OverlayTextureId = paintMaterialId;
-				overlayWeight = lerp( 0.0, 1.0, brushAmount );
-				baseWeight = 1.0 - overlayWeight;
+				overlayWeight = brushAmount;
+				baseWeight = keepBase;
 			}
+
+			float total = baseWeight + overlayWeight;
+			baseWeight /= total;
+			overlayWeight /= total;
 		}
 		else
 		{
