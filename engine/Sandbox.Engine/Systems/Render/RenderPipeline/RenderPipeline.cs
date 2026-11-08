@@ -50,6 +50,12 @@ internal interface INativeRenderPipeline
 internal static class RenderPipeline
 {
 	/// <summary>
+	/// View attribute set when the view draws the depth normal prepass, so opaque passes know an earlier pass in the
+	/// same view already drew every prepass object.
+	/// </summary>
+	internal const string DepthNormalPrepassAttribute = "HasDepthNormalPrepass";
+
+	/// <summary>
 	/// Blend screen-space UI in gamma space, like a browser: the UI shaders write sRGB-encoded colour and the blend works on
 	/// that, rather than on linear colour.
 	/// </summary>
