@@ -337,7 +337,7 @@ public partial class TerrainStorage : GameResource
 			{
 				var name = reader.Stream.Read<string>();
 				reader.Stream.Read<byte>(); // elementSize (informational)
-				reader.Stream.Read<int>(); // elementCount (informational)
+				int elementCount = reader.Stream.Read<int>();
 				int compressedLength = reader.Stream.Read<int>();
 				var compressed = new byte[compressedLength];
 				reader.Stream.Read( compressed, 0, compressedLength );
@@ -345,14 +345,25 @@ public partial class TerrainStorage : GameResource
 				switch ( name )
 				{
 					case "heightmap":
-						_heightMap = Decompress<ushort>( compressed ).ToArray();
+						_heightMap = Inflate<ushort>( compressed, elementCount );
 						break;
 					case "splatmap":
-						_splatMap = Decompress<uint>( compressed ).ToArray();
+						_splatMap = Inflate<uint>( compressed, elementCount );
 						break;
 						// Unknown map type: skip (forward compatibility)
 				}
 			}
+		}
+
+		// Inflates straight into an exact-size array: Decompress grows a MemoryStream by doubling and copies twice,
+		// which leaves ~1 GB of dead LOH garbage for an 8192 terrain.
+		static T[] Inflate<T>( byte[] compressedData, int elementCount ) where T : unmanaged
+		{
+			var result = new T[elementCount];
+			using var compressedStream = new MemoryStream( compressedData );
+			using var deflateStream = new DeflateStream( compressedStream, CompressionMode.Decompress );
+			deflateStream.ReadExactly( MemoryMarshal.AsBytes( result.AsSpan() ) );
+			return result;
 		}
 
 		// Compression helpers — also used by JsonUpgrader methods in TerrainStorage.Upgrade.cs
