@@ -326,31 +326,69 @@ internal class ConsoleWidget : Widget
 		return $"{inputCount.Clamp( 0, maxCount ):n0}{(inputCount > maxCount ? "+" : "")}";
 	}
 
+	// Logs arrive one at a time, in bursts when something spams. Each one touches the text document (a repeat deletes its
+	// block and appends it again), so they wait here and go in once a frame, identical neighbours as one line
+	readonly List<LogEvent> pending = new();
+	readonly List<(LogEvent Event, int Count)> shown = new();
+
+	static bool SameEvent( in LogEvent a, in LogEvent b ) => a.Message == b.Message && a.Logger == b.Logger && a.Stack == b.Stack;
+
 	void AddConsoleMessage( LogEvent e )
 	{
-		// Kept for the whole session: the message and stack text are enough. The exception's stack trace references the
-		// methods it was thrown from, which kept every hotloaded-out game assembly that ever logged one alive.
-		e = e.WithWeakArguments();
-		e.Exception = null;
-		Events.Add( e );
+		pending.Add( e );
+		FlushPending();
+	}
 
-		if ( e.Level == LogLevel.Trace && Message.Button.IsValid() ) Message.Button.Text = GetCount( ++Message.Count );
-		if ( e.Level == LogLevel.Info && Message.Button.IsValid() ) Message.Button.Text = GetCount( ++Message.Count );
-		if ( e.Level == LogLevel.Warn && Warning.Button.IsValid() ) Warning.Button.Text = GetCount( ++Warning.Count );
-		if ( e.Level == LogLevel.Error && Error.Button.IsValid() ) Error.Button.Text = GetCount( ++Error.Count );
+	[EditorEvent.Frame]
+	void FlushOnFrame() => FlushPending();
 
-		if ( ShouldShowEvent( e ) )
+	void FlushPending()
+	{
+		if ( pending.Count == 0 || !this.IsValid() )
+			return;
+
+		var last = default( LogEvent );
+		var messages = 0;
+		var warnings = 0;
+		var errors = 0;
+		shown.Clear();
+
+		foreach ( var raw in pending )
 		{
-			Output.AddEvent( e );
+			// Kept for the whole session: the message and stack text are enough. The exception's stack trace references the
+			// methods it was thrown from, which kept every hotloaded-out game assembly that ever logged one alive.
+			var e = raw.WithWeakArguments();
+			e.Exception = null;
+			Events.Add( e );
+			last = e;
+
+			if ( (e.Level == LogLevel.Trace || e.Level == LogLevel.Info) && Message.Button.IsValid() ) { Message.Count++; messages++; }
+			if ( e.Level == LogLevel.Warn && Warning.Button.IsValid() ) { Warning.Count++; warnings++; }
+			if ( e.Level == LogLevel.Error && Error.Button.IsValid() ) { Error.Count++; errors++; }
+
+			if ( !ShouldShowEvent( e ) )
+				continue;
+
+			if ( shown.Count > 0 && SameEvent( shown[^1].Event, e ) )
+				shown[^1] = (e, shown[^1].Count + 1);
+			else
+				shown.Add( (e, 1) );
 		}
 
-		UpdateStatusBar( e );
+		pending.Clear();
 
-		// matt: this might be expensive with 10k events? would a circular buffer be better
+		if ( messages > 0 ) Message.Button.Text = GetCount( Message.Count );
+		if ( warnings > 0 ) Warning.Button.Text = GetCount( Warning.Count );
+		if ( errors > 0 ) Error.Button.Text = GetCount( Error.Count );
+
+		foreach ( var (e, count) in shown )
+			Output.AddEvent( e, count );
+
+		shown.Clear();
+		UpdateStatusBar( last );
+
 		if ( Events.Count > MaxEvents )
-		{
-			Events.RemoveAt( 0 );
-		}
+			Events.RemoveRange( 0, Events.Count - MaxEvents );
 	}
 
 	void OnConsoleMessage( LogEvent e )
@@ -361,7 +399,7 @@ internal class ConsoleWidget : Widget
 		if ( !this.IsValid() )
 			return;
 
-		AddConsoleMessage( e );
+		pending.Add( e );
 	}
 
 	List<string> GetFilterTerms()
@@ -388,6 +426,7 @@ internal class ConsoleWidget : Widget
 		Warning.Clear();
 		Error.Clear();
 		Events.Clear();
+		pending.Clear();
 		Output.Clear();
 
 		// Clear current stack trace entry.
@@ -423,6 +462,7 @@ internal class ConsoleWidget : Widget
 		if ( command.Length == 0 )
 			return;
 
+		FlushPending();
 		Input.Clear();
 		Input.AddHistory( command );
 
@@ -552,14 +592,14 @@ internal class ConsoleWidget : Widget
 			}
 		}
 
-		public void AddEvent( LogEvent e )
+		public void AddEvent( LogEvent e, int count = 1 )
 		{
 			ThreadSafe.AssertIsMainThread();
 
 			var lastEvent = Events.LastOrDefault();
-			if ( lastEvent.Message == e.Message && lastEvent.Logger == e.Logger && lastEvent.Stack == e.Stack )
+			if ( SameEvent( lastEvent, e ) )
 			{
-				e.Repeats = lastEvent.Repeats + 1;
+				e.Repeats = lastEvent.Repeats + count;
 
 				var cursor = GetCursorAtBlock( Events.Count() - 1 );
 				cursor.SelectBlockUnderCursor();
@@ -568,6 +608,10 @@ internal class ConsoleWidget : Widget
 				(cursor as IDisposable).Dispose();
 
 				Events.RemoveAt( Events.Count() - 1 );
+			}
+			else
+			{
+				e.Repeats += count - 1;
 			}
 
 			var textcolor = "#ccc";
