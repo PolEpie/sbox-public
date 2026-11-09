@@ -59,11 +59,11 @@ internal readonly struct ViewFrustum
 		return result;
 	}
 
+	// Plain float math: Vector3.Dot/Abs and their constructors stay calls in a Debug build, and this runs for every box and plane
 	static bool Classify( in Vector4 plane, in Vector3 center, in Vector3 extents, ref Containment result )
 	{
-		var normal = new Vector3( plane.x, plane.y, plane.z );
-		var distance = Vector3.Dot( normal, center ) + plane.w;
-		var radius = Vector3.Dot( extents, normal.Abs() );
+		var distance = plane.x * center.x + plane.y * center.y + plane.z * center.z + plane.w;
+		var radius = extents.x * MathF.Abs( plane.x ) + extents.y * MathF.Abs( plane.y ) + extents.z * MathF.Abs( plane.z );
 		if ( distance + radius < 0 ) return false;
 		if ( distance - radius < 0 ) result = Containment.Intersects;
 		return true;
@@ -71,9 +71,8 @@ internal readonly struct ViewFrustum
 
 	static bool Inside( in Vector4 plane, in Vector3 center, in Vector3 extents )
 	{
-		var normal = new Vector3( plane.x, plane.y, plane.z );
-		var distance = Vector3.Dot( normal, center ) + plane.w;
-		var radius = Vector3.Dot( extents, normal.Abs() );
+		var distance = plane.x * center.x + plane.y * center.y + plane.z * center.z + plane.w;
+		var radius = extents.x * MathF.Abs( plane.x ) + extents.y * MathF.Abs( plane.y ) + extents.z * MathF.Abs( plane.z );
 		return distance + radius >= 0;
 	}
 }
