@@ -54,6 +54,9 @@ internal sealed class BridgeCustomObject : CustomObject
 		graphicsView.ShaderMode = layer.ShaderMode;
 		graphicsView.SetupLighting = view.IsShadow ? null : setupLighting ??= SetupLighting;
 
+		// Built before any forward layer records; the prepass and shadow views draw before it exists
+		graphicsView.DepthChain = view.IsShadow || layer.Depth ? null : view.DepthChain;
+
 		var camera = view.View;
 		var viewport = bound.Viewport;
 		var aspect = viewport.Height > 0 ? viewport.Width / viewport.Height : 1;

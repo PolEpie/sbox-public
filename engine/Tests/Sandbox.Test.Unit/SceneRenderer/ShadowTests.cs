@@ -144,7 +144,9 @@ public class ShadowTests
 	/// <summary>
 	/// Each cascade view can find the caster volume fit with it, by where it renders from - that's how clutter's GPU
 	/// cull gets the planes long after the cascades were worked out. The volume keeps what stands between the sun and
-	/// the view, and drops what stands beside it.
+	/// the view, and drops what stands beside it. An outer cascade only draws what shadows receivers no finer cascade
+	/// covers: near the camera they read the first cascade, so the last drops a caster over them, and the first drops one
+	/// over receivers far past its sphere.
 	/// </summary>
 	[TestMethod]
 	public void CascadeViewsFindTheirCasterVolume()
@@ -161,10 +163,14 @@ public class ShadowTests
 			using var system = new RenderSystem();
 			CollectAndPrepare( system, world, LookingDownX() );
 
-			var passes = system.ShadowMaps.Passes;
-			Assert.IsTrue( passes.Length > 0 );
+			var cascades = new System.Collections.Generic.List<ViewPass>();
+			foreach ( var pass in system.ShadowMaps.Passes )
+			{
+				if ( pass.View.Name.StartsWith( "CSM Cascade" ) ) cascades.Add( pass );
+			}
+			Assert.IsTrue( cascades.Count > 1 );
 
-			foreach ( var pass in passes )
+			foreach ( var pass in cascades )
 			{
 				var volume = Sandbox.Rendering.ShadowMapper.FindCasterVolume( pass.View.Position );
 				Assert.IsNotNull( volume, $"{pass.View.Name} has no volume to cull against" );
@@ -179,9 +185,13 @@ public class ShadowTests
 					return true;
 				}
 
-				// The camera looks down +X from the origin with a 90° field of view, and the sun is straight overhead
-				Assert.IsTrue( Inside( new Vector3( 100, 0, 500 ) ), "above what the camera sees" );
-				Assert.IsFalse( Inside( new Vector3( 100, 400, 500 ) ), "beside it, its shadow falls where nobody looks" );
+				// The camera looks down +X from the origin with a 90° field of view out to 1000, and the sun is straight
+				// overhead. The first cascade's sphere ends some 70 units out, the second's some 230
+				bool first = pass == cascades[0];
+				bool last = pass == cascades[^1];
+				Assert.AreEqual( first, Inside( new Vector3( 10, 0, 500 ) ), $"{pass.View.Name}: above the ground just ahead" );
+				Assert.AreEqual( last, Inside( new Vector3( 900, 0, 500 ) ), $"{pass.View.Name}: above the ground far ahead" );
+				Assert.IsFalse( Inside( new Vector3( 100, 400, 500 ) ), $"{pass.View.Name}: beside the view, its shadow falls where nobody looks" );
 			}
 		}
 		finally

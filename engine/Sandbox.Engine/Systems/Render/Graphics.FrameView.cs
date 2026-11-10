@@ -34,6 +34,13 @@ public static partial class Graphics
 		bool IsChildView { get; }
 
 		/// <summary>
+		/// The view's Hi-Z depth chain (<c>DepthChainDownsample</c>: min and max depth through every mip), once its prepass
+		/// has been drawn and downsampled - in the forward layers after it. Null in the prepass, shadow views and views
+		/// without one.
+		/// </summary>
+		Texture DepthChain { get; }
+
+		/// <summary>
 		/// The colour being drawn into. When <paramref name="owned"/>, it's a strong handle the caller destroys.
 		/// </summary>
 		ITexture GetColorTarget( out bool owned );
@@ -114,6 +121,19 @@ public static partial class Graphics
 		public bool PostProcessEnabled => View.GetPostProcessEnabled();
 		public int ToolsVisMode => View.GetToolsVisMode();
 		public bool IsChildView => View.GetParent().IsValid;
+
+		public Texture DepthChain
+		{
+			get
+			{
+				// Native sets the chain on the view up front; it's only drawn by the forward layers' turn
+				if ( Graphics.LayerType is not (SceneLayerType.Opaque or SceneLayerType.Translucent) ) return null;
+				var chain = View.GetRenderAttributesPtr().GetTextureValue( DepthChainName, default );
+				return chain.IsNull ? null : Texture.FromNative( chain );
+			}
+		}
+
+		static readonly StringToken DepthChainName = new( "DepthChainDownsample" );
 
 		public ITexture GetColorTarget( out bool owned )
 		{
@@ -223,4 +243,10 @@ public static partial class Graphics
 	/// The current frame's depth target, like <see cref="GetColorTarget"/>.
 	/// </summary>
 	internal static ITexture GetDepthTarget( out bool owned ) => View.GetDepthTarget( out owned );
+
+	/// <summary>
+	/// The current view's Hi-Z depth chain, or null (<see cref="IFrameView.DepthChain"/>). Its mip 0 is the viewport's size,
+	/// reverse-Z, min depth in red and max in green.
+	/// </summary>
+	internal static Texture DepthChain => _state.view?.DepthChain;
 }

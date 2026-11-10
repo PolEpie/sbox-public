@@ -73,6 +73,12 @@ internal sealed class ViewPass
 	public (Vector3 Center, float Radius)? LightSphere { get; set; }
 
 	/// <summary>
+	/// The main view's Hi-Z depth chain once <see cref="DepthChainLayer"/> builds it this frame, for the forward layers after
+	/// it. Null otherwise.
+	/// </summary>
+	public Texture DepthChain { get; set; }
+
+	/// <summary>
 	/// The objects a feature drew in this view, by world index.
 	/// </summary>
 	public List<int> Visible( RenderFeature feature ) => visible[feature.Index];
@@ -116,5 +122,6 @@ internal sealed class ViewPass
 		DepthBias = 0;
 		SlopeScaledDepthBias = 0;
 		LightSphere = null;
+		DepthChain = null;
 	}
 }

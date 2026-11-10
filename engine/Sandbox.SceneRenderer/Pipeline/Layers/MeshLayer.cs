@@ -127,11 +127,19 @@ internal abstract class MeshLayer : RenderLayer
 	/// <summary>
 	/// A layer whose draws copy the frame buffer reads glass's refraction stencil and the depth chain, which the copy's
 	/// depth-aware mask uses: a translucent forward layer with frame buffer readers in its lists, as
-	/// <see cref="RenderFrame.DrawLayer"/> copies (<see cref="MeshRenderFeature.FrameBufferCopyingLists"/>).
+	/// <see cref="RenderFrame.DrawLayer"/> copies (<see cref="MeshRenderFeature.FrameBufferCopyingLists"/>). A forward layer
+	/// drawing custom objects reads the depth chain too, which native always builds for them (<c>Graphics.DepthChain</c>:
+	/// clutter occlusion culls against it).
 	/// </summary>
-	public override FrameResources Reads( RenderFrame frame ) => LayerType == SceneLayerType.Translucent && !Depth && frame.ReadsFrameBuffer( Runs & MeshRenderFeature.FrameBufferCopyingLists )
-		? FrameResources.DepthChain | FrameResources.RefractionStencil | FrameResources.Untracked
-		: FrameResources.Untracked;
+	public override FrameResources Reads( RenderFrame frame )
+	{
+		if ( LayerType == SceneLayerType.Translucent && !Depth && frame.ReadsFrameBuffer( Runs & MeshRenderFeature.FrameBufferCopyingLists ) )
+			return FrameResources.DepthChain | FrameResources.RefractionStencil | FrameResources.Untracked;
+
+		return !Depth && frame.System.DrawsCustomObjects( frame.MainPass, this )
+			? FrameResources.DepthChain | FrameResources.Untracked
+			: FrameResources.Untracked;
+	}
 
 	/// <summary>
 	/// Native layer type used by custom objects.
