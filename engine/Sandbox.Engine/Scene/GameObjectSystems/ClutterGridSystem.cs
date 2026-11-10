@@ -130,6 +130,7 @@ public sealed partial class ClutterGridSystem : GameObjectSystem
 
 		// After this frame's rebuilds and LOD camera, so every tile's LOD range matches what the cull will compute.
 		_renderer?.UpdateLods();
+		_renderer?.AdvanceOcclusionHistory();
 	}
 
 	private void RestorePaintedLayer()

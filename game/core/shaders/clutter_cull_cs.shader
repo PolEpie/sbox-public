@@ -26,7 +26,8 @@ CS
 	//   0 = count: frustum + LOD test per instance, counts survivors per batch LOD
 	//   1 = args:  prefix sums the counts into each batch LOD's range of the visible buffer and its draw arguments
 	//   2 = scatter: copies each survivor into its batch LOD's range
-	DynamicCombo( D_PASS, 0..2, Sys( ALL ) );
+	//   3 = history: copies one mip of the view's depth chain for the next frame's prepass to cull against
+	DynamicCombo( D_PASS, 0..3, Sys( ALL ) );
 
 	struct ClutterBatch_t
 	{
@@ -95,6 +96,26 @@ CS
 	float4 ClutterCasterPlane9 < Attribute( "ClutterCasterPlane9" ); >;
 	float4 ClutterCasterPlane10 < Attribute( "ClutterCasterPlane10" ); >;
 	float4 ClutterCasterPlane11 < Attribute( "ClutterCasterPlane11" ); >;
+
+	// Forward passes after the prepass: the view's Hi-Z chain (reverse-Z, min depth in r), mip 0 the viewport's size.
+	// An instance whose bounds are behind the farthest depth everywhere they cover is culled. 0 elsewhere.
+	int ClutterOcclusion < Attribute( "ClutterOcclusion" ); >;
+	Texture2D<float2> ClutterDepthChain < Attribute( "ClutterDepthChain" ); SrgbRead( false ); >;
+	float2 ClutterDepthRange < Attribute( "ClutterDepthRange" ); >; // the viewport's min and max Z
+
+	// The prepass: last frame's chain from mip ClutterHistoryMip down (its mip 0 is that mip), the view it was drawn from
+	// and that view's viewport size and depth range. An instance hidden there is left to the forward pass, which culls
+	// against this frame's chain and draws what's visible now. 0 elsewhere.
+	int ClutterHistoryValid < Attribute( "ClutterHistoryValid" ); >;
+	Texture2D<float2> ClutterHistory < Attribute( "ClutterHistory" ); SrgbRead( false ); >;
+	float4x4 ClutterHistoryWorldToProjection < Attribute( "ClutterHistoryWorldToProjection" ); >;
+	float2 ClutterHistoryViewport < Attribute( "ClutterHistoryViewport" ); >;
+	float2 ClutterHistoryDepthRange < Attribute( "ClutterHistoryDepthRange" ); >;
+	int ClutterHistoryMip < Attribute( "ClutterHistoryMip" ); >;
+
+	// The history pass: the mip of the history it writes, from the chain's mip ClutterHistoryMip
+	RWTexture2D<float2> ClutterHistoryOut < Attribute( "ClutterHistoryOut" ); >;
+
 	static const uint Culled = 0xFFFFFFFF;
 
 	// Bounding-sphere frustum test - cheaper and slightly looser than an 8-corner OBB test.
@@ -153,6 +174,96 @@ CS
 		return true;
 	}
 
+	// The pixels a sphere's bounding box covers in a view of size viewport, padded a pixel for TAA jitter, and its nearest
+	// depth mapped into the depth range. False when it can't be tested: it crosses the near plane or is off screen.
+	bool ProjectSphere( float3 center, float radius, float4x4 worldToProjection, float2 viewport, float2 depthRange, out int2 lo, out int2 hi, out float depth )
+	{
+		float2 pixelMin = float2( 1e30, 1e30 );
+		float2 pixelMax = float2( -1e30, -1e30 );
+		float nearest = -1e30;
+		lo = 0;
+		hi = 0;
+		depth = 0;
+
+		[unroll]
+		for ( int i = 0; i < 8; i++ )
+		{
+			float3 corner = center + radius * float3( ( i & 1 ) ? 1 : -1, ( i & 2 ) ? 1 : -1, ( i & 4 ) ? 1 : -1 );
+			float4 clip = mul( worldToProjection, float4( corner, 1 ) );
+			if ( clip.w <= 0 )
+				return false;
+
+			float3 ndc = clip.xyz / clip.w;
+			float2 pixel = float2( ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5 ) * viewport;
+			pixelMin = min( pixelMin, pixel );
+			pixelMax = max( pixelMax, pixel );
+			nearest = max( nearest, ndc.z );
+		}
+
+		if ( any( pixelMax < 0 ) || any( pixelMin >= viewport ) )
+			return false;
+
+		float2 last = viewport - 1;
+		lo = (int2)clamp( floor( pixelMin ) - 1, 0, last );
+		hi = (int2)clamp( floor( pixelMax ) + 1, 0, last );
+		depth = depthRange.x + nearest * ( depthRange.y - depthRange.x );
+		return true;
+	}
+
+	// Texels a side the test reads at most: it picks the finest mip where the bounds span this many
+	static const int OcclusionGrid = 4;
+
+	// The sphere's bounding box against a depth chain, as occlusion_cull_cs's TestBox. The chain's mip 0 is the view's
+	// mip firstLevel. False when it can't tell.
+	bool SphereOccludedIn( Texture2D<float2> chain, int firstLevel, float4x4 worldToProjection, float2 viewport, float2 depthRange, float3 center, float radius )
+	{
+		int2 lo, hi;
+		float depth;
+		if ( !ProjectSphere( center, radius, worldToProjection, viewport, depthRange, lo, hi, depth ) )
+			return false;
+
+		uint width, height, mips;
+		chain.GetDimensions( 0, width, height, mips );
+
+		float span = max( 1.0, max( hi.x - lo.x + 1, hi.y - lo.y + 1 ) );
+		int level = clamp( (int)ceil( log2( span / ( OcclusionGrid - 1 ) ) ), firstLevel, firstLevel + (int)mips - 1 );
+		int mip = level - firstLevel;
+
+		uint mipWidth, mipHeight, mipCount;
+		chain.GetDimensions( mip, mipWidth, mipHeight, mipCount );
+		int2 a = lo >> level;
+		int2 b = hi >> level;
+		if ( b.x >= (int)mipWidth || b.y >= (int)mipHeight || any( b - a >= OcclusionGrid ) )
+			return false;
+
+		// Reverse-Z: hidden where the box's nearest depth is behind the farthest surface; the margin keeps coplanar ones
+		[loop]
+		for ( int y = a.y; y <= b.y; y++ )
+		{
+			[loop]
+			for ( int x = a.x; x <= b.x; x++ )
+			{
+				if ( depth * 1.001 >= chain.Load( int3( x, y, mip ) ).r )
+					return false;
+			}
+		}
+		return true;
+	}
+
+	// This frame's chain, whose mip 0 is the viewport's size
+	bool SphereOccluded( float3 center, float radius )
+	{
+		uint width, height, mips;
+		ClutterDepthChain.GetDimensions( 0, width, height, mips );
+		return SphereOccludedIn( ClutterDepthChain, 0, ClutterWorldToProjection, float2( width, height ), ClutterDepthRange, center, radius );
+	}
+
+	// Last frame's, where last frame's view saw the sphere
+	bool SphereOccludedInHistory( float3 center, float radius )
+	{
+		return SphereOccludedIn( ClutterHistory, ClutterHistoryMip, ClutterHistoryWorldToProjection, ClutterHistoryViewport, ClutterHistoryDepthRange, center, radius );
+	}
+
 	// Matches the native LOD metric: screen coverage of a 0.5-radius sphere, then walk switch distances.
 	uint ComputeLod( float3 worldPos, float scale, ClutterBatch_t batch )
 	{
@@ -195,6 +306,12 @@ CS
 			return Culled;
 
 		if ( ClutterMaxDistance > 0.0 && length( sphere.xyz - ClutterLodCameraPos ) - sphere.w > ClutterMaxDistance )
+			return Culled;
+
+		// Last: they read depth, which most culled instances never need to
+		if ( ClutterOcclusion != 0 && SphereOccluded( sphere.xyz, sphere.w ) )
+			return Culled;
+		if ( ClutterHistoryValid != 0 && SphereOccludedInHistory( sphere.xyz, sphere.w ) )
 			return Culled;
 
 		float scale = ( batch.ModelRadius > 1e-6 ) ? ( sphere.w / batch.ModelRadius ) : 1.0;
@@ -243,7 +360,7 @@ CS
 			}
 		}
 
-	#else
+	#elif ( D_PASS == 2 )
 		if ( id >= (uint)InstanceCount )
 			return;
 
@@ -254,6 +371,14 @@ CS
 		uint slot;
 		InterlockedAdd( ClutterCounts[AllInstanceBatches[id] * 4 + lod], 1u, slot );
 		ClutterVisible[slot] = AllInstances[id];
+
+	#else
+		uint width, height;
+		ClutterHistoryOut.GetDimensions( width, height );
+		if ( vThreadId.x >= width || vThreadId.y >= height )
+			return;
+
+		ClutterHistoryOut[vThreadId.xy] = ClutterDepthChain.Load( int3( vThreadId.xy, ClutterHistoryMip ) );
 	#endif
 	}
 }

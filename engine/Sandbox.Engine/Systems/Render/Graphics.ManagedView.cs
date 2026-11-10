@@ -61,6 +61,11 @@ public static partial class Graphics
 		public int ToolsVisMode;
 
 		/// <summary>
+		/// The frame's Hi-Z depth chain when it was built before this stage (<see cref="IFrameView.DepthChain"/>), or null.
+		/// </summary>
+		public Texture DepthChain;
+
+		/// <summary>
 		/// The kind of layer the stage is, which drawing code may check.
 		/// </summary>
 		public SceneLayerType LayerType = SceneLayerType.Translucent;
@@ -112,6 +117,7 @@ public static partial class Graphics
 
 		bool IFrameView.PostProcessEnabled => PostProcessEnabled;
 		int IFrameView.ToolsVisMode => ToolsVisMode;
+		Texture IFrameView.DepthChain => DepthChain;
 
 		// A managed frame is always a camera's own
 		bool IFrameView.IsChildView => false;

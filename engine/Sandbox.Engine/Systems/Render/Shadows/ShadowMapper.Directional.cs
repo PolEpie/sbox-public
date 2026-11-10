@@ -131,6 +131,26 @@ internal partial class ShadowMapper
 		public float Height;
 		public Vector3 SphereCenter;
 		public float SphereRadius;
+
+		/// <summary>
+		/// Planes of the casters only this cascade has to draw, in its 12 of GetCascades' caster planes.
+		/// </summary>
+		public int CasterPlaneCount;
+	}
+
+	// Past this fraction of its selection radius, a cascade blends into the next (DirectionalLightShadow.hlsl's
+	// CascadeBlendWeight: smoothstep from 0.81 r² to r²)
+	const float CascadeBlendStart = 0.9f;
+
+	/// <summary>
+	/// The radius the lighting shader picks <paramref name="cascade"/> inside (DirectionalLightShadow.hlsl's FindCascade).
+	/// All but the last shrink by a PCF margin so the selection boundary stays inside the valid shadow map area: near the
+	/// sphere edge, PCF would average in cleared texels (no geometry) and the shadow would fade out.
+	/// </summary>
+	static float SelectionRadius( int cascade, int count, float radius, int shadowmapSize )
+	{
+		const float pcfMarginTexels = 4.0f;
+		return cascade < count - 1 ? radius * (1.0f - pcfMarginTexels * 2.0f / shadowmapSize) : radius;
 	}
 
 	/// <summary>
@@ -161,14 +181,14 @@ internal partial class ShadowMapper
 	}
 
 	/// <summary>
-	/// Given a camera view, computes cascade frustums into the provided span.
-	/// Returns the number of cascades written.
+	/// Given a camera view, computes cascade frustums into the provided span, and each cascade's caster volume into its
+	/// 12 of <paramref name="casterPlanes"/>. Returns the number of cascades written.
 	///
 	/// Cascades are fit in view space, where the camera is at the origin, and only their centers move into the world.
 	/// Their size then only depends on the projection, so it's the same every frame however far the camera is from the
 	/// world origin. Fit in world space, float error resized them as the camera moved, and that slides the texel grid.
 	/// </summary>
-	static int GetCascades( Span<Cascade> result, in ShadowViewInfo view, Rotation rotation, int numCascades, float NearClip, float FarClip, float lambda, int shadowmapSize, Span<Vector4> casterPlanes, out int casterPlaneCount )
+	static int GetCascades( Span<Cascade> result, in ShadowViewInfo view, Rotation rotation, int numCascades, float NearClip, float FarClip, float lambda, int shadowmapSize, Span<Vector4> casterPlanes )
 	{
 		// Project frustum corners into view space from clip space
 		Span<Vector3> viewFrustumCorners = stackalloc Vector3[8];
@@ -228,13 +248,8 @@ internal partial class ShadowMapper
 			viewFrustumCorners[i + 4] = Vector3.Lerp( origNear, origFar, tFar );
 		}
 
-		// Casters that can shadow the shadowed part of the view: that range swept toward the light
-		Span<Vector3> worldCorners = stackalloc Vector3[8];
-		for ( int i = 0; i < 8; i++ )
-			worldCorners[i] = ViewToWorld( viewFrustumCorners[i], view );
-		casterPlaneCount = BuildCasterVolume( worldCorners, rotation.Forward, casterPlanes );
-
 		int count = Math.Min( numCascades, result.Length );
+		Span<Vector3> viewSphereCenters = stackalloc Vector3[count];
 
 		// Ortho for each cascade
 		Span<Vector3> splitFrustumCorners = stackalloc Vector3[8];
@@ -261,6 +276,7 @@ internal partial class ShadowMapper
 			frustumRadius = MathF.Ceiling( MathF.Sqrt( frustumRadius ) * 16.0f ) / 16.0f;
 
 			// The radius stays in view space, only the center moves into the world
+			viewSphereCenters[cascade] = splitFrustumCenter;
 			Vector3 sphereCenter = ViewToWorld( splitFrustumCenter, view );
 
 			// Pull the shadow camera back toward the light beyond the bounding sphere to catch
@@ -289,7 +305,73 @@ internal partial class ShadowMapper
 			};
 		}
 
+		// Casters that can shadow what samples each cascade: that part of the shadowed range swept toward the light
+		Span<Vector3> slab = stackalloc Vector3[8];
+		for ( int cascade = 0; cascade < count; cascade++ )
+		{
+			var (from, to) = CascadeReceiverRange( result, viewSphereCenters, cascade, count, viewFrustumCorners, camForward, shadowmapSize );
+			for ( int k = 0; k < 4; k++ )
+			{
+				slab[k] = ViewToWorld( Vector3.Lerp( viewFrustumCorners[k], viewFrustumCorners[k + 4], from ), view );
+				slab[k + 4] = ViewToWorld( Vector3.Lerp( viewFrustumCorners[k], viewFrustumCorners[k + 4], to ), view );
+			}
+
+			result[cascade].CasterPlaneCount = BuildCasterVolume( slab, rotation.Forward, casterPlanes.Slice( cascade * 12, 12 ) );
+		}
+
 		return count;
+	}
+
+	/// <summary>
+	/// The part of the shadowed range, as fractions from its near ring to its far ring (<paramref name="corners"/>, view
+	/// space), that can sample <paramref name="cascade"/>. The shader picks the first cascade whose selection sphere holds a
+	/// receiver and blends into the next near its edge, so a receiver inside an earlier cascade's sphere, or inside the
+	/// previous one short of where it blends, never reads this one. The range starts where the frustum first leaves those:
+	/// each sphere in turn holds the frustum from where the last one let go until a corner ray leaves it. It ends at the
+	/// far side of this cascade's sphere, or the previous one's, which blends into it.
+	/// </summary>
+	static (float From, float To) CascadeReceiverRange( ReadOnlySpan<Cascade> cascades, ReadOnlySpan<Vector3> viewCenters, int cascade, int count, ReadOnlySpan<Vector3> corners, Vector3 camForward, int shadowmapSize )
+	{
+		float from = 0;
+		for ( int j = 0; j < cascade; j++ )
+		{
+			float radius = SelectionRadius( j, count, cascades[j].SphereRadius, shadowmapSize ) * (j == cascade - 1 ? CascadeBlendStart : 1.0f);
+			float leaves = float.MaxValue;
+			for ( int k = 0; k < 4 && leaves > from; k++ )
+				leaves = MathF.Min( leaves, RayLeavesSphere( corners[k], corners[k + 4], from, viewCenters[j], radius ) );
+
+			// A corner already outside: the frustum isn't held here, and the spheres after this one are farther out
+			if ( leaves <= from ) break;
+			from = MathF.Min( leaves, 1.0f );
+		}
+
+		// The rings sit on planes of constant depth: the shadow range, cut short by the camera's own near and far planes
+		float near = Vector3.Dot( camForward, corners[0] );
+		float far = Vector3.Dot( camForward, corners[4] );
+
+		float farthest = Vector3.Dot( camForward, viewCenters[cascade] ) + cascades[cascade].SphereRadius;
+		if ( cascade > 0 ) farthest = MathF.Max( farthest, Vector3.Dot( camForward, viewCenters[cascade - 1] ) + cascades[cascade - 1].SphereRadius );
+		float to = far > near ? Math.Clamp( (farthest - near) / (far - near), from, 1.0f ) : 1.0f;
+		return (from, to);
+	}
+
+	/// <summary>
+	/// Where the segment from <paramref name="a"/> (0) to <paramref name="b"/> (1) leaves the sphere, given it's inside at
+	/// <paramref name="start"/>; <paramref name="start"/> itself when it isn't.
+	/// </summary>
+	static float RayLeavesSphere( Vector3 a, Vector3 b, float start, Vector3 center, float radius )
+	{
+		var direction = b - a;
+		var offset = a - center;
+		float qa = direction.LengthSquared;
+		float qb = 2.0f * Vector3.Dot( offset, direction );
+		float qc = offset.LengthSquared - radius * radius;
+
+		// Outside where it starts
+		if ( qa * start * start + qb * start + qc > 0 ) return start;
+
+		float discriminant = qb * qb - 4.0f * qa * qc;
+		return (-qb + MathF.Sqrt( MathF.Max( discriminant, 0 ) )) / (2.0f * qa);
 	}
 
 	static Vector3 ViewToWorld( Vector3 position, in ShadowViewInfo view )
@@ -385,19 +467,20 @@ internal partial class ShadowMapper
 		// The cascades face the way the light travels
 		var rotation = light.Direction.EulerAngles.ToRotation();
 		Span<Cascade> cascades = stackalloc Cascade[numCascades];
-		Span<Vector4> casterPlanes = stackalloc Vector4[12];
-		int cascadeCount = GetCascades( cascades, View, rotation, numCascades, 1.0f, farClip, splitRatio, shadowmapSize, casterPlanes, out int casterPlaneCount );
+		Span<Vector4> casterPlanes = stackalloc Vector4[12 * numCascades];
+		int cascadeCount = GetCascades( cascades, View, rotation, numCascades, 1.0f, farClip, splitRatio, shadowmapSize, casterPlanes );
 		cascades = cascades[..cascadeCount];
 		float baseHardness = 1.0f + light.Hardness * 4.0f;
 
-		// Published before the cascade views render, those may cull against it right away
-		if ( CasterCull && NextCasterVolume() is { } volume )
+		// Published before the cascade views render, those may cull against them right away. One each: an outer cascade
+		// only draws what shadows receivers no finer cascade covers
+		for ( int i = 0; i < cascadeCount && CasterCull; i++ )
 		{
-			casterPlanes[..casterPlaneCount].CopyTo( volume.Planes );
-			volume.PlaneCount = casterPlaneCount;
-			for ( int i = 0; i < cascadeCount; i++ )
-				volume.Origins[i] = cascades[i].Origin;
-			volume.OriginCount = cascadeCount;
+			if ( NextCasterVolume() is not { } volume ) break;
+
+			casterPlanes.Slice( i * 12, cascades[i].CasterPlaneCount ).CopyTo( volume.Planes );
+			volume.PlaneCount = cascades[i].CasterPlaneCount;
+			volume.Origin = cascades[i].Origin;
 			PublishCasterVolume( volume );
 		}
 
@@ -439,15 +522,8 @@ internal partial class ShadowMapper
 			gpuShadowData.CascadeHardness[i] = i == 0 ? baseHardness
 				: CalculateCascadeHardness( light.Hardness, cascade.Width / cascades[0].Width, ShadowFilter );
 
-			// Cascade bounding sphere for GPU selection (xyz = center, w = radiusSquared).
-			// Shrink non-last cascades by a PCF margin so the selection boundary stays
-			// inside the valid shadow map area. Without this, PCF near the sphere edge
-			// averages in cleared depth texels (no geometry), causing shadows to fade out.
-			float pcfMarginTexels = 4.0f;
-			float pcfMarginFraction = pcfMarginTexels * 2.0f / shadowmapSize;
-			float selectionRadius = (i < cascades.Length - 1)
-				? cascade.SphereRadius * (1.0f - pcfMarginFraction)
-				: cascade.SphereRadius;
+			// Cascade bounding sphere for GPU selection (xyz = center, w = radiusSquared)
+			float selectionRadius = SelectionRadius( i, cascades.Length, cascade.SphereRadius, shadowmapSize );
 			gpuShadowData.CascadeSpheres[i] = new Vector4( cascade.SphereCenter, selectionRadius * selectionRadius );
 
 			// Per-cascade depth bias: scale by texel-to-depth ratio relative to cascade 0.

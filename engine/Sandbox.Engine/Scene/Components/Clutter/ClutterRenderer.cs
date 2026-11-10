@@ -24,6 +24,9 @@ internal sealed class ClutterRenderer : SceneCustomObject
 	[ConVar( "clutter_shadow_caster_cull", ConVarFlags.Cheat, Help = "Cull clutter shadow casters that can't shadow anything the camera sees." )]
 	internal static bool ShadowCasterCull { get; set; } = true;
 
+	[ConVar( "r_clutter_occlusion", ConVarFlags.Saved, Help = "Cull clutter hidden behind the depth prepass in the forward pass." )]
+	internal static bool Occlusion { get; set; } = true;
+
 	private static readonly string[] CasterPlaneNames = ["ClutterCasterPlane0", "ClutterCasterPlane1", "ClutterCasterPlane2", "ClutterCasterPlane3", "ClutterCasterPlane4", "ClutterCasterPlane5", "ClutterCasterPlane6", "ClutterCasterPlane7", "ClutterCasterPlane8", "ClutterCasterPlane9", "ClutterCasterPlane10", "ClutterCasterPlane11"];
 
 	/// <summary>
@@ -47,6 +50,13 @@ internal sealed class ClutterRenderer : SceneCustomObject
 	private const int CountPass = 0;
 	private const int ArgsPass = 1;
 	private const int ScatterPass = 2;
+	private const int HistoryPass = 3;
+
+	// The depth chain kept for the next frame's prepass: from its finest mip no wider than this, down
+	private const int HistoryMaxWidth = 320;
+
+	// A history from farther than this is another camera's, not the one now drawing
+	private const float HistoryMaxCameraMove = 512.0f;
 
 	private static readonly int ArgsStride = Marshal.SizeOf<GpuBuffer.IndirectDrawIndexedArguments>();
 
@@ -102,6 +112,21 @@ internal sealed class ClutterRenderer : SceneCustomObject
 	private readonly HashSet<ClutterBatch.PreparedInstances> _incomingTiles = [];
 	private readonly List<ClutterBatch.PreparedInstances> _removedTiles = [];
 	private readonly List<ClutterBatch.PreparedInstances> _addedTiles = [];
+
+	/// <summary>
+	/// The view a forward pass kept its depth in <see cref="_history"/> from, for the next frame's prepass to occlusion cull
+	/// against (two-phase: what that hides, the forward pass draws if this frame's depth shows it).
+	/// </summary>
+	private readonly record struct HistoryView( Matrix WorldToProjection, Vector2 Viewport, Vector2 DepthRange, Vector3 Camera, int Mip );
+
+	// Written by this frame's forward passes, read by the next frame's prepasses. A frame's views record at once, on job
+	// threads, so the frame's writes only become readable in AdvanceOcclusionHistory, between frames.
+	private readonly System.Threading.Lock _historyLock = new();
+	private Texture _history;
+	private HistoryView? _historyWritten;
+	private HistoryView? _historyReadable;
+	private (Vector2Int Size, int Mips) _historyWanted;
+	private bool _historyConflict;
 
 	public ClutterRenderer( SceneWorld world ) : base( world )
 	{
@@ -429,12 +454,14 @@ internal sealed class ClutterRenderer : SceneCustomObject
 
 	/// <summary>
 	/// Whether this pass must cull before drawing. The depth normal prepass culls for its view, and the view's opaque
-	/// passes run after it on the GPU, so they draw what it culled. Shadow views and views without the prepass cull themselves.
-	/// Native records a view's passes on job threads at once, so this is decided from the view, not from recording order.
+	/// passes run after it on the GPU, so they draw what it culled - unless they can occlusion cull against the prepass's
+	/// depth (<paramref name="depthChain"/>), which culls more and draws what the prepass left to last frame's depth.
+	/// Shadow views and views without the prepass cull themselves. Native records a view's passes on job threads at once,
+	/// so this is decided from the view, not from recording order.
 	/// </summary>
-	private static bool PassNeedsCull()
+	private static bool PassNeedsCull( Texture depthChain )
 	{
-		if ( Graphics.LayerType != SceneLayerType.Opaque )
+		if ( Graphics.LayerType != SceneLayerType.Opaque || depthChain is not null )
 			return true;
 
 		var view = Graphics.SceneView;
@@ -447,15 +474,99 @@ internal sealed class ClutterRenderer : SceneCustomObject
 			return;
 
 		bool shadow = Graphics.LayerType == SceneLayerType.Shadow;
+		var depthChain = shadow || !Occlusion ? null : Graphics.DepthChain;
+		var history = Graphics.LayerType == SceneLayerType.DepthPrepass && Occlusion ? ReadableHistory() : null;
 
-		if ( PassNeedsCull() )
+		if ( PassNeedsCull( depthChain ) )
 		{
 			using ( CommandList.ProfileImmediate( CullSampler ) )
-				Cull( shadow );
+				Cull( shadow, depthChain, history );
 		}
 
 		using ( CommandList.ProfileImmediate( DrawSampler ) )
 			Draw( shadow );
+	}
+
+	/// <summary>
+	/// Last frame's depth for this view's prepass, if the view drawing now is the one it came from: the same viewport, the
+	/// camera nearby. Another camera's would cull what's in front of this one.
+	/// </summary>
+	private HistoryView? ReadableHistory()
+	{
+		if ( _historyReadable is not { } view )
+			return null;
+
+		var viewport = Graphics.Viewport;
+		if ( viewport.Width != view.Viewport.x || viewport.Height != view.Viewport.y )
+			return null;
+
+		return Graphics.CameraPosition.Distance( view.Camera ) <= HistoryMaxCameraMove ? view : null;
+	}
+
+	/// <summary>
+	/// Makes what this frame's forward pass kept readable by the next frame's prepass, and sizes the history to the view.
+	/// Between frames, on the main thread: a frame's views record at once, so its prepass can't read what its forward
+	/// pass writes. A frame where two views kept theirs keeps neither: which one the GPU wrote last isn't known.
+	/// </summary>
+	public void AdvanceOcclusionHistory()
+	{
+		lock ( _historyLock )
+		{
+			_historyReadable = _historyConflict ? null : _historyWritten;
+			_historyWritten = null;
+			_historyConflict = false;
+
+			if ( _historyWanted.Mips == 0 )
+				return;
+
+			var (size, mips) = _historyWanted;
+			if ( _history is null || _history.Width != size.x || _history.Height != size.y || _history.Mips != mips )
+			{
+				_history?.Dispose();
+				_history = Texture.Create( size.x, size.y, ImageFormat.RG3232F ).WithMips( mips ).WithUAVBinding().WithName( "ClutterOcclusionHistory" ).Finish();
+				_historyReadable = null;
+			}
+
+			_historyWanted = default;
+		}
+	}
+
+	/// <summary>
+	/// Keep this forward pass's depth chain from a coarse mip down, and the view it was drawn from, for the next frame's
+	/// prepass.
+	/// </summary>
+	private void KeepHistory( RenderAttributes attributes, Texture depthChain, Vector2 depthRange, Matrix worldToProjection )
+	{
+		int first = 0;
+		while ( (depthChain.Width >> first) > HistoryMaxWidth && first < depthChain.Mips - 1 )
+			first++;
+
+		var size = new Vector2Int( Math.Max( 1, depthChain.Width >> first ), Math.Max( 1, depthChain.Height >> first ) );
+		var mips = depthChain.Mips - first;
+		var history = _history;
+		if ( history is null || history.Width != size.x || history.Height != size.y || history.Mips != mips )
+		{
+			lock ( _historyLock )
+				_historyWanted = (size, mips);
+			return;
+		}
+
+		Graphics.ResourceBarrierTransition( history, ResourceState.UnorderedAccess );
+		attributes.SetCombo( "D_PASS", HistoryPass );
+		for ( int mip = 0; mip < mips; mip++ )
+		{
+			attributes.Set( "ClutterHistoryOut", history, mip );
+			attributes.Set( "ClutterHistoryMip", first + mip );
+			CullShader.DispatchWithAttributes( attributes, Math.Max( 1, size.x >> mip ), Math.Max( 1, size.y >> mip ), 1 );
+		}
+		Graphics.ResourceBarrierTransition( history, ResourceState.AllShaderResource );
+
+		var kept = new HistoryView( worldToProjection, new Vector2( depthChain.Width, depthChain.Height ), depthRange, Graphics.CameraPosition, first );
+		lock ( _historyLock )
+		{
+			_historyConflict |= _historyWritten is not null;
+			_historyWritten = kept;
+		}
 	}
 
 	private void Draw( bool shadow )
@@ -653,9 +764,11 @@ internal sealed class ClutterRenderer : SceneCustomObject
 
 	/// <summary>
 	/// Culls every batch for the current view: count survivors per batch LOD, lay the LODs out in the visible buffer
-	/// and write their draw arguments, then scatter the survivors into place.
+	/// and write their draw arguments, then scatter the survivors into place. With <paramref name="depthChain"/>, instances
+	/// hidden behind it are culled too, and the chain is kept for the next frame's prepass; with <paramref name="history"/>,
+	/// the prepass culls instances last frame's depth hid.
 	/// </summary>
-	private void Cull( bool shadow )
+	private void Cull( bool shadow, Texture depthChain, HistoryView? history )
 	{
 		var attributes = RenderAttributes.Pool.Get();
 
@@ -675,7 +788,8 @@ internal sealed class ClutterRenderer : SceneCustomObject
 		attributes.Set( "ClutterLodTanHalfFov", Lod.TanHalfFov );
 		attributes.Set( "ClutterLodViewportWidth", Lod.ViewportWidth );
 		attributes.Set( "ClutterLodOrthoWidth", Lod.OrthoWidth );
-		attributes.Set( "ClutterWorldToProjection", Graphics.ViewFrustum.GetReverseZViewProjTranspose() );
+		var worldToProjection = Graphics.ViewFrustum.GetReverseZViewProjTranspose();
+		attributes.Set( "ClutterWorldToProjection", worldToProjection );
 		attributes.Set( "ClutterMaxDistance", shadow ? EffectiveShadowDistance : 0.0f );
 		attributes.Set( "CullShadowCasters", shadow ? 1 : 0 );
 
@@ -690,6 +804,27 @@ internal sealed class ClutterRenderer : SceneCustomObject
 				attributes.Set( CasterPlaneNames[i], planes[i] );
 		}
 		attributes.Set( "ClutterCasterPlaneCount", casterPlanes );
+
+		// The world can draw into part of the depth range (a 3D skybox behind it), and the chain holds what was drawn
+		var viewport = Graphics.Context.GetViewport();
+		var depthRange = new Vector2( viewport.MinZ, viewport.MaxZ );
+
+		attributes.Set( "ClutterOcclusion", depthChain is null ? 0 : 1 );
+		if ( depthChain is not null )
+		{
+			attributes.Set( "ClutterDepthChain", depthChain );
+			attributes.Set( "ClutterDepthRange", depthRange );
+		}
+
+		attributes.Set( "ClutterHistoryValid", history is null ? 0 : 1 );
+		if ( history is { } kept )
+		{
+			attributes.Set( "ClutterHistory", _history );
+			attributes.Set( "ClutterHistoryWorldToProjection", kept.WorldToProjection );
+			attributes.Set( "ClutterHistoryViewport", kept.Viewport );
+			attributes.Set( "ClutterHistoryDepthRange", kept.DepthRange );
+			attributes.Set( "ClutterHistoryMip", kept.Mip );
+		}
 
 		Graphics.ResourceBarrierTransition( _counts, ResourceState.CopyDestination );
 		_counts.Clear();
@@ -715,6 +850,9 @@ internal sealed class ClutterRenderer : SceneCustomObject
 		Graphics.ResourceBarrierTransition( _visible, ResourceState.GenericRead );
 		Graphics.ResourceBarrierTransition( _args, ResourceState.IndirectArgument );
 
+		if ( depthChain is not null )
+			KeepHistory( attributes, depthChain, depthRange, worldToProjection );
+
 		RenderAttributes.Pool.Return( attributes );
 	}
 
@@ -736,6 +874,8 @@ internal sealed class ClutterRenderer : SceneCustomObject
 	internal override void OnNativeDestroy()
 	{
 		DisposeInstanceBuffers();
+		_history?.Dispose();
+		_history = null;
 
 		_batchTable?.Dispose();
 		_batchTable = null;
