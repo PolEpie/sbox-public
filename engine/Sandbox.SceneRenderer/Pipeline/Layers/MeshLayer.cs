@@ -119,8 +119,8 @@ internal abstract class MeshLayer : RenderLayer
 
 	/// <summary>
 	/// Whether it draws custom objects in <paramref name="view"/>. The prepass only draws them for a view with depth normals:
-	/// that's for AO, which runs before the opaque pass would draw them, and a layer with custom objects records on the main
-	/// thread - terrain culls its meshlets on the CPU each pass - so views that don't need it keep the prepass on workers.
+	/// that's for AO, which runs before the opaque pass would draw them. Terrain culls its meshlets on the CPU each pass, so
+	/// views that don't need them in the prepass skip that work.
 	/// </summary>
 	internal bool DrawsCustomObjectsIn( ViewPass view ) => DrawsCustomObjects && (!WritesNormals || (view.View.DepthNormals && !view.IsShadow));
 

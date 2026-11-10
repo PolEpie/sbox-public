@@ -68,6 +68,11 @@ internal abstract class RenderFeature
 	internal virtual bool CanRecordOffMainThread( ViewPass view, MeshLayer layer ) => true;
 
 	/// <summary>
+	/// Whether recording draws custom objects, which may run arbitrary command lists the frame's resource tracking can't see.
+	/// </summary>
+	internal virtual bool DrawsCustomObjects( ViewPass view, MeshLayer layer ) => false;
+
+	/// <summary>
 	/// Whether selected runs need a frame-buffer copy before drawing.
 	/// </summary>
 	internal virtual bool ReadsFrameBuffer( ViewPass view, MeshRuns runs ) => false;

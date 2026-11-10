@@ -479,6 +479,19 @@ public sealed partial class RenderSystem : IDisposable
 	}
 
 	/// <summary>
+	/// Whether any feature draws custom objects in <paramref name="view"/>'s <paramref name="layer"/>.
+	/// </summary>
+	internal bool DrawsCustomObjects( ViewPass view, MeshLayer layer )
+	{
+		for ( int i = 0; i < features.Count; i++ )
+		{
+			if ( features[i].DrawsCustomObjects( view, layer ) ) return true;
+		}
+
+		return false;
+	}
+
+	/// <summary>
 	/// Whether the main view's selected runs read the frame-buffer copy.
 	/// </summary>
 	internal bool ReadsFrameBuffer( MeshRuns runs )
