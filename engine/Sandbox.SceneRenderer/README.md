@@ -84,8 +84,9 @@ dependencies backwards and drops producers whose output is unused. `IsNeeded` ha
 can do useful work for the current frame.
 
 Large frames record work in parallel. Each recording segment has its own native context, created on
-the thread that records it. Shadow culling is also parallelized. Camera stages and custom-object work
-that requires the main thread stay there. Small frames avoid the overhead of parallel recording.
+the thread that records it. Shadow culling is also parallelized. Custom objects record on workers too,
+as native's do (`SceneCustomObject.RenderSceneObject` must be thread-safe); camera stages stay on the
+main thread. Small frames avoid the overhead of parallel recording.
 With `r_managed_async_compute` (enabled by default), depth-chain, contact-shadow and AO work can overlap
 shadow-map rendering. SSR automatically starts on graphics once Hi-Z is ready, alongside AO on compute.
 

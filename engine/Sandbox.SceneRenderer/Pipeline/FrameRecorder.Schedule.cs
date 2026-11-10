@@ -15,11 +15,11 @@ internal sealed partial class FrameRecorder
 
 	void PlanSegments( bool parallel, bool asyncCompute )
 	{
-		var runs = 0;
+		var total = 0;
 		for ( int w = 0; w < workCount; w++ )
-			runs += work[w].Runs;
+			total += DrawsIn( w, 0, work[w].Runs );
 
-		Parallel = parallel && runs >= ParallelRunThreshold;
+		Parallel = parallel && total >= ParallelDrawThreshold;
 		var maxSegments = Parallel ? MaxRecordThreads : 1;
 		_computeBatchCount = 0;
 		for ( int l = 0; l < layerCount; )

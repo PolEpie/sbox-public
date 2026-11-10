@@ -24,7 +24,7 @@ internal sealed class ShadowLayer : MeshLayer
 	public override FrameResources Reads( RenderFrame frame )
 	{
 		foreach ( var pass in frame.System.ShadowMaps.Passes )
-			if ( !frame.System.CanRecordOffMainThread( pass, this ) ) return FrameResources.Untracked;
+			if ( frame.System.DrawsCustomObjects( pass, this ) ) return FrameResources.Untracked;
 
 		return FrameResources.None;
 	}

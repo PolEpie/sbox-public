@@ -5,7 +5,7 @@ namespace Sandbox.SceneRenderer;
 
 /// <summary>
 /// Plans, records and submits frame segments, following native's <c>CRenderBatchList</c>.
-/// Mesh work can record in parallel; custom objects and engine stages stay on the main thread.
+/// Mesh and custom-object work can record in parallel; engine stages stay on the main thread.
 /// Segments own their writable state and submit in order. Small frames without async work share one context.
 /// </summary>
 internal sealed partial class FrameRecorder : IDisposable
@@ -16,9 +16,9 @@ internal sealed partial class FrameRecorder : IDisposable
 	static readonly int MaxRecordThreads = Math.Clamp( Environment.ProcessorCount - 1, 1, 8 );
 
 	/// <summary>
-	/// Minimum total runs needed to justify worker recording.
+	/// Minimum total draws (<see cref="RenderFeature.RunWeights"/>) needed to justify worker recording.
 	/// </summary>
-	const int ParallelRunThreshold = 64;
+	const int ParallelDrawThreshold = 64;
 
 	/// <summary>
 	/// The fewest draws worth a segment of their own (<see cref="RenderFeature.RunWeights"/>).
@@ -487,7 +487,7 @@ internal sealed partial class FrameRecorder : IDisposable
 
 	/// <summary>
 	/// Split work by draw count, allowing splits within views. Empty work still clears its target;
-	/// segments containing custom objects stay on the main thread.
+	/// segments whose work can't record off the main thread stay there.
 	/// </summary>
 	void AddDrawSegments( RenderFrame frame, int from, int to, int maxSegments )
 	{

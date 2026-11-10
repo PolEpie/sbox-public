@@ -121,7 +121,7 @@ internal sealed partial class MeshRenderFeature : RenderFeature
 		public MeshRuns FrameBufferReads;
 
 		/// <summary>
-		/// Lists containing custom objects, which require main-thread recording.
+		/// Lists containing custom objects, which may run arbitrary command lists.
 		/// </summary>
 		public MeshRuns Custom;
 
@@ -734,11 +734,11 @@ internal sealed partial class MeshRenderFeature : RenderFeature
 	}
 
 	/// <summary>
-	/// Worker-safe when no custom objects will draw.
+	/// Whether custom objects draw in this view's layer. They record on worker threads like meshes, as native's do.
 	/// </summary>
-	internal override bool CanRecordOffMainThread( ViewPass view, MeshLayer layer )
+	internal override bool DrawsCustomObjects( ViewPass view, MeshLayer layer )
 	{
-		return !layer.DrawsCustomObjectsIn( view ) || (view.State<RunLists>( this ).Custom & layer.Runs) == 0;
+		return layer.DrawsCustomObjectsIn( view ) && (view.State<RunLists>( this ).Custom & layer.Runs) != 0;
 	}
 
 	internal override bool ReadsFrameBuffer( ViewPass view, MeshRuns runs ) => (view.State<RunLists>( this ).FrameBufferReads & runs) != 0;
@@ -756,6 +756,32 @@ internal sealed partial class MeshRenderFeature : RenderFeature
 		}
 
 		return items;
+	}
+
+	/// <summary>
+	/// Roughly how many mesh draws a custom object costs to record. Clutter's cull dispatches and indirect draws take
+	/// about a millisecond a pass, where a mesh draw takes microseconds, so one is worth a segment of its own.
+	/// </summary>
+	const int CustomObjectWeight = 64;
+
+	/// <summary>
+	/// One per draw, <see cref="CustomObjectWeight"/> per custom object that draws, in <see cref="RunCount"/>'s order.
+	/// </summary>
+	internal override void RunWeights( ViewPass view, MeshLayer layer, Span<int> weights )
+	{
+		var lists = view.State<RunLists>( this );
+		var custom = DrawsCustomObjects( view, layer );
+		var start = 0;
+		for ( int bit = 0; bit < lists.ItemsByBit.Length; bit++ )
+		{
+			if ( ((int)layer.Runs & (1 << bit)) == 0 ) continue;
+
+			var runs = CollectionsMarshal.AsSpan( lists.ByBit[bit] );
+			var items = CollectionsMarshal.AsSpan( lists.ItemsByBit[bit] );
+			for ( int i = 0; i < items.Length; i++ )
+				weights[start + i] = custom && runs[items[i].Run].Custom is not null ? CustomObjectWeight : 1;
+			start += items.Length;
+		}
 	}
 
 	/// <summary>
