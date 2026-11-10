@@ -13,7 +13,8 @@ namespace Sandbox.Rendering;
 /// A point light's six cube faces are each their own cone out of the light, so a light off to the side usually only
 /// needs one or two of them - the rest can't contain a receiver the camera sees, so nothing samples them.</item>
 /// <item>What survives is culled against the caster volume (<see cref="BuildCasterVolume"/>): the camera's visible
-/// range swept toward the light. Clutter's GPU cull reads it as planes.</item>
+/// range swept toward the light - for a sun cascade, only the part of that range that samples it, so an outer cascade
+/// leaves the casters near the camera to the finer ones. Clutter's GPU cull reads it as planes.</item>
 /// </list>
 /// </summary>
 internal partial class ShadowMapper
@@ -124,24 +125,18 @@ internal partial class ShadowMapper
 
 	/// <summary>
 	/// A caster volume (<see cref="BuildCasterVolume"/>) and the shadow views it belongs to, named by where their
-	/// camera sits: a local light's views all start at the light, a sun cascade's at its own ortho origin. A shadow
-	/// view renders long after it's worked out, so it finds its volume by that instead of carrying it along.
+	/// camera sits: a local light's views all start at the light, a sun cascade's at its own ortho origin, with a volume
+	/// of its own. A shadow view renders long after it's worked out, so it finds its volume by that instead of carrying it along.
 	/// </summary>
 	internal sealed class CasterVolume
 	{
 		public readonly Vector4[] Planes = new Vector4[12];
 		public int PlaneCount;
-		// A local light's views all start at it; a sun's cascades each have their own ortho origin, four at most
-		public readonly Vector3[] Origins = new Vector3[4];
-		public int OriginCount;
+		// A local light's views all start at it; each sun cascade has a volume of its own
+		public Vector3 Origin;
 
-		/// <summary>True when <paramref name="origin"/> is one of the views this volume was built for.</summary>
-		public bool Covers( Vector3 origin )
-		{
-			for ( int i = 0; i < OriginCount; i++ )
-				if ( Origins[i].DistanceSquared( origin ) < 1f ) return true;
-			return false;
-		}
+		/// <summary>True when <paramref name="origin"/> is where the views this volume was built for render from.</summary>
+		public bool Covers( Vector3 origin ) => Origin.DistanceSquared( origin ) < 1f;
 	}
 
 	/// <summary>
@@ -378,8 +373,7 @@ internal partial class ShadowMapper
 
 		BuildViewHull();
 		volume.PlaneCount = BuildCasterVolumeFrom( viewHullCorners, lightPosition, volume.Planes );
-		volume.Origins[0] = lightPosition;
-		volume.OriginCount = 1;
+		volume.Origin = lightPosition;
 		PublishCasterVolume( volume );
 	}
 }

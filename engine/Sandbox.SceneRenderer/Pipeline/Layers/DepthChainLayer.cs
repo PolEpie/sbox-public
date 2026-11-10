@@ -39,6 +39,7 @@ internal sealed class DepthChainLayer : RenderLayer
 		chain = frame.System.OcclusionActive ? frame.System.OcclusionHistory.Target( width, height ) : SharedPasses.DepthChainTarget( width, height ).DepthTarget;
 		frameContext.Attributes.Set( DepthChainName, chain );
 		frameContext.Attributes.Set( DepthChainPrevFrameName, chain );
+		frame.MainPass.DepthChain = chain;
 	}
 
 	public override void Record( RenderFrame frame, RenderContext rc, ref RenderStats stats )
