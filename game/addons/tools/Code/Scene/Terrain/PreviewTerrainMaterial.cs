@@ -9,11 +9,21 @@ class PreviewTerrainMaterial : AssetPreview
 
 	public PreviewTerrainMaterial( Asset asset ) : base( asset ) { }
 
+	/// <summary>
+	/// The material shown. The material editor sets its own instance, so the preview follows unsaved edits.
+	/// </summary>
+	public TerrainMaterial Material { get; set; }
+
+	ModelRenderer _renderer;
+
 	public override async Task InitializeAsset()
 	{
 		using ( EditorUtility.DisableTextureStreaming() )
 		{
-			if ( !Asset.TryLoadResource<TerrainMaterial>( out var material ) )
+			if ( Material is null && Asset.TryLoadResource<TerrainMaterial>( out var material ) )
+				Material = material;
+
+			if ( Material is null )
 				return;
 
 			UpdateLighting();
@@ -22,17 +32,10 @@ class PreviewTerrainMaterial : AssetPreview
 			{
 				PrimaryObject = new GameObject();
 
-				var mr = PrimaryObject.AddComponent<ModelRenderer>();
-				mr.Model = Model.Sphere;
-				mr.MaterialOverride = Material.FromShader( "shaders/terrain_preview.shader" );
-				mr.SceneObject.Attributes.Set( "BCR", material.BCRTexture );
-				mr.SceneObject.Attributes.Set( "NHO", material.NHOTexture );
-
-				// Same values the terrain feeds its GPU material buffer, so the preview
-				// tiles and shades like the material does on a terrain
-				mr.SceneObject.Attributes.Set( "UVScale", material.UVScale );
-				mr.SceneObject.Attributes.Set( "NormalStrength", 1.0f / material.NormalStrength );
-				mr.SceneObject.Attributes.Set( "Metalness", material.Metalness );
+				_renderer = PrimaryObject.AddComponent<ModelRenderer>();
+				_renderer.Model = Model.Sphere;
+				_renderer.MaterialOverride = Sandbox.Material.FromShader( "shaders/terrain_preview.shader" );
+				ApplyMaterial();
 			}
 
 			SceneSize = PrimaryObject.GetBounds().Size * 0.6f;
@@ -40,6 +43,30 @@ class PreviewTerrainMaterial : AssetPreview
 		}
 
 		await Task.CompletedTask;
+	}
+
+	public override void UpdateScene( float cycle, float timeStep )
+	{
+		// Cheap attribute sets: keeps sliders and recompiled textures live without rebuilding the scene
+		ApplyMaterial();
+		base.UpdateScene( cycle, timeStep );
+	}
+
+	void ApplyMaterial()
+	{
+		if ( Material is null || !_renderer.IsValid() || _renderer.SceneObject is not { } so )
+			return;
+
+		so.Attributes.Set( "BCR", Material.BCRTexture );
+		so.Attributes.Set( "NHO", Material.NHOTexture );
+
+		// Same values the terrain feeds its GPU material buffer, so the preview
+		// tiles and shades like the material does on a terrain
+		so.Attributes.Set( "UVScale", Material.UVScale );
+		so.Attributes.Set( "NormalStrength", 1.0f / Material.NormalStrength );
+		so.Attributes.Set( "Metalness", Material.Metalness );
+		so.Attributes.Set( "Roughness", Material.Roughness );
+		so.Attributes.Set( "NoTile", Material.NoTiling );
 	}
 
 	/// <summary>
