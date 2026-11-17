@@ -21,7 +21,7 @@ public class ReferencePathTests : HotloadTestBase
 	[TestMethod]
 	public void PathsAreDroppedAfterHotload()
 	{
-		Root = new Before::TestClass1();
+		Root = new Before::BasicMembersClass();
 
 		var path = Sandbox.Hotload.ReferencePath.GetRoot( RootField );
 
