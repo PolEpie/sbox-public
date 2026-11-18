@@ -24,6 +24,14 @@ public partial class Model
 		}
 
 		name ??= procedural ? native.GetModelName() : NativeGlue.Resources.GetModelResourceName( native );
+
+		// A reference nothing has used yet already stands for this model: give it the handle, don't make a second wrapper
+		if ( !procedural && Game.Resources.TryGet<Model>( name, out model ) && model._reference is not null )
+		{
+			model.SetNative( native, name );
+			return model;
+		}
+
 		model = new Model( native, name, procedural );
 		NativeResourceCache.Add( instanceId, model );
 

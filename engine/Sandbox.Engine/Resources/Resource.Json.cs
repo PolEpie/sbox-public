@@ -70,6 +70,12 @@ public partial class Resource
 	}
 
 	/// <summary>
+	/// A reference read from a file. A model waits for its first use before it loads.
+	/// </summary>
+	static Resource LoadReference( Type targetType, ResourceId id )
+		=> targetType == typeof( Model ) ? Model.LoadDeferred( id ) : Load( targetType, id );
+
+	/// <summary>
 	/// Load a resource reference from JSON data.
 	/// Handles both string paths and embedded resource objects for all resource types.
 	/// </summary>
@@ -78,7 +84,7 @@ public partial class Resource
 		if ( reader.TokenType == JsonTokenType.String )
 		{
 			// legacy: just a path
-			return Load( targetType, reader.GetString() );
+			return LoadReference( targetType, reader.GetString() );
 		}
 
 		using var doc = JsonDocument.ParseValue( ref reader );
@@ -167,7 +173,7 @@ public partial class Resource
 			path = pathElement.GetString();
 		}
 
-		return Load( targetType, new ResourceId { Guid = guid, Path = path } );
+		return LoadReference( targetType, new ResourceId { Guid = guid, Path = path } );
 	}
 
 	/// <summary>

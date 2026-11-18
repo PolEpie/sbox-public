@@ -193,7 +193,9 @@ public abstract partial class GameResource : Resource, ISourceLineProvider
 			ResourceIdLong = ResourcePath.FastHash64();
 
 			// Sol: the actual load happens via LoadGameResource, what's this for?
-			Manifest = AsyncResourceLoader.Load( ResourcePath );
+			// The editor registers every mounted resource, and a manifest keeps all that one references loaded
+			if ( !Application.IsEditor )
+				Manifest = AsyncResourceLoader.Load( ResourcePath );
 		}
 
 		if ( id.Guid is Guid guid && guid != default )
