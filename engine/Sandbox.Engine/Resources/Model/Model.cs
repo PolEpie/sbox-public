@@ -9,10 +9,22 @@ namespace Sandbox;
 /// </summary>
 public sealed partial class Model : Resource
 {
-	internal IModel native;
+	IModel _native;
+
+	/// <summary>
+	/// Set while this model is a reference read from a file that nothing has used yet. The editor leaves those
+	/// unloaded, so that a model which is only referenced - by a prefab nobody placed, by a resource - stays out of memory.
+	/// </summary>
+	ResourceId? _reference;
+
+	/// <summary>
+	/// The native model. Reading it loads a model that was only referenced so far.
+	/// </summary>
+	internal IModel native => EnsureLoaded()._native;
+
 	internal bool procedural;
 
-	public override bool IsValid => native.IsValid;
+	public override bool IsValid => _reference is not null || _native.IsValid;
 
 	/// <summary>
 	/// Private constructor, use <see cref="FromNative(IModel, bool, string)"/>
@@ -21,7 +33,7 @@ public sealed partial class Model : Resource
 	{
 		if ( native.IsNull ) throw new Exception( "Model pointer cannot be null!" );
 
-		this.native = native;
+		_native = native;
 		this.Name = name;
 		this.procedural = procedural;
 		_animationGraph = new( LoadAnimationGraph );
@@ -29,14 +41,66 @@ public sealed partial class Model : Resource
 		RegisterWeakResourceId( Name, native.GetGuid() );
 	}
 
+	/// <summary>
+	/// A reference that loads on first use, see <see cref="LoadDeferred"/>.
+	/// </summary>
+	private Model( ResourceId reference, Guid guid )
+	{
+		_reference = reference;
+
+		// The path and guid the loaded model will have: what gets serialized must not change when it loads
+		Name = reference.Guid is null ? reference.Path : reference.ResolvePath();
+		_animationGraph = new( LoadAnimationGraph );
+
+		RegisterWeakResourceId( Name, guid );
+	}
+
+	/// <summary>
+	/// Load now if this is still an unused reference.
+	/// </summary>
+	internal Model EnsureLoaded()
+	{
+		if ( _reference is not { } reference ) return this;
+
+		// The same rule as Load
+		ThreadSafe.AssertIsMainThread();
+		_reference = null;
+
+		var loaded = NativeGlue.Resources.GetModel( reference.Path, reference.Guid ?? Guid.Empty );
+		if ( loaded.IsNull || !loaded.IsStrongHandleValid() ) return this;
+
+		// By guid the model may have moved from the path the reference carries, as in Load
+		SetNative( loaded, reference.Guid is null || loaded.IsError() ? reference.Path : NativeGlue.Resources.GetModelResourceName( loaded ) );
+		return this;
+	}
+
+	/// <summary>
+	/// Give an unused reference its native model.
+	/// </summary>
+	internal void SetNative( IModel loaded, string name )
+	{
+		_reference = null;
+		_native = loaded;
+		Name = name;
+
+		RegisterWeakResourceId( name, loaded.GetGuid() );
+
+		var instanceId = loaded.GetBindingPtr().ToInt64();
+		NativeResourceCache.Add( instanceId, this );
+		Loaded[instanceId] = new WeakReference<Model>( this );
+	}
+
 	internal override void Destroy()
 	{
-		if ( !native.IsNull )
+		// Not through the native property: destroying an unused reference must not load it
+		_reference = null;
+
+		if ( !_native.IsNull )
 		{
 			var path = ResourcePath;
 
-			var n = native;
-			native = default;
+			var n = _native;
+			_native = default;
 
 			MainThread.Queue( () =>
 			{

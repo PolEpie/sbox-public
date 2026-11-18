@@ -346,6 +346,10 @@ public class EditorMainWindow : DockWindow, IUndoSystemProvider
 		// Reopen last session's scenes so their docks exist before the layout is restored
 		SceneEditorSession.RestoreOpenSessions();
 
+		// Loading every mounted resource and the restored scenes leaves a few GB of spare heap behind
+		System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+		GC.Collect( GC.MaxGeneration, GCCollectionMode.Aggressive, blocking: true, compacting: true );
+
 		SetVisible( true );
 
 		// Register the main editor window as an SDL window and tell the input system it's the main window,

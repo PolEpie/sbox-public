@@ -18,7 +18,7 @@ public partial class Model
 		if ( id.Guid is Guid guid )
 		{
 			if ( Game.Resources.TryGet<Model>( guid, out var resource ) )
-				return resource;
+				return resource.EnsureLoaded();
 
 			var native = NativeGlue.Resources.GetModel( id.Path, guid );
 			return FromNative( native,
@@ -33,12 +33,42 @@ public partial class Model
 				return m;
 
 			if ( Game.Resources.TryGet<Model>( id.Path, out var resource ) )
-				return resource;
+				return resource.EnsureLoaded();
 
 			return FromNative( NativeGlue.Resources.GetModel( id.Path, Guid.Empty ), name: id.Path );
 		}
 
 		return Error;
+	}
+
+	/// <summary>
+	/// A model that a file references. In the editor it loads when something first uses it, so that a model which is
+	/// only referenced - by a prefab nobody placed, by a resource - stays out of memory. Elsewhere this is <see cref="Load(ResourceId)"/>.
+	/// </summary>
+	internal static Model LoadDeferred( ResourceId id )
+	{
+		if ( !Application.IsEditor || string.IsNullOrWhiteSpace( id.Path ) || MountUtility.IsMountPath( id.Path ) )
+			return Load( id );
+
+		ThreadSafe.AssertIsMainThread();
+
+		id.Path = id.Path.Replace( ".vmdl_c", ".vmdl" );
+
+		// Lookups as in Load: by guid when the reference has one, by path otherwise
+		if ( id.Guid is Guid referenced )
+		{
+			if ( Game.Resources.TryGet<Model>( referenced, out var existing ) ) return existing;
+		}
+		else if ( Game.Resources.TryGet<Model>( id.Path, out var existing ) )
+		{
+			return existing;
+		}
+
+		// Without its guid the reference would serialize differently once loaded, so load it now
+		if ( (id.Guid ?? Sandbox.ResourceId.FromPath( id.Path ).Guid) is not Guid guid || guid == default )
+			return Load( id );
+
+		return new Model( id, guid );
 	}
 
 	/// <summary>

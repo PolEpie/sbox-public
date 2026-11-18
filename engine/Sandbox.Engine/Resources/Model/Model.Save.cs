@@ -13,6 +13,8 @@ partial class Model
 
 	public async Task<byte[]> SaveToVmdlAsync()
 	{
+		// Loading an unused reference needs the main thread
+		EnsureLoaded();
 		return await Task.Run( SaveToVmdl );
 	}
 }
