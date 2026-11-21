@@ -33,21 +33,22 @@ public class MaterialServiceTests : GpuTest
 	}
 
 	/// <summary>
-	/// A material of a shader that makes itself translucent (<c>#define S_TRANSLUCENT 1</c> with no feature: glass, and
-	/// Rubble's glass made at run time from its package shader) is translucent, from the <c>translucent</c> attribute its
-	/// shader exports, as native reads a material's; a shader that doesn't stays opaque without its feature.
+	/// A material of a shader that makes itself translucent (<c>#define S_TRANSLUCENT 1</c> with no feature: the USP's
+	/// glass_scope, and Rubble's glass made at run time from its package shader) is translucent, from the
+	/// <c>translucent</c> attribute its shader exports, as native reads a material's; a shader that doesn't
+	/// (surface_test_rock) stays opaque without its feature.
 	/// </summary>
 	[TestMethod]
 	public void ShadersThatDefineTranslucencyMakeTranslucentMaterials()
 	{
-		var core = backend.Content.Roots.FirstOrDefault( r => File.Exists( Path.Combine( r, "shaders", "glass.shader_c" ) ) ) ?? throw new AssertInconclusiveException( "glass isn't compiled" );
-		using var glass = new BackendMaterial( "glass", ShaderFile.Load( Path.Combine( core, "shaders", "glass.shader_c" ) ), null, null );
+		var core = backend.Content.Roots.FirstOrDefault( r => File.Exists( Path.Combine( r, "shaders", "surface_test_rock.shader_c" ) ) ) ?? throw new AssertInconclusiveException( "surface_test_rock isn't compiled" );
+		var scope = Path.GetFullPath( Path.Combine( core, "..", "addons", "content", "Assets", "weapons", "usp", "materials", "glass_scope.shader_c" ) );
+		if ( !File.Exists( scope ) ) Assert.Inconclusive( "glass_scope isn't compiled" );
+		using var glass = new BackendMaterial( "glass_scope", ShaderFile.Load( scope ), null, null );
 		Assert.IsTrue( glass.IsTranslucent );
 
-		var complexPath = Path.Combine( core, "shaders", "complex.shader_c" );
-		if ( !File.Exists( complexPath ) ) return;
-		using var complex = new BackendMaterial( "complex", ShaderFile.Load( complexPath ), null, null );
-		Assert.IsFalse( complex.IsTranslucent );
+		using var rock = new BackendMaterial( "surface_test_rock", ShaderFile.Load( Path.Combine( core, "shaders", "surface_test_rock.shader_c" ) ), null, null );
+		Assert.IsFalse( rock.IsTranslucent );
 	}
 
 	/// <summary>

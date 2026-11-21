@@ -22,13 +22,14 @@ public class DepthPassTests : GpuTest
 	public void AlphaTestedDrawsMatchWithAndWithoutThePrepass()
 	{
 		using var backend = new BackendDevice( Device );
-		backend.Surfaces.ConvertShaders = false;   // the .shader route's prepass
 		var previousHost = RenderHost.Current;
 		RenderHost.Current = new BackendRenderHost( backend );
 		try
 		{
 			var cutOut = backend.LoadMaterial( "materials/dev/simple/simple_rail_32.vmat" );
-			if ( cutOut is not BackendMaterial { Shader: not null, IsAlphaTest: true } ) Assert.Inconclusive( "No compiled alpha-tested material" );
+			if ( backend.Content.Find( "materials/dev/simple/simple_rail_32.vmat" ) is null ) Assert.Inconclusive( "No compiled alpha-tested material" );
+			Assert.IsInstanceOfType<SurfaceMaterial>( cutOut, "simple_rail_32 draws as the standard surface" );
+			Assert.IsTrue( cutOut.IsAlphaTest, "simple_rail_32 is alpha-tested" );
 
 			using var system = new RenderSystem { ParallelRecording = false };
 			using var target = ViewTarget.Create( new Vector2Int( Width, Height ), 4, TextureFormat.RGBA16161616F, TextureFormat.D32FS8, "Depth pass test" );
@@ -79,19 +80,19 @@ public class DepthPassTests : GpuTest
 
 	/// <summary>
 	/// A depth draw keeps a pixel shader that discards even when it was asked to go without (its draw isn't flagged
-	/// alpha-tested, as a package shader's that cuts holes with <c>clip</c> isn't): complex's alpha-tested depth variant
+	/// alpha-tested, as a package shader's that cuts holes with <c>clip</c> isn't): depth_only's alpha-tested variant
 	/// discards and keeps it, its plain one doesn't and goes without.
 	/// </summary>
 	[TestMethod]
 	public void DepthDrawsKeepAPixelShaderThatDiscards()
 	{
 		using var backend = new BackendDevice( Device );
-		var shader = backend.Shaders.Load( "shaders/complex.shader" );
+		var shader = backend.Shaders.Load( "shaders/depth_only.shader" );
 		var features = new int[shader.Features.StaticCombos.Length];
 		var plain = backend.Shaders.Variant( shader, "Depth", features );
 		features[shader.FeatureIndex( "F_ALPHA_TEST" )] = 1;
 		var cutOut = backend.Shaders.Variant( shader, "Depth", features );
-		Assert.IsFalse( plain.Pixel?.Reflection is { Discards: true }, "complex's plain depth variant doesn't discard" );
+		Assert.IsFalse( plain.Pixel?.Reflection is { Discards: true }, "depth_only's plain variant doesn't discard" );
 		Assert.IsTrue( cutOut.Pixel?.Reflection is { Discards: true }, "its alpha-tested one does" );
 
 		var opaque = (BackendMaterial)backend.CreateMaterial( "Opaque", Color.White );

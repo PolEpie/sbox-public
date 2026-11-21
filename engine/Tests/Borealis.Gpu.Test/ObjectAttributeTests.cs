@@ -453,10 +453,7 @@ public class ObjectAttributeTests : GpuTest
 	public void ResidentMeshesLitApartShareAGroup()
 	{
 		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDriven = true, GpuDrivenVisibility = true };
-		foreach ( var shader in (string[])["shaders/complex.shader", "shaders/depth_only.shader"] )
-		{
-			if ( backend.Shaders.GpuDriven( backend.Shaders.Load( shader ) ) is null ) Assert.Inconclusive( $"{shader} has no GPU-driven variant: ShaderCompiler -gpudriven" );
-		}
+		GpuDrivenTests.RequireGpuDrivenDepth( backend );
 
 		var previousHost = RenderHost.Current;
 		RenderHost.Current = new BackendRenderHost( backend );
@@ -550,10 +547,7 @@ public class ObjectAttributeTests : GpuTest
 	public void ResidentGroupsKeepTheirOwnersAcrossARescan()
 	{
 		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDriven = true, GpuDrivenVisibility = true, GpuDrivenResidentMeshes = true };
-		foreach ( var shader in (string[])["shaders/complex.shader", "shaders/depth_only.shader"] )
-		{
-			if ( backend.Shaders.GpuDriven( backend.Shaders.Load( shader ) ) is null ) Assert.Inconclusive( $"{shader} has no GPU-driven variant: ShaderCompiler -gpudriven" );
-		}
+		GpuDrivenTests.RequireGpuDrivenDepth( backend );
 
 		var previousHost = RenderHost.Current;
 		RenderHost.Current = new BackendRenderHost( backend );
@@ -623,10 +617,7 @@ public class ObjectAttributeTests : GpuTest
 	public void ResidentListsOutlastAMeshDrawnAnotherWayEachFrame()
 	{
 		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDriven = true, GpuDrivenVisibility = true, GpuDrivenResidentMeshes = true };
-		foreach ( var shader in (string[])["shaders/complex.shader", "shaders/depth_only.shader"] )
-		{
-			if ( backend.Shaders.GpuDriven( backend.Shaders.Load( shader ) ) is null ) Assert.Inconclusive( $"{shader} has no GPU-driven variant: ShaderCompiler -gpudriven" );
-		}
+		GpuDrivenTests.RequireGpuDrivenDepth( backend );
 
 		var previousHost = RenderHost.Current;
 		RenderHost.Current = new BackendRenderHost( backend );

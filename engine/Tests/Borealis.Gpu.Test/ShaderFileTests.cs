@@ -19,7 +19,7 @@ public class ShaderFileTests
 		get
 		{
 			var files = ContentFiles.FindGame();
-			if ( files.Find( "shaders/complex.shader" ) is null ) Assert.Inconclusive( "Compiled shaders aren't built (run Bootstrap)" );
+			if ( files.Find( "shaders/line.shader" ) is null ) Assert.Inconclusive( "Compiled shaders aren't built (run Bootstrap)" );
 			return files;
 		}
 	}
@@ -55,16 +55,16 @@ public class ShaderFileTests
 	}
 
 	/// <summary>
-	/// complex.shader: its modes and features, the constant buffer layouts it was compiled against, and every pixel
-	/// shader combo - shared modules with specialization constants included - read and reflected.
+	/// A lit .shader (surface_test_rock, lit by ShadingModelStandard as material shaders are): its modes and features, the
+	/// constant buffer layouts it was compiled against, and every pixel shader combo read and reflected.
 	/// </summary>
 	[TestMethod]
-	public void ComplexCombosRead()
+	public void LitShaderCombosRead()
 	{
-		var shader = ShaderFile.Read( Files.Read( "shaders/complex.shader" ), "complex" );
-		CollectionAssert.AreEqual( new[] { "Forward", "Depth", "ToolsShadingComplexity" }, shader.Modes.Select( m => m.Name ).ToArray() );
+		var shader = ShaderFile.Read( Files.Read( "shaders/surface_test_rock.shader" ), "surface_test_rock" );
+		CollectionAssert.AreEqual( new[] { "Forward", "Depth" }, shader.Modes.Select( m => m.Name ).ToArray() );
 		Assert.AreEqual( ("S_MODE_DEPTH", 1), shader.Mode( "Depth" ).Settings.Single() );
-		Assert.IsTrue( shader.FeatureIndex( "F_ALPHA_TEST" ) >= 0 );
+		Assert.IsTrue( shader.FeatureIndex( "F_RENDER_BACKFACES" ) >= 0 );
 
 		// The layouts Borealis's mirrors must match
 		var pixel = shader[ShaderProgramType.Pixel];
@@ -77,6 +77,24 @@ public class ShaderFileTests
 		for ( int i = 0; i < firstMembers.Length; i++ )
 			Assert.AreEqual( ShaderAbi.ViewEnvironmentBlocks[i].Offset, environment.Members.Single( m => m.Name == firstMembers[i] ).Offset, firstMembers[i] );
 
+		Assert.IsTrue( ReadPixelCombos( pixel ).Modules > 0 );
+	}
+
+	/// <summary>
+	/// A compiled shader's ShaderConstant() combos (complex.shader's) come as specialized shared modules, each read and
+	/// reflected. complex.shader was the one shipped shader compiled with them; package shaders compiled from it still are.
+	/// </summary>
+	[TestMethod]
+	public void SpecializedCombosRead()
+	{
+		if ( Files.Find( "shaders/complex.shader" ) is null ) Assert.Inconclusive( "No compiled shader with specialized combos (complex.shader is gone)" );
+		var shader = ShaderFile.Read( Files.Read( "shaders/complex.shader" ), "complex" );
+		Assert.IsTrue( ReadPixelCombos( shader[ShaderProgramType.Pixel] ).Specialized > 0, "complex's ShaderConstant() combos come as specialized shared modules" );
+	}
+
+	/// <summary>Every pixel shader combo of a program read, and each distinct module reflected.</summary>
+	static (int Modules, int Specialized) ReadPixelCombos( ShaderProgram pixel )
+	{
 		var timer = Stopwatch.StartNew();
 		var modules = 0;
 		var specialized = 0;
@@ -92,7 +110,7 @@ public class ShaderFileTests
 		}
 
 		Console.WriteLine( $"{pixel.ComboCount} pixel combos, {modules} shaders ({specialized} specialized, {reflected.Count} distinct modules) in {timer.ElapsedMilliseconds} ms" );
-		Assert.IsTrue( specialized > 0, "complex's ShaderConstant() combos come as specialized shared modules" );
+		return (modules, specialized);
 	}
 
 	/// <summary>
@@ -127,26 +145,27 @@ public class ShaderFileTests
 	}
 
 	/// <summary>
-	/// Combo ids follow the material system: the Depth mode sets S_MODE_DEPTH, a feature sets its static combo, and every
+	/// Combo ids follow the material system: a mode sets its combo (sky's ToolsShadingComplexity,
+	/// S_MODE_TOOLS_SHADING_COMPLEXITY), a feature sets its static combo (F_TEXTURE_FORMAT2, S_TEXTURE_FORMAT), and every
 	/// chosen combo was compiled.
 	/// </summary>
 	[TestMethod]
 	public void ComboIdsFollowModeAndFeatures()
 	{
-		var shader = ShaderFile.Read( Files.Read( "shaders/complex.shader" ), "complex" );
+		var shader = ShaderFile.Read( Files.Read( "shaders/sky.shader" ), "sky" );
 		var pixel = shader[ShaderProgramType.Pixel];
 		var features = new int[shader.Features.StaticCombos.Length];
 
 		var forward = shader.StaticComboId( pixel, shader.Mode( "Forward" ), features );
-		var depth = shader.StaticComboId( pixel, shader.Mode( "Depth" ), features );
-		var modeDepth = pixel.StaticCombos.Single( c => c.Name == "S_MODE_DEPTH" );
-		Assert.AreEqual( forward + modeDepth.Stride, depth );
+		var complexity = shader.StaticComboId( pixel, shader.Mode( "ToolsShadingComplexity" ), features );
+		var modeComplexity = pixel.StaticCombos.Single( c => c.Name == "S_MODE_TOOLS_SHADING_COMPLEXITY" );
+		Assert.AreEqual( forward + modeComplexity.Stride, complexity );
 
-		features[shader.FeatureIndex( "F_ALPHA_TEST" )] = 1;
-		var alphaTest = shader.StaticComboId( pixel, shader.Mode( "Forward" ), features );
-		Assert.AreEqual( forward + pixel.StaticCombos.Single( c => c.Name == "S_ALPHA_TEST" ).Stride, alphaTest );
+		features[shader.FeatureIndex( "F_TEXTURE_FORMAT2" )] = 1;
+		var format = shader.StaticComboId( pixel, shader.Mode( "Forward" ), features );
+		Assert.AreEqual( forward + pixel.StaticCombos.Single( c => c.Name == "S_TEXTURE_FORMAT" ).Stride, format );
 
-		Assert.IsTrue( pixel.HasCombo( forward ) && pixel.HasCombo( depth ) && pixel.HasCombo( alphaTest ) );
+		Assert.IsTrue( pixel.HasCombo( forward ) && pixel.HasCombo( complexity ) && pixel.HasCombo( format ) );
 	}
 }
 
@@ -197,15 +216,16 @@ public class ShaderDrawTests : GpuTest
 	}
 
 	/// <summary>
-	/// complex's Forward mode (with its specialization constants and the material constant buffer filled from the
-	/// shader's defaults) colours a quad, and its Depth mode draws depth, both through layouts reflected from the SPIR-V.
+	/// A lit .shader's Forward mode (surface_test_rock's, with its specialization constants and the material constant buffer
+	/// filled from the shader's defaults) colours a quad, and its Depth mode draws depth, both through layouts reflected from
+	/// the SPIR-V.
 	/// </summary>
 	[TestMethod]
-	public void ComplexDrawsForwardAndDepth()
+	public void LitShaderDrawsForwardAndDepth()
 	{
 		using var library = new ShaderLibrary( Device, ShaderFileTests.Files );
 		using var defaults = new ShaderDefaults( Device );
-		var shader = library.Load( "shaders/complex.shader" );
+		var shader = library.Load( "shaders/surface_test_rock.shader" );
 		var features = new int[shader.Features.StaticCombos.Length];
 
 		var forward = library.Variant( shader, "Forward", features );
@@ -240,7 +260,7 @@ public class ShaderDrawTests : GpuTest
 	public void EqualVariantsAreShared()
 	{
 		using var library = new ShaderLibrary( Device, ShaderFileTests.Files );
-		var shader = library.Load( "shaders/complex.shader" );
+		var shader = library.Load( "shaders/surface_test_rock.shader" );
 		var features = new int[shader.Features.StaticCombos.Length];
 
 		var first = library.Variant( shader, "Forward", features );
@@ -249,13 +269,12 @@ public class ShaderDrawTests : GpuTest
 		Assert.AreNotSame( first, library.Variant( shader, "Depth", features ), "another mode is another variant" );
 		Assert.AreNotSame( first, library.Variant( shader, "Forward", features, attributes: name => name == "ToolsVisMode" ? 10 : null ), "other specialization values are another variant" );
 
-		var alphaTest = shader.FeatureIndex( "F_ALPHA_TEST" );
-		if ( alphaTest >= 0 )
-		{
-			var tested = (int[])features.Clone();
-			tested[alphaTest] = 1;
-			Assert.AreNotSame( first, library.Variant( shader, "Forward", tested ), "other features are another variant" );
-		}
+		// surface_test_rock's features set no combo; sky's F_TEXTURE_FORMAT2 sets S_TEXTURE_FORMAT
+		var sky = library.Load( "shaders/sky.shader" );
+		var skyFeatures = new int[sky.Features.StaticCombos.Length];
+		var plainSky = library.Variant( sky, "Forward", skyFeatures );
+		skyFeatures[sky.FeatureIndex( "F_TEXTURE_FORMAT2" )] = 1;
+		Assert.AreNotSame( plainSky, library.Variant( sky, "Forward", skyFeatures ), "other features are another variant" );
 
 		library.ShareVariants = false;
 		Assert.AreNotSame( first, library.Variant( shader, "Forward", features ), "unshared, each request makes its own" );
@@ -341,7 +360,7 @@ public class ShaderDrawTests : GpuTest
 		var depthFormat = Device.InfoOf( depth ).Format;
 		Format[] colors = color.IsValid ? [Device.InfoOf( color ).Format] : [];
 
-		// Mesh: one stream with what complex reads, the instance id stream, the default stream
+		// Mesh: one stream with what a lit shader reads, the instance id stream, the default stream
 		var vertices = new Vertex[4];
 		for ( int i = 0; i < 4; i++ )
 		{

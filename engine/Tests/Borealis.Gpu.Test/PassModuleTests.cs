@@ -495,7 +495,7 @@ public class PassModuleTests : GpuTest
 			return variant.State.NeedsStencil;
 		}
 
-		Assert.IsFalse( Needs( "shaders/complex.shader" ), "complex: tests NOT_EQUAL 3 against bit 0, writes nothing" );
+		Assert.IsFalse( Needs( "shaders/surface_test_rock.shader" ), "a lit .shader (surface_test_rock): tests NOT_EQUAL 3 against bit 0, writes nothing" );
 		Assert.IsFalse( Needs( "shaders/gizmo/gizmo_line.shader" ), "gizmo_line writes zero" );
 		Assert.IsTrue( Needs( "shaders/tools_solid.shader" ), "tools_solid writes one" );
 		Assert.IsTrue( Needs( "shaders/postprocess/ObjectHighlight/ObjectHighlight.shader" ), "the highlight's inside pass writes one" );
@@ -503,13 +503,13 @@ public class PassModuleTests : GpuTest
 
 	/// <summary>
 	/// A shader's render state read without making its variant (<see cref="ShaderLibrary.PixelState(ShaderFile, string, ReadOnlySpan{int})"/>, which a material's
-	/// stencil check reads) is its variant's in every mode, for shaders drawn from their compiled programs (complex) and from
-	/// modules (the rest), and reading it compiles and makes nothing.
+	/// stencil check reads) is its variant's in every mode, for shaders drawn from their compiled programs
+	/// (surface_test_rock) and from modules (the rest), and reading it compiles and makes nothing.
 	/// </summary>
 	[TestMethod]
 	public void PixelStateMatchesTheVariantWithoutMakingIt()
 	{
-		string[] paths = ["shaders/complex.shader", "shaders/gizmo/gizmo_line.shader", "shaders/tools_solid.shader", "shaders/glass.shader", "shaders/postprocess/ObjectHighlight/ObjectHighlight.shader"];
+		string[] paths = ["shaders/surface_test_rock.shader", "shaders/gizmo/gizmo_line.shader", "shaders/tools_solid.shader", "shaders/glass.shader", "shaders/postprocess/ObjectHighlight/ObjectHighlight.shader"];
 		using var backend = new BackendDevice( Device );
 		var library = backend.Shaders;
 		var modules = (PassModules)library.Modules;

@@ -19,20 +19,16 @@ public class ToolsViewTests : GpuTest
 	/// <summary>
 	/// Two boxes on the camera's axis, the far one hidden behind the near one. Overdraw counts both where they overlap and one
 	/// around it, over black; quad overdraw draws there too; shader IDs fill both flat in one colour; wireframe draws white
-	/// lines and leaves the faces' insides the clear colour. Each for complex as its .shader and as its surface, classic and
-	/// GPU-driven, with no validation errors.
+	/// lines and leaves the faces' insides the clear colour. Each for the standard surface, classic and GPU-driven, with no
+	/// validation errors.
 	/// </summary>
 	[TestMethod]
-	[DataRow( false, false, DisplayName = ".shader, classic" )]
-	[DataRow( true, false, DisplayName = "surface, classic" )]
-	[DataRow( false, true, DisplayName = ".shader, GPU-driven" )]
-	[DataRow( true, true, DisplayName = "surface, GPU-driven" )]
-	public void GeometricViewsDrawEveryDraw( bool surface, bool gpuDriven )
+	[DataRow( false, DisplayName = "surface, classic" )]
+	[DataRow( true, DisplayName = "surface, GPU-driven" )]
+	public void GeometricViewsDrawEveryDraw( bool gpuDriven )
 	{
 		using var backend = new BackendDevice( Device ) { GpuDriven = gpuDriven, GpuDrivenGeometry = gpuDriven };
-		backend.Surfaces.ConvertShaders = surface;
 		if ( backend.Shaders.Load( "shaders/tools_view.shader" ) is null ) Assert.Inconclusive( "tools_view.slang isn't built" );
-		if ( gpuDriven && !surface && backend.Shaders.GpuDriven( backend.Shaders.Load( "shaders/complex.shader" ) ) is null ) Assert.Inconclusive( "complex has no GPU-driven variant: ShaderCompiler -gpudriven" );
 
 		var previousHost = RenderHost.Current;
 		RenderHost.Current = new BackendRenderHost( backend );
@@ -41,7 +37,7 @@ public class ToolsViewTests : GpuTest
 			using var system = new RenderSystem { ParallelRecording = false };
 			using var target = ViewTarget.Create( new Vector2Int( Width, Height ), 1, TextureFormat.RGBA16161616F, TextureFormat.D32FS8, "Tools view test" );
 			var material = backend.LoadMaterial( "materials/default.vmat" );
-			Assert.AreEqual( surface, material is SurfaceMaterial, "the material is the kind asked for" );
+			Assert.IsInstanceOfType<SurfaceMaterial>( material, "materials/default.vmat draws as the standard surface" );
 
 			var world = new RenderWorld();
 			world.Lighting.SunShadowCascades = 0;
@@ -147,8 +143,8 @@ public class ToolsViewTests : GpuTest
 	{
 		using var backend = new BackendDevice( Device );
 		using var drawer = new ShaderDrawer( backend );
-		var shader = backend.Shaders.Load( "shaders/complex.shader" );
-		if ( shader is null ) Assert.Inconclusive( "complex.shader isn't built" );
+		var shader = backend.Shaders.Load( "shaders/surface_test_rock.shader" );
+		if ( shader is null ) Assert.Inconclusive( "surface_test_rock.shader isn't built" );
 
 		var attributes = new ShaderAttributes();
 		attributes.Set( "ToolsVisMode", 0f );
