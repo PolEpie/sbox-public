@@ -77,23 +77,11 @@ public class ShaderFileTests
 		for ( int i = 0; i < firstMembers.Length; i++ )
 			Assert.AreEqual( ShaderAbi.ViewEnvironmentBlocks[i].Offset, environment.Members.Single( m => m.Name == firstMembers[i] ).Offset, firstMembers[i] );
 
-		Assert.IsTrue( ReadPixelCombos( pixel ).Modules > 0 );
-	}
-
-	/// <summary>
-	/// A compiled shader's ShaderConstant() combos (complex.shader's) come as specialized shared modules, each read and
-	/// reflected. complex.shader was the one shipped shader compiled with them; package shaders compiled from it still are.
-	/// </summary>
-	[TestMethod]
-	public void SpecializedCombosRead()
-	{
-		if ( Files.Find( "shaders/complex.shader" ) is null ) Assert.Inconclusive( "No compiled shader with specialized combos (complex.shader is gone)" );
-		var shader = ShaderFile.Read( Files.Read( "shaders/complex.shader" ), "complex" );
-		Assert.IsTrue( ReadPixelCombos( shader[ShaderProgramType.Pixel] ).Specialized > 0, "complex's ShaderConstant() combos come as specialized shared modules" );
+		Assert.IsTrue( ReadPixelCombos( pixel ) > 0 );
 	}
 
 	/// <summary>Every pixel shader combo of a program read, and each distinct module reflected.</summary>
-	static (int Modules, int Specialized) ReadPixelCombos( ShaderProgram pixel )
+	static int ReadPixelCombos( ShaderProgram pixel )
 	{
 		var timer = Stopwatch.StartNew();
 		var modules = 0;
@@ -110,7 +98,7 @@ public class ShaderFileTests
 		}
 
 		Console.WriteLine( $"{pixel.ComboCount} pixel combos, {modules} shaders ({specialized} specialized, {reflected.Count} distinct modules) in {timer.ElapsedMilliseconds} ms" );
-		return (modules, specialized);
+		return modules;
 	}
 
 	/// <summary>

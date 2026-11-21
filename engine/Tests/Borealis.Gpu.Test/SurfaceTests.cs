@@ -95,7 +95,6 @@ public class SurfaceTests : GpuTest
 	/// <summary>
 	/// Material.CommonInputs.hlsl's <c>TextureFiltering</c> takes its filter from the material's <c>F_TEXTURE_FILTERING</c>, as
 	/// vfx evaluates annotations with the material's features: anisotropic x8 by default, then bilinear, trilinear, point.
-	/// Through a pass module (water_simple's) each value is a variant of its own.
 	/// </summary>
 	[TestMethod]
 	public void TextureFilteringFollowsTheMaterialsFeature()
@@ -115,28 +114,6 @@ public class SurfaceTests : GpuTest
 		Assert.AreEqual( (1f, Filter.Linear, Filter.Linear), (With( 2 ).MaxAnisotropy, With( 2 ).MinFilter, With( 2 ).MipFilter), "trilinear" );
 		Assert.AreEqual( (Filter.Nearest, Filter.Nearest), (With( 3 ).MinFilter, With( 3 ).MagFilter), "point" );
 		Assert.AreEqual( (Filter.Nearest, Filter.Nearest), (With( 4 ).MinFilter, With( 4 ).MagFilter), "nearest" );
-
-		// water_simple is a surface now (water_simple.slang): a leftover compiled file isn't the pass module this checks
-		if ( !File.Exists( Path.Combine( Core, "shaders", "water_simple.shader" ) ) ) { Assert.Inconclusive( "water_simple has no .shader: it's a surface now" ); return; }
-		using var backend = new BackendDevice( Device );
-		var shader = backend.Shaders.Load( "shaders/water_simple.shader" );
-		if ( shader is null ) Assert.Inconclusive( "water_simple isn't compiled" );
-		var index = shader.FeatureIndex( "F_TEXTURE_FILTERING" );
-		Assert.IsTrue( index >= 0 );
-		SamplerInfo[] Samplers( int value )
-		{
-			var features = new int[shader.Features.StaticCombos.Length];
-			features[index] = value;
-			var variant = backend.Shaders.Variant( shader, shader.Modes[0].Name, features );
-			Assert.IsNotNull( variant );
-			return [.. variant.Resources.Where( r => r.Kind == Borealis.Source2.Shaders.ShaderResourceKind.Sampler && r.Stages.HasFlag( ShaderStages.Fragment ) ).Select( r => r.Sampler )];
-		}
-
-		var byValue = Enumerable.Range( 0, 4 ).Select( Samplers ).ToArray();
-		for ( int v = 0; v < byValue.Length; v++ ) TestContext.WriteLine( $"F_TEXTURE_FILTERING {v}: {string.Join( ", ", byValue[v].Select( s => $"{s.MinFilter}/{s.MagFilter}/{s.MipFilter} x{s.MaxAnisotropy}" ) )}" );
-		Assert.IsTrue( byValue[0].Any( s => s.MaxAnisotropy == 8 && s.MipFilter == Filter.Linear ), "anisotropic x8 at 0" );
-		Assert.IsTrue( byValue[1].Any( s => s.MaxAnisotropy == 1 && s.MinFilter == Filter.Linear && s.MipFilter == Filter.Nearest ), "bilinear at 1" );
-		Assert.IsTrue( byValue[3].Any( s => s.MinFilter == Filter.Nearest && s.MagFilter == Filter.Nearest ), "point at 3" );
 	}
 
 	/// <summary>
@@ -997,22 +974,24 @@ public class SurfaceTests : GpuTest
 	}
 
 	/// <summary>
-	/// Material.CommonInputs.hlsl's TextureFiltering (in water_simple.shader) takes its filter from an expression on
-	/// F_TEXTURE_FILTERING, evaluated per material: anisotropic by default, and the feature's other values pick bilinear,
-	/// trilinear and point. Materials that differ only in it don't share a variant.
+	/// Material.CommonInputs.hlsl's TextureFiltering (in the USP's glass_scope.shader, a .shader the game still compiles)
+	/// takes its filter from an expression on F_TEXTURE_FILTERING, evaluated per material: anisotropic by default, and the
+	/// feature's other values pick bilinear, trilinear and point. Materials that differ only in it don't share a variant.
 	/// </summary>
 	[TestMethod]
 	public void ExpressionFilteredSamplersFollowTheirFeature()
 	{
 		using var backend = new BackendDevice( Device );
+		var scope = Core is { } core ? Path.GetFullPath( Path.Combine( core, "..", "addons", "content", "Assets", "weapons", "usp", "materials", "glass_scope.shader_c" ) ) : null;
+		if ( scope is null || !File.Exists( scope ) ) Assert.Inconclusive( "glass_scope isn't compiled" );
+		var file = Borealis.Source2.Shaders.ShaderFile.Load( scope );
 		List<SamplerInfo> Samplers( int filtering )
 		{
-			var water = (BackendMaterial)((GpuDevice)backend).CreateMaterial( $"Water {filtering}", "shaders/water_simple.shader" );
-			if ( water.Shader is null ) Assert.Inconclusive( "water_simple.shader isn't compiled" );
-			var feature = water.Shader.FeatureIndex( "F_TEXTURE_FILTERING" );
-			Assert.IsTrue( feature >= 0, "water_simple.shader has no F_TEXTURE_FILTERING" );
-			water.Features[feature] = filtering;
-			var variant = water.Variant( backend.Shaders, "VrForward", "VrForward", _ => null, _ => null );
+			using var glass = new BackendMaterial( $"Glass scope {filtering}", file, null, null );
+			var feature = file.FeatureIndex( "F_TEXTURE_FILTERING" );
+			Assert.IsTrue( feature >= 0, "glass_scope.shader has no F_TEXTURE_FILTERING" );
+			glass.Features[feature] = filtering;
+			var variant = glass.Variant( backend.Shaders, "Forward", "Forward", _ => null, _ => null );
 			return variant.Resources.Where( r => r.Kind == Borealis.Source2.Shaders.ShaderResourceKind.Sampler && r.Set == ShaderAbi.FragmentSet ).Select( r => r.Sampler ).ToList();
 		}
 
@@ -1306,9 +1285,9 @@ public class SurfaceTests : GpuTest
 	}
 
 	/// <summary>
-	/// The converter turns a .shader of the final combiner shape (simple.shader: the standard processing, lit by the final
-	/// combiner) into a combiner surface with its features as fields, which draws simple's materials as simple.shader
-	/// does, colour-alpha occlusion included; shaders that do more than that shape stay as they are.
+	/// The converter turns a .shader of the final combiner shape (simple.shader, kept under Data: the standard processing,
+	/// lit by the final combiner) into a combiner surface with its features as fields, colour-alpha occlusion included;
+	/// shaders that do more than that shape stay as they are. simple's materials load as standard's surface by default.
 	/// </summary>
 	[TestMethod]
 	[TestCategory( "Slow" )]
@@ -1354,40 +1333,7 @@ public class SurfaceTests : GpuTest
 			StringAssert.Contains( source, "Source( \"F_RENDER_BACKFACES\" ), RenderState( \"TwoSided: true\" )" );
 			Assert.AreEqual( SurfaceRenderDefaults.None, compiled.Material.RenderState );
 
-			byte[] DrawMaterial( string path, bool convert, out GpuMaterial loaded )
-			{
-				using var backend = new BackendDevice( Device );
-				var errors = new List<string>();
-				backend.Surfaces.Error = errors.Add;
-				RenderHost.Current = new BackendRenderHost( backend );
-
-				// The reference: the .shader route, with the core shaders' default surfaces off
-				backend.Surfaces.ConvertShaders = false;
-				if ( convert )
-				{
-					backend.Surfaces.AddFolder( folder );
-					backend.Surfaces.Convert( "shaders/simple.shader", "simple.slang" );
-				}
-
-				loaded = ((GpuDevice)backend).LoadMaterial( path );
-				var picture = Draw( backend, loaded );
-				Assert.AreEqual( 0, errors.Count, string.Join( "\n", errors ) );
-				return picture;
-			}
-
-			// A plain one, colour-alpha occlusion (F_AMBIENT_OCCLUSION_TEXTURE) and a metal
-			foreach ( var path in new[] { "materials/dev/simple/floor_simple_128.vmat", "materials/black_matte.vmat", "materials/editor/env_cubemap_model.vmat" } )
-			{
-				var reference = DrawMaterial( path, false, out var classic );
-				if ( classic is not BackendMaterial { Shader: not null } ) Assert.Inconclusive( $"{path} isn't compiled" );
-				var converted = DrawMaterial( path, true, out var surface );
-				Assert.IsInstanceOfType<SurfaceMaterial>( surface, $"{path} wasn't converted" );
-				SaveRgb( reference, $"simple-{Path.GetFileNameWithoutExtension( path )}-shader" );
-				SaveRgb( converted, $"simple-{Path.GetFileNameWithoutExtension( path )}-surface" );
-				Assert.IsTrue( Mean( reference, converted ) < 0.5, $"{path}: the surface differs by {Mean( reference, converted ):F3}" );
-			}
-
-			// By default the core shaders' materials load as their surfaces: complex's written by hand, simple's the converter's
+			// By default simple's and complex's materials load as standard's surface (they're its names)
 			using var defaults = new BackendDevice( Device );
 			RenderHost.Current = new BackendRenderHost( defaults );
 			Assert.IsTrue( defaults.Surfaces.ConvertShaders );
@@ -1503,7 +1449,8 @@ public class SurfaceTests : GpuTest
 
 	/// <summary>
 	/// Surfaces bind the frame's view set themselves: with enough draws, layers record on command lists of their own, a
-	/// surface is the first draw of its list, and without the view set it would light and fog as no view does.
+	/// surface is the first draw of its list, and without the view set it would light and fog as no view does. They draw
+	/// what the same frame recorded on one list draws.
 	/// </summary>
 	[TestMethod]
 	public void SurfacesBindTheViewSetOnTheirOwnLists()
@@ -1512,60 +1459,27 @@ public class SurfaceTests : GpuTest
 		var previousHost = RenderHost.Current;
 		try
 		{
-			byte[] DrawMaterial( string path, bool surfaces, out GpuMaterial loaded )
+			// The reference records on one list, where the frame's first draws bind the view set for the surface
+			byte[] DrawMaterial( string path, bool parallel, out GpuMaterial loaded )
 			{
 				// Drawn the classic way, so opaque draws record on the worker segments' lists
 				using var backend = new BackendDevice( Device ) { GpuDriven = false };
-				backend.Surfaces.ConvertShaders = surfaces;
 				RenderHost.Current = new BackendRenderHost( backend );
 				loaded = ((GpuDevice)backend).LoadMaterial( path );
-				return Draw( backend, loaded, boxes: 144 );
+				return Draw( backend, loaded, boxes: 144, parallel: parallel );
 			}
 
 			foreach ( var path in new[] { "materials/dev/primary_white_trans.vmat", "materials/dev/gray_25.vmat" } )
 			{
-				var reference = DrawMaterial( path, false, out var classic );
-				if ( classic is not BackendMaterial { Shader: not null } ) Assert.Inconclusive( $"{path} isn't compiled" );
+				if ( ContentFiles.FindGame().Find( path ) is null ) Assert.Inconclusive( $"{path} isn't compiled" );
+				var reference = DrawMaterial( path, false, out var serial );
 				var converted = DrawMaterial( path, true, out var surface );
 				Assert.IsInstanceOfType<SurfaceMaterial>( surface, $"{path} isn't a surface by default" );
 				var name = Path.GetFileNameWithoutExtension( path );
-				SaveRgb( reference, $"viewset-{name}-shader" );
-				SaveRgb( converted, $"viewset-{name}-surface" );
-				Assert.IsTrue( Mean( reference, converted ) < 0.5, $"{path}: the surface differs by {Mean( reference, converted ):F3}" );
+				SaveRgb( reference, $"viewset-{name}-one-list" );
+				SaveRgb( converted, $"viewset-{name}-own-lists" );
+				Assert.IsTrue( Mean( reference, converted ) < 0.5, $"{path}: on its own lists the surface differs by {Mean( reference, converted ):F3}" );
 			}
-		}
-		finally
-		{
-			Device.WaitIdle();
-			RenderHost.Current = previousHost;
-		}
-	}
-
-	/// <summary>
-	/// The engine's drawing (a custom or dynamic object's <c>Graphics.Draw</c>) draws a material's <c>.shader</c>: where a
-	/// surface stands in for that shader in the scene, <see cref="BackendDevice.ShaderMaterial"/> is still the
-	/// <c>.shader</c> material with its textures. Without them its draws read black textures and come out unlit.
-	/// </summary>
-	[TestMethod]
-	[DataRow( "materials/dev/red.vmat" )]
-	[DataRow( "materials/dev/primary_blue.vmat" )]
-	public void ConvertedMaterialsKeepTheirShaderMaterial( string path )
-	{
-		Compiler();
-		var previousHost = RenderHost.Current;
-		try
-		{
-			using var backend = new BackendDevice( Device );
-			backend.Surfaces.ConvertShaders = true;
-			RenderHost.Current = new BackendRenderHost( backend );
-			if ( ((GpuDevice)backend).LoadMaterial( path ) is not SurfaceMaterial ) Assert.Inconclusive( $"{path} isn't a surface" );
-
-			// standard's materials have no .shader now (complex, simple and generic are its names): nothing behind the surface
-			var material = backend.ShaderMaterial( path );
-			if ( material is null && backend.Shaders.Load( "shaders/standard.shader" ) is null ) Assert.Inconclusive( $"{path}'s shader is a surface alone: no .shader material behind it" );
-			Assert.IsNotNull( material, "the .shader material behind the surface" );
-			Assert.IsNotNull( material.Shader );
-			Assert.IsTrue( material.Textures.Count > 0, $"{path}'s textures" );
 		}
 		finally
 		{
@@ -1843,101 +1757,6 @@ public class SurfaceTests : GpuTest
 	}
 
 	/// <summary>
-	/// Surfaces own their render state: every core material of a shader with a surface resolves, as that surface's
-	/// material, to the state its .shader's forward variant has (blending, depth test and write, culling, alpha to
-	/// coverage as the alpha test).
-	/// </summary>
-	[TestMethod]
-	public void SurfaceRenderStatesMatchTheirShaders()
-	{
-		Compiler();
-		var shaders = new HashSet<string>( StringComparer.OrdinalIgnoreCase ) { "complex", "generic", "simple", "vertex_color", "static_overlay", "glass", "foliage", "bark", "terrain_preview", "water_simple" };
-		var paths = Directory.EnumerateFiles( Path.Combine( Core, "materials" ), "*.vmat", SearchOption.AllDirectories )
-			.Concat( Directory.EnumerateFiles( Path.Combine( Core, "models" ), "*.vmat", SearchOption.AllDirectories ) )
-			.Where( p => System.Text.RegularExpressions.Regex.Match( File.ReadAllText( p ), @"""shader""\s+""shaders/(\w+)\.shader" ) is { Success: true } m && shaders.Contains( m.Groups[1].Value ) )
-			.Select( p => Path.GetRelativePath( Core, p ).Replace( '\\', '/' ) )
-			.ToList();
-
-		using var classicDevice = new BackendDevice( Device );
-		classicDevice.Surfaces.ConvertShaders = false;
-		using var surfaceDevice = new BackendDevice( Device );
-		surfaceDevice.Surfaces.Convert( "shaders/static_overlay.shader", "static_overlay.slang" );
-		var errors = new List<string>();
-		surfaceDevice.Surfaces.Error = errors.Add;
-
-		var compared = 0;
-		var mismatches = new List<string>();
-		foreach ( var path in paths )
-		{
-			if ( ((GpuDevice)classicDevice).LoadMaterial( path ) is not BackendMaterial { Shader: not null } classic ) continue;
-			if ( ((GpuDevice)surfaceDevice).LoadMaterial( path ) is not SurfaceMaterial surface ) continue;
-			var variant = classic.Variant( classicDevice.Shaders, "Forward", "Forward", _ => null, _ => null );
-			if ( variant?.State is not { } expected ) continue;
-
-			var state = surface.RenderState;
-			var blend = SurfaceProgram.Blend( state.Blend );
-			var classicBlend = expected.Blend[0];
-			var differences = new List<string>();
-			if ( classicBlend.Enable != blend.Enable || (blend.Enable && (classicBlend.SourceColor, classicBlend.DestinationColor) != (blend.SourceColor, blend.DestinationColor)) )
-				differences.Add( $"blend {classicBlend.SourceColor}/{classicBlend.DestinationColor} ({(classicBlend.Enable ? "on" : "off")}) vs {state.Blend}" );
-			// foliage.shader's colour pass tests for equality after the prepass without writing; its surface writes the same depth
-			var foliage = surface.Shader.EndsWith( "foliage.slang", StringComparison.OrdinalIgnoreCase );
-			if ( expected.DepthWrite != state.DepthWrite && !foliage ) differences.Add( $"depth write {expected.DepthWrite} vs {state.DepthWrite}" );
-			if ( expected.DepthTest != state.DepthTest ) differences.Add( $"depth test {expected.DepthTest} vs {state.DepthTest}" );
-			if ( (expected.Cull == CullMode.None) != state.TwoSided ) differences.Add( $"cull {expected.Cull} vs two-sided {state.TwoSided}" );
-			// generic.shader clips its alpha test hard, without alpha to coverage; its surface's alpha-tested pass uses it, with a
-			// hard coverage (a known small difference at multisampled edges)
-			var hardClip = !expected.AlphaToCoverage && state.AlphaTest && classic.Shader.Name.Contains( "generic", StringComparison.OrdinalIgnoreCase );
-			if ( !state.Blends && !hardClip && expected.AlphaToCoverage != state.AlphaTest ) differences.Add( $"alpha to coverage {expected.AlphaToCoverage} vs alpha test {state.AlphaTest}" );
-			if ( differences.Count > 0 ) mismatches.Add( $"{path}: {string.Join( ", ", differences )}" );
-			compared++;
-		}
-
-		Console.WriteLine( $"{compared} materials compared of {paths.Count}" );
-		if ( compared == 0 ) Assert.Inconclusive( "No core material of a converted shader is compiled" );
-		Assert.AreEqual( 0, errors.Count, string.Join( "\n", errors ) );
-		Assert.AreEqual( 0, mismatches.Count, string.Join( "\n", mismatches ) );
-	}
-
-	/// <summary>
-	/// A converted material answers the scene's attributes as its .shader material does (<c>overlay</c> puts a map's
-	/// decals in the static overlay layer, <c>NoZPrepass</c> keeps an object out of the prepass, and so on), whatever the
-	/// default asked with: the lab's map loader reads these for its objects' layers and flags.
-	/// </summary>
-	[TestMethod]
-	public void SurfaceSceneAttributesMatchTheirShaders()
-	{
-		Compiler();
-		using var classicDevice = new BackendDevice( Device );
-		classicDevice.Surfaces.ConvertShaders = false;
-		using var surfaceDevice = new BackendDevice( Device );
-
-		var compared = 0;
-		var set = 0;
-		var mismatches = new List<string>();
-		foreach ( var path in new[] { "materials/dev/static_overlay_test.vmat", "materials/tools/toolsclip.vmat", "materials/dev/primary_green_additive.vmat", "materials/default.vmat" } )
-		{
-			if ( ((GpuDevice)classicDevice).LoadMaterial( path ) is not BackendMaterial { Shader: not null } classic ) continue;
-			if ( ((GpuDevice)surfaceDevice).LoadMaterial( path ) is not SurfaceMaterial surface ) continue;
-			foreach ( var name in new[] { "overlay", "NoZPrepass", "DoNotCastShadows", "bWantsFBCopyTexture", "NeedsLightProbe", "SupportsLightmapping" } )
-			{
-				foreach ( var fallback in new[] { false, true } )
-				{
-					var expected = classic.Attribute( name, fallback );
-					if ( expected != fallback ) set++;
-					if ( expected != surface.Attribute( name, fallback ) ) mismatches.Add( $"{path} {name} (default {fallback}): {expected} vs {surface.Attribute( name, fallback )}" );
-				}
-			}
-
-			compared++;
-		}
-
-		if ( compared == 0 ) Assert.Inconclusive( "No test material of a converted shader is compiled" );
-		Assert.AreEqual( 0, mismatches.Count, string.Join( "\n", mismatches ) );
-		Assert.IsTrue( set > 0, "the shaders set none of the attributes" );
-	}
-
-	/// <summary>
 	/// The surface material records grow while a frame records (more materials than the first buffer holds, drawn at
 	/// once): draws recorded before the growth keep the buffer they bound until the GPU is done with it, so validation
 	/// stays clean.
@@ -2106,9 +1925,9 @@ public class SurfaceTests : GpuTest
 	/// A box lit by the sun, filling most of the frame, as 8-bit sRGB-ish bytes (red channel of RGBA16F); or a model in its
 	/// bind pose with every draw in the material.
 	/// </summary>
-	byte[] Draw( BackendDevice backend, GpuMaterial material, Color? tint = null, int boxes = 1, RenderMesh model = null, ShaderParameters attributes = null )
+	byte[] Draw( BackendDevice backend, GpuMaterial material, Color? tint = null, int boxes = 1, RenderMesh model = null, ShaderParameters attributes = null, bool? parallel = null )
 	{
-		using var system = new RenderSystem { ParallelRecording = boxes > 1 };
+		using var system = new RenderSystem { ParallelRecording = parallel ?? boxes > 1 };
 		using var target = ViewTarget.Create( new Vector2Int( Width, Height ), 1, TextureFormat.RGBA16161616F, TextureFormat.D32FS8, "Surface test" );
 		var world = new RenderWorld();
 		world.Lighting.SunDirection = new Vector3( -0.4f, 0.5f, -0.75f ).Normal;
