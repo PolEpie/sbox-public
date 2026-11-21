@@ -62,7 +62,8 @@ internal static class MirrorContent
 	/// <summary>
 	/// A model made at run time (no file to read): saved as a compiled model in memory
 	/// (<c>Model.SaveToVmdl</c>, its buffers as its meshes keep them) and read as a model file is, its materials by
-	/// path; loading asynchronously (<see cref="BackendDevice.AsyncModels"/>) that's on a worker, and it's made within the
+	/// path, drawn whole as native draws it (no generated levels: its vertices may be what a vertex stage places, a water
+	/// surface's clipmap cells); loading asynchronously (<see cref="BackendDevice.AsyncModels"/>) that's on a worker, and it's made within the
 	/// frame's load budget, null with <paramref name="pending"/> set until then. Its buffers are freed once the engine's model
 	/// is gone.
 	/// </summary>
@@ -85,12 +86,12 @@ internal static class MirrorContent
 		if ( gpu.AsyncModels )
 		{
 			var read = runtimeReads.GetValue( model, m => gpu.ReadModelAsync( m.SaveToVmdl ) );
-			mesh = gpu.MakeModel( read, ulong.MaxValue, drawFastPath: true, out pending );
+			mesh = gpu.MakeModel( read, ulong.MaxValue, drawFastPath: true, out pending, generateLevels: false );
 			if ( pending ) return null;
 			runtimeReads.Remove( model );
 			if ( mesh is null && read.Exception?.GetBaseException() is { } e ) Log.Warning( e, $"Couldn't read run-time model {model.Name}: {e.Message}" );
 		}
-		else mesh = BackendModel.Create( gpu, ModelFile.Read( model.SaveToVmdl(), gpu.Content.TryRead ), meshGroups: ulong.MaxValue, drawFastPath: true );
+		else mesh = BackendModel.Create( gpu, ModelFile.Read( model.SaveToVmdl(), gpu.Content.TryRead ), meshGroups: ulong.MaxValue, drawFastPath: true, generateLevels: false );
 
 		runtimeMeshes.AddOrUpdate( model, new RuntimeModel( mesh ) );
 		if ( mesh is not null ) gpu.TrackModel( mesh );

@@ -118,4 +118,44 @@ public class GeneratedLevelTests : GpuTest
 			RenderHost.Current = previousHost;
 		}
 	}
+
+	/// <summary>
+	/// A model made at run time (a water surface's clipmap, whose vertices hold cells its vertex stage places) and a draw
+	/// whose material places its vertices itself get no generated levels: they'd be simplified from positions that aren't
+	/// where they draw, and Construct's pit water drew a few strips from far away.
+	/// </summary>
+	[TestMethod]
+	public void RunTimeModelsAndMaterialsThatPlaceTheirVerticesGetNoLevels()
+	{
+		var core = ContentFiles.FindGame().Roots.FirstOrDefault();
+		if ( core is not null ) Borealis.Backend.Meshlets.MeshOptimizer.Directory = EngineFolders.NativeIn( Path.GetDirectoryName( core ) );
+		if ( !Borealis.Backend.Meshlets.MeshOptimizer.Available ) Assert.Inconclusive( "meshopt isn't built" );
+
+		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDriven = false, GpuDrivenResidentMeshes = false };
+		var can = backend.LoadModel( Model );
+		if ( can is null ) Assert.Inconclusive( $"{Model} isn't built" );
+		if ( can.LodCount != 1 ) Assert.Inconclusive( $"{Model} has LODs of its own" );
+
+		// The same model made as a run-time model is (MirrorContent.RuntimeMesh)
+		var runTime = BackendModel.Create( backend, Borealis.Source2.Models.ModelFile.Read( backend.Content.TryRead( Model ), backend.Content.TryRead ), meshGroups: ulong.MaxValue, drawFastPath: true, generateLevels: false );
+		Assert.AreSame( GeneratedLevels.None, runTime.Geometry.LevelsFor( runTime.DrawsForLod( 0 ).ToArray()[0] ), "a run-time model's draws: none" );
+
+		var model = (BackendModel)can.Geometry;
+		var draw = can.DrawsForLod( 0 ).ToArray()[0];
+		using var placing = new PlacingMaterial( true );
+		Assert.AreSame( GeneratedLevels.None, model.LevelsFor( draw with { Material = placing } ), "a material that places its vertices itself: none" );
+	}
+
+	sealed class PlacingMaterial( bool? places ) : GpuMaterial
+	{
+		public override string Name => "Places its vertices";
+		public override bool IsTranslucent => false;
+		public override bool IsAlphaTest => false;
+		public override bool ReadsFrameBuffer => false;
+		public override bool ShadowFastPath => false;
+		public override bool NeedsLightProbe => false;
+		public override ulong SimilarityKey => 1;
+		public override bool? PlacesVertices => places;
+		public override void Dispose() { }
+	}
 }

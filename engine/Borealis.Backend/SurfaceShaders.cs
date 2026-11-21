@@ -921,7 +921,8 @@ internal sealed class SurfaceProgram : IDisposable
 		this.device = device;
 		Compiled = compiled;
 		LayoutHash = MaterialClassWriter.Hash( compiled.Material );
-		Displaces = compiled.Generated is { } generated && (generated.Contains( "SurfaceVertexDisplaced", StringComparison.Ordinal ) || generated.Contains( "SurfaceOutputDisplacedWith", StringComparison.Ordinal ) || generated.Contains( "SurfaceStageVertex", StringComparison.Ordinal ));
+		PlacesVertices = compiled.Generated is { } source && source.Contains( "SurfaceStageVertex", StringComparison.Ordinal );
+		Displaces = PlacesVertices || compiled.Generated is { } generated && (generated.Contains( "SurfaceVertexDisplaced", StringComparison.Ordinal ) || generated.Contains( "SurfaceOutputDisplacedWith", StringComparison.Ordinal ));
 
 		var modules = new Dictionary<CompiledStage, ShaderHandle>();
 		ShaderHandle Module( CompiledStage stage )
@@ -1027,6 +1028,12 @@ internal sealed class SurfaceProgram : IDisposable
 	/// (<c>IVertexStageSurface</c>): when not, its positions alone place them.
 	/// </summary>
 	public bool Displaces { get; }
+
+	/// <summary>
+	/// Whether its vertex stage is its own (<c>IVertexStageSurface</c>), which places vertices from what they hold: their
+	/// positions needn't be where they draw (a water surface's clipmap cells).
+	/// </summary>
+	public bool PlacesVertices { get; }
 
 	/// <summary>
 	/// A pipeline for a pass drawing vertices laid out as <paramref name="layout"/> into these formats, with a material's
