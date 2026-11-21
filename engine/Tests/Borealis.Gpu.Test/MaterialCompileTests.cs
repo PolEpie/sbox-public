@@ -105,6 +105,22 @@ public class MaterialCompileTests
 		CollectionAssert.AreEqual( new[] { texture.Path }, compiled.Textures.ToArray() );
 	}
 
+	/// <summary>
+	/// A material records its shader's version (<c>m_shaderVersion</c>), as the <c>.shader</c>'s HEADER gave it: blendable
+	/// declares 1, which its surface reads to pick the layout roughness is packed in; a module that declares none records 0.
+	/// </summary>
+	[TestMethod]
+	public void MaterialsRecordTheirShadersVersion()
+	{
+		var blend = VmatSource.Parse( "Layer0 { shader \"shaders/blendable.shader\" F_MULTIBLEND 1 }" );
+		var blendable = MaterialCompile.Compile( blend, "materials/x.vmat", "shaders/blendable.shader", MaterialInputs.Read( Module( "blendable" ), blend.Features ), _ => false );
+		StringAssert.Contains( blendable.Data, "m_shaderVersion = 1\n" );
+
+		var sprite = VmatSource.Parse( "Layer0 { shader \"shaders/tools_sprite.shader\" }" );
+		var tools = MaterialCompile.Compile( sprite, "materials/y.vmat", "shaders/tools_sprite.shader", MaterialInputs.Read( Module( "tools_sprite" ), sprite.Features ), _ => false );
+		StringAssert.Contains( tools.Data, "m_shaderVersion = 0\n" );
+	}
+
 	/// <summary>A compiled texture the material names for the variable is used as it is, read before the material compiles.</summary>
 	[TestMethod]
 	public void NamedCompiledTexturesAreKept()

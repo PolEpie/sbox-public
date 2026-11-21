@@ -3,6 +3,7 @@
 // fields, [Source] naming the feature a .vmat sets them with: ExtraLayers and TintMasksInVertexPaint, read by uniform
 // branches. Version is the material's ShaderVersion: 1 packs roughness into the normal map, beside a hemi-octahedral
 // normal.
+// HEADER: Version = 1;
 import sbox.surface;
 
 // What the material compiler makes of a .vmat's images (SlangMaterialCompiler): blendable.shader's texture inputs,

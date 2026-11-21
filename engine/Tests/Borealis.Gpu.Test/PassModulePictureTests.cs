@@ -77,7 +77,7 @@ public class PassModulePictureTests : GpuTest
 
 	/// <summary>
 	/// A box in <paramref name="material"/> lit by the sun, with an optional sky, as 8-bit gamma bytes; null when the
-	/// material's shader (<paramref name="shader"/>, when given) isn't compiled.
+	/// material's shader (<paramref name="shader"/>, when given) or the sky's isn't compiled.
 	/// </summary>
 	byte[] Draw( bool slangPasses, Func<BackendDevice, GpuMaterial> material, string shader = null, string sky = null )
 	{
@@ -88,9 +88,10 @@ public class PassModulePictureTests : GpuTest
 		RenderHost.Current = new BackendRenderHost( backend );
 		try
 		{
+			// The box's material is what's compared when a shader is named; else it's only what the sky is behind (a surface)
 			var made = material( backend );
-			if ( made is not BackendMaterial { Shader: not null } loaded ) return null;
-			if ( shader is not null && !loaded.Shader.Name.EndsWith( Path.GetFileNameWithoutExtension( shader ) + ".shader_c", StringComparison.OrdinalIgnoreCase ) ) return null;
+			if ( shader is not null && (made is not BackendMaterial { Shader: not null } loaded || !loaded.Shader.Name.EndsWith( Path.GetFileNameWithoutExtension( shader ) + ".shader_c", StringComparison.OrdinalIgnoreCase )) ) return null;
+			if ( made is null ) return null;
 			GpuMaterial skyMaterial = null;
 			if ( sky is not null && (skyMaterial = backend.LoadMaterial( sky )) is not BackendMaterial { Shader: not null } ) return null;
 

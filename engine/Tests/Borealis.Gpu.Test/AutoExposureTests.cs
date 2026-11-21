@@ -25,13 +25,13 @@ public class AutoExposureTests : GpuTest
 	[DataRow( false )]
 	public void BucketsCountPixelsInRange( bool logLuminance )
 	{
-		var library = new ShaderLibrary( Device, ShaderFileTests.Files );
-		var defaults = new ShaderDefaults( Device );
-		var drawer = new ShaderDrawer( Device, library, defaults );
+		// The Slang module, as the game draws it
+		using var backend = new BackendDevice( Device );
+		var drawer = new ShaderDrawer( backend );
 		var exposure = new AutoExposure( Device, logLuminance );
 		try
 		{
-			var shader = library.Load( "shaders/tonemap_query.shader" );
+			var shader = backend.Shaders.Load( "shaders/tonemap_query.shader" );
 			if ( shader is null ) Assert.Inconclusive( "tonemap_query isn't built" );
 
 			var pixels = new Half[Size * Size * 4];
@@ -92,8 +92,6 @@ public class AutoExposureTests : GpuTest
 			Device.WaitIdle();
 			exposure.Dispose();
 			drawer.Dispose();
-			library.Dispose();
-			defaults.Dispose();
 		}
 	}
 

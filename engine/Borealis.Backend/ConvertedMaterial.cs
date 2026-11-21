@@ -1,4 +1,5 @@
 using Borealis.Source2.Materials;
+using Borealis.Source2.Shaders;
 using Sandbox.ShaderCompiler;
 using System.IO;
 
@@ -137,9 +138,10 @@ internal sealed class ConvertedMaterial : SurfaceMaterial
 	/// <summary>
 	/// Whether the surface takes this material: every feature it reads (a field whose <c>[Source]</c> is an <c>F_</c>
 	/// feature) is in the field's range. A surface declares the features it doesn't do as fields with <c>Range( 0, 0 )</c>,
-	/// so materials that set them stay on their <c>.shader</c>.
+	/// so materials that set them stay on their <c>.shader</c>. <paramref name="shader"/> is the material's <c>.shader</c>,
+	/// when known: a translucency feature it doesn't read doesn't make the material blend.
 	/// </summary>
-	public static bool Accepts( CompiledShader compiled, MaterialFile file )
+	public static bool Accepts( CompiledShader compiled, MaterialFile file, ShaderFile shader = null )
 	{
 		var blends = false;
 		foreach ( var field in compiled.Material.Fields )
@@ -151,11 +153,19 @@ internal sealed class ConvertedMaterial : SurfaceMaterial
 		}
 
 		// A translucent material converts only to a surface that reads its translucency features
-		return blends || !Blended( file );
+		return blends || !Blended( file, shader );
 	}
 
-	/// <summary>Whether a material blends (<c>F_TRANSLUCENT</c> or <c>F_ADDITIVE_BLEND</c>), as BackendMaterial.IsTranslucent reads it.</summary>
-	static bool Blended( MaterialFile file ) => file.Value( "F_TRANSLUCENT" ) is [> 0, ..] || file.Value( "F_ADDITIVE_BLEND" ) is [> 0, ..];
+	/// <summary>
+	/// Whether a material blends (<c>F_TRANSLUCENT</c> or <c>F_ADDITIVE_BLEND</c>), as BackendMaterial.IsTranslucent reads it:
+	/// a feature counts only where its shader reads it (<see cref="ShaderFile.FeatureSelectsCode"/>), so a value another
+	/// shader left in the material (blendable.shader's <c>F_ADDITIVE_BLEND</c>, which nothing in it reads) doesn't.
+	/// </summary>
+	static bool Blended( MaterialFile file, ShaderFile shader )
+	{
+		bool Set( string feature ) => file.Value( feature ) is [> 0, ..] && (shader is null || shader.FeatureSelectsCode( shader.FeatureIndex( feature ) ));
+		return Set( "F_TRANSLUCENT" ) || Set( "F_ADDITIVE_BLEND" );
+	}
 
 	public static ConvertedMaterial Create( CompiledShader compiled, MaterialFile file, string name, Func<string, GpuTexture> loadTexture )
 	{

@@ -1600,7 +1600,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 		// A material with features the surface doesn't do stays on its .shader; once the shader is a surface alone (no
 		// .shader_c) there's nothing else to draw it with, so the surface takes it without them
 		var shader = Shaders.Load( file.Shader );
-		if ( (shader is not null && !ConvertedMaterial.Accepts( compiled, file )) || tier.ConvertMaterial?.Invoke( path ) == false ) return null;
+		if ( (shader is not null && !ConvertedMaterial.Accepts( compiled, file, shader )) || tier.ConvertMaterial?.Invoke( path ) == false ) return null;
 		tier.CountConverted( path );
 		var converted = ConvertedMaterial.Create( compiled, WithFeatureRules( file ), path, MaterialTextureFile );
 
@@ -3333,27 +3333,33 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	/// </summary>
 	public void BeginFrame()
 	{
-		Gpu.BeginFrame();
-		FreeRetiredVisibility();
-		if ( GpuDrivenFrame % 60 == 0 ) FreeIdleVisibility();
-		FreeUnheldModels();
-		gpuDrivenTables?.BeginFrame();
-		if ( meshletStore is { } meshlets ) meshlets.Loading = Loading;
-		if ( lodStore is { } lods ) lods.Loading = Loading;
-		meshletStore?.BeginFrame();
-		lodStore?.BeginFrame();
-		GpuDrivenFrame++;
-		loadFrame++;
+		using ( Zones.DeviceFrame.Start() )
+			Gpu.BeginFrame();
 
-		// Resident culls forget last frame's assignments and stale calls here too, not only when a view culls: with nothing
-		// rendering (the menu) they kept a closed game's views, and those views' visibility resources
-		ResidentCulls.BeginFrame( GpuDrivenFrame, Gpu );
-		TimeFrame();
-		Poll();
+		using ( Zones.FrameServices.Start() )
+		{
+			FreeRetiredVisibility();
+			if ( GpuDrivenFrame % 60 == 0 ) FreeIdleVisibility();
+			FreeUnheldModels();
+			gpuDrivenTables?.BeginFrame();
+			if ( meshletStore is { } meshlets ) meshlets.Loading = Loading;
+			if ( lodStore is { } lods ) lods.Loading = Loading;
+			meshletStore?.BeginFrame();
+			lodStore?.BeginFrame();
+			GpuDrivenFrame++;
+			loadFrame++;
+
+			// Resident culls forget last frame's assignments and stale calls here too, not only when a view culls: with nothing
+			// rendering (the menu) they kept a closed game's views, and those views' visibility resources
+			ResidentCulls.BeginFrame( GpuDrivenFrame, Gpu );
+			TimeFrame();
+			Poll();
+		}
 
 		// Streamed textures' new images, written now, ahead of the frame's work
 		if ( streamer is { } textures )
 		{
+			using var zone = Zones.TextureStreaming.Start();
 			using ( Gpu.DeferUploads() )
 				textures.Update();
 
