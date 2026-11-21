@@ -182,8 +182,10 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	/// <summary>
 	/// Once a scene's loading tasks are done: wait, behind the loading screen, while the game window's device still reads and
 	/// makes the models and textures the scene's frames asked for (<see cref="BackendDevice.LoadingModels"/>,
-	/// <see cref="BackendDevice.StreamingTextures"/>), up to <see cref="ContentWaitSeconds"/>. Native's load makes its models
-	/// before the first frame; without this a map drew its first seconds with models missing and textures at their tails.
+	/// <see cref="BackendDevice.StreamingTextures"/>), and the shaders and pipelines its unseen renders asked for
+	/// (<see cref="BackendDevice.CompilingShaders"/>), up to <see cref="ContentWaitSeconds"/>. Native's load makes its models
+	/// before the first frame; without this a map drew its first seconds with models missing and textures at their tails, and
+	/// after an update its first frame compiled the shaders the frame draws with.
 	/// </summary>
 	internal static async Task WaitForContent()
 	{
@@ -196,7 +198,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 		{
 			var waited = System.Diagnostics.Stopwatch.GetElapsedTime( start ).TotalSeconds;
 			if ( waited >= ContentWaitSeconds ) break;
-			if ( services.LoadingModels )
+			if ( services.LoadingModels || services.CompilingShaders )
 			{
 				madeAt = null;
 			}

@@ -19,9 +19,14 @@ public class SceneObjectDrawTests
 		SameBounds( so, after );
 	}
 
-	/// <summary>Bounds kept in managed code are native's, give or take native's quantising to whole units.</summary>
+	/// <summary>
+	/// Bounds kept in managed code are native's, give or take native's quantising to whole units. A scene model's are its
+	/// pose's (<c>SceneModelAnimationInstanceTests</c>): its twin is a plain object with its model's bounds at its transform.
+	/// </summary>
 	static void SameBounds( SceneObject so, string after )
 	{
+		if ( so is SceneModel ) return;
+
 		var mine = so.WorldBounds;
 		var native = so.native.GetBounds();
 		Assert.IsTrue( mine.Mins.Distance( native.Mins ) <= 1.8f && mine.Maxs.Distance( native.Maxs ) <= 1.8f, $"bounds after {after}: native {native}, managed {mine}" );

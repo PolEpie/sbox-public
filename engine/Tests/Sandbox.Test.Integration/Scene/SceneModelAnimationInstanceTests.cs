@@ -49,28 +49,30 @@ public class SceneModelAnimationInstanceTests
 	}
 
 	/// <summary>
-	/// The twin of a scene model on an instance never animates and is never given the pose, even where scene objects write
-	/// their native twins: it keeps the bind pose through updates and a model change, and the bounds are the pose's, kept in
-	/// managed code.
+	/// A scene model managed code makes has a plain native twin, not an animated one, even where scene objects write their
+	/// native twins: the instance animates through updates and a model change, and the bounds are the pose's, kept in managed
+	/// code and given to the twin.
 	/// </summary>
 	[TestMethod]
-	public void TwinStaysInBindPose()
+	public void TwinIsAPlainObject()
 	{
 		var world = new SceneWorld();
 		SceneObject.WritesNativeOverride = true;
 		try
 		{
 			var model = new SceneModel( world, Model.Load( "models/dev/box.vmdl" ), Placement );
+			Assert.IsTrue( model.native.IsValid );
+			Assert.IsTrue( model.animNative.Twin.IsNull, "no animated twin" );
+
 			model.Model = Human;
 			PlaySequence( model );
 
 			var hand = Human.Bones.GetBone( "hand_R" ).Index;
-			var bind = model.animNative.Twin.GetWorldSpaceRenderBoneTransform( hand );
 			var start = model.GetBoneWorldTransform( hand );
 			for ( int frame = 0; frame < 10; frame++ ) model.Update( 1.0f / 30.0f );
 
 			Assert.IsTrue( model.GetBoneWorldTransform( hand ).Position.Distance( start.Position ) > 0.1f, "the instance animates" );
-			Assert.IsTrue( model.animNative.Twin.GetWorldSpaceRenderBoneTransform( hand ).Position.Distance( bind.Position ) < 1e-4f, "the twin doesn't" );
+			Assert.IsTrue( model.animNative.Twin.IsNull, "still no animated twin after a model change" );
 
 			var pose = model.AnimatedWorldBounds;
 			var quantised = new BBox( new Vector3( MathF.Floor( pose.Mins.x ), MathF.Floor( pose.Mins.y ), MathF.Floor( pose.Mins.z ) ),

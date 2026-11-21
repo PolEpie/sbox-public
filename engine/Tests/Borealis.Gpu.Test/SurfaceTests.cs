@@ -883,6 +883,136 @@ public class SurfaceTests : GpuTest
 	}
 
 	/// <summary>
+	/// Drawn unseen (a loading scene's view behind the loading screen, <see cref="PassModules.Unseen"/>), a standalone
+	/// module's variant isn't waited for: its stages compile on the compile threads, nothing draws meanwhile, and the load can
+	/// wait for <see cref="PassModules.Compiling"/>. Once they're done its variant is the module's.
+	/// </summary>
+	[TestMethod]
+	[TestCategory( "Slow" )]
+	public void UnseenDrawsDontWaitForPassModules()
+	{
+		var folder = Path.Combine( Path.GetTempPath(), "borealis-pass-unseen-test-" + Guid.NewGuid().ToString( "N" ) );
+		Directory.CreateDirectory( folder );
+		try
+		{
+			using var backend = new BackendDevice( Device );
+			backend.Passes.CacheFolder = Path.Combine( folder, "cache" );
+			backend.Passes.UseOffline = false;
+			backend.Passes.CompileInBackground = true;
+			var errors = new List<string>();
+			backend.Passes.Error = errors.Add;
+			using var drawer = new ShaderDrawer( backend );
+
+			var standalone = backend.Shaders.Load( "shaders/clutter_cull_cs.shader" );
+			Assert.IsTrue( standalone is { ModuleOnly: true }, "clutter_cull_cs is standalone" );
+			using ( backend.Passes.Unseen() )
+			{
+				Assert.IsNull( drawer.Variant( standalone, new ShaderAttributes() ), "an unseen draw doesn't wait for a standalone module" );
+			}
+
+			Assert.AreEqual( 1, backend.Passes.PendingAsks );
+			Assert.IsTrue( backend.Passes.Compiling >= 1, "its stages compile on the compile threads" );
+
+			var clock = System.Diagnostics.Stopwatch.StartNew();
+			while ( backend.Passes.Compiling > 0 && clock.Elapsed.TotalMinutes < 2 ) System.Threading.Thread.Sleep( 10 );
+			Assert.AreEqual( 0, backend.Passes.Compiling, "the compiles didn't finish" );
+			Assert.IsTrue( drawer.Variant( standalone, new ShaderAttributes() ) is { FromModule: true }, "once compiled, its variant is the module's" );
+			Assert.AreEqual( 1, backend.Passes.PendingAsks, "and isn't pending" );
+			Assert.AreEqual( 0, errors.Count, string.Join( "\n", errors ) );
+		}
+		finally
+		{
+			Directory.Delete( folder, true );
+		}
+	}
+
+	/// <summary>
+	/// The stages a run's draws ask for are kept (<see cref="PassModules.StagesFile"/> in the pass cache), and the next run's
+	/// <see cref="PassModules.Prewarm"/> reads them ahead on workers: its first draw finds its stages made, so even unseen it
+	/// draws. Without <see cref="PassModules.Prewarm"/> (tests, labs) nothing is kept.
+	/// </summary>
+	[TestMethod]
+	[TestCategory( "Slow" )]
+	public void PrewarmReadsTheLastRunsStages()
+	{
+		var folder = Path.Combine( Path.GetTempPath(), "borealis-pass-prewarm-test-" + Guid.NewGuid().ToString( "N" ) );
+		Directory.CreateDirectory( folder );
+		try
+		{
+			var cache = Path.Combine( folder, "cache" );
+			using ( var first = new BackendDevice( Device ) )
+			{
+				first.Passes.CacheFolder = cache;
+				first.Passes.UseOffline = false;
+				Assert.IsTrue( first.Passes.Prewarm().Wait( TimeSpan.FromMinutes( 1 ) ) );
+				Assert.AreEqual( 0, first.Passes.ReadAhead, "nothing kept yet" );
+				using var drawer = new ShaderDrawer( first );
+				Assert.IsTrue( drawer.Variant( first.Shaders.Load( "shaders/clutter_cull_cs.shader" ), new ShaderAttributes() ) is { FromModule: true } );
+				first.Passes.SaveStages();
+			}
+
+			var kept = File.ReadAllLines( Path.Combine( cache, PassModules.StagesFile ) );
+			Assert.IsTrue( kept.Skip( 1 ).Any( l => l.Contains( "clutter_cull_cs.slang\tCompute\t", StringComparison.Ordinal ) ), string.Join( "\n", kept ) );
+
+			using var second = new BackendDevice( Device );
+			second.Passes.CacheFolder = cache;
+			second.Passes.UseOffline = false;
+			second.Passes.CompileInBackground = true;
+			Assert.IsTrue( second.Passes.Prewarm().Wait( TimeSpan.FromMinutes( 2 ) ) );
+			Assert.IsTrue( second.Passes.ReadAhead >= 1, "the kept stage is read ahead" );
+			var clock = System.Diagnostics.Stopwatch.StartNew();
+			while ( second.Passes.Compiling > 0 && clock.Elapsed.TotalMinutes < 2 ) System.Threading.Thread.Sleep( 10 );
+			using var again = new ShaderDrawer( second );
+			using ( second.Passes.Unseen() )
+			{
+				Assert.IsTrue( again.Variant( second.Shaders.Load( "shaders/clutter_cull_cs.shader" ), new ShaderAttributes() ) is { FromModule: true }, "the read-ahead stage draws at once" );
+			}
+
+			Assert.AreEqual( 0, second.Passes.PendingAsks );
+		}
+		finally
+		{
+			Directory.Delete( folder, true );
+		}
+	}
+
+	/// <summary>A stage no draw asked for in <see cref="PassModules.KeptRuns"/> runs is dropped; a malformed line is skipped.</summary>
+	[TestMethod]
+	public void KeptStagesAgeOut()
+	{
+		var path = Path.Combine( Path.GetTempPath(), "borealis-stages-test-" + Guid.NewGuid().ToString( "N" ) + ".txt" );
+		try
+		{
+			var last = 20;
+			var stages = new Dictionary<string, int>
+			{
+				["C:/a.slang\tPixel\tD_X=1;S_MODE_DEPTH=0"] = last,
+				["C:/b.slang\tCompute\t"] = last - PassModules.KeptRuns + 1,
+				["C:/old.slang\tVertex\tS_MODE_DEPTH=1"] = last - PassModules.KeptRuns,
+			};
+			File.WriteAllText( path, PassModules.WriteStages( last, stages ) + "garbage line\n" );
+
+			var ahead = PassModules.ReadStages( path, out var run, out var version, out var kept );
+			Assert.AreEqual( last + 1, run );
+			Assert.AreEqual( SlangCompiler.Version, version );
+			CollectionAssert.AreEquivalent( new[] { "C:/a.slang", "C:/b.slang" }, ahead.Select( a => a.Path ).ToArray() );
+			var pixel = ahead.Single( a => a.Path == "C:/a.slang" );
+			Assert.AreEqual( StageKind.Pixel, pixel.Kind );
+			Assert.AreEqual( 1, pixel.Values["D_X"] );
+			Assert.AreEqual( 0, pixel.Values["S_MODE_DEPTH"] );
+			Assert.AreEqual( 0, ahead.Single( a => a.Path == "C:/b.slang" ).Values.Count );
+			Assert.AreEqual( 2, kept.Count );
+
+			Assert.AreEqual( 0, PassModules.ReadStages( path + ".missing", out run, out _, out _ ).Count );
+			Assert.AreEqual( 0, run );
+		}
+		finally
+		{
+			File.Delete( path );
+		}
+	}
+
+	/// <summary>
 	/// Offline compiles (<see cref="SlangOutput"/>): a surface and a pass module compiled offline are read, not compiled, by
 	/// another compiler with an empty cache, the same SPIR-V, wherever the files they read are; not with offline compiles
 	/// off, nor once the source changes. An unchanged source isn't compiled offline again.

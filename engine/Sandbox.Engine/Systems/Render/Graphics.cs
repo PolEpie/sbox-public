@@ -56,6 +56,9 @@ public static partial class Graphics
 			if ( Sandbox.Utility.CommandLine.GetSwitchInt( "-borealisgpu-texturebudget", 0 ) is > 0 and var budget ) _borealisGpu.Services.TextureBudgetBytes = (long)budget << 20;
 			_borealisGpu.Services.Surfaces.Warm();
 			_borealisGpu.Services.Passes.Warm();
+
+			// The pass module stages the last runs' draws asked for, read ahead (or compiled, after an update) on workers
+			_borealisGpu.Services.Passes.Prewarm();
 			RenderBackend.SetDefault( _borealisGpu );
 			var adapter = _borealisGpu.Device.Adapter;
 			SystemInfo.SetBorealisGpu( adapter.Name, adapter.DriverVersion, adapter.DeviceLocalBytes, adapter.Integrated );
