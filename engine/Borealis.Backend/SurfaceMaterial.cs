@@ -289,6 +289,9 @@ public abstract class SurfaceMaterial : GpuMaterial, IStreamDependent
 	/// <summary>Until its program is found, or while a hotload has dropped it.</summary>
 	public override bool DepthOnlyPending => Program is null or { Stale: true };
 
+	/// <summary>Once its program has compiled: whether its vertex stage is its own (<see cref="SurfaceProgram.PlacesVertices"/>).</summary>
+	public override bool? PlacesVertices => Program is { Stale: false } program ? program.PlacesVertices : null;
+
 	/// <summary>
 	/// Always: a surface lights through the engine's lighting, which reads a probe volume's baked light and occlusion
 	/// when its object isn't lightmapped, as today's lit shaders declare (<c>NeedsLightProbe</c>,

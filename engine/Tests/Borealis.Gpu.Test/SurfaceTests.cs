@@ -1256,6 +1256,60 @@ public class SurfaceTests : GpuTest
 	}
 
 	/// <summary>
+	/// A material of complex's that sets both cloth shading and the metalness texture (Needlestack's gloves) draws as complex
+	/// draws it: its rule Allow1( F_CLOTH_SHADING, F_METALNESS_TEXTURE ) keeps cloth, so its colour's alpha isn't metalness and
+	/// standard draws it as the same material without them, not black as metal.
+	/// </summary>
+	[TestMethod]
+	public void ClothKeepsComplexsMetalnessTextureOff()
+	{
+		using var backend = new BackendDevice( Device );
+		var errors = new List<string>();
+		backend.Surfaces.Error = errors.Add;
+		var previousHost = RenderHost.Current;
+		RenderHost.Current = new BackendRenderHost( backend );
+		try
+		{
+			static MaterialFile Complex( string name, string color, params (string Feature, int Value)[] features ) => new()
+			{
+				Name = name,
+				Shader = "shaders/complex.shader",
+				Ints = features.ToDictionary( f => f.Feature, f => f.Value, StringComparer.OrdinalIgnoreCase ),
+				Floats = new Dictionary<string, float>(),
+				Vectors = new Dictionary<string, float[]>(),
+				Textures = new Dictionary<string, string> { ["g_tColor"] = color },
+				IntAttributes = new Dictionary<string, int>(),
+			};
+
+			// A colour whose alpha is opaque, as the gloves' is: the metalness texture alone then reads it as metal
+			string[] colors = ["materials/default/white_vmat_g_tcolor_b051cf30.generated.vtex", "materials/default/default_color_tga_4a03ed87.generated.vtex",
+				"materials/default/default_color_tga_380558b.generated.vtex", "materials/default/rope_color_png_95bee33c.generated.vtex"];
+			foreach ( var color in colors.Where( c => backend.Content.Find( c ) is not null ) )
+			{
+				using var plain = backend.LoadMaterial( $"materials/test_glove_plain_{color.GetHashCode():x}.vmat", Complex( "plain", color ) );
+				using var metal = backend.LoadMaterial( $"materials/test_glove_metal_{color.GetHashCode():x}.vmat", Complex( "metal", color, ("F_METALNESS_TEXTURE", 1) ) );
+				var fromPlain = Draw( backend, plain );
+				if ( Mean( fromPlain, Draw( backend, metal ) ) < 2 ) continue;
+
+				using var gloves = backend.LoadMaterial( $"materials/test_glove_cloth_{color.GetHashCode():x}.vmat", Complex( "gloves", color, ("F_CLOTH_SHADING", 1), ("F_METALNESS_TEXTURE", 1) ) );
+				Assert.IsInstanceOfType<SurfaceMaterial>( gloves, "complex draws as standard" );
+				var fromGloves = Draw( backend, gloves );
+				SaveRgb( fromGloves, "surface-cloth-metalness" );
+				Assert.AreEqual( 0, errors.Count, string.Join( "\n", errors ) );
+				Assert.IsTrue( Mean( fromPlain, fromGloves ) < 0.5, $"with cloth it isn't metal: {Mean( fromPlain, fromGloves ):F3} from the plain material ({color})" );
+				return;
+			}
+
+			Assert.Inconclusive( "no colour texture with an opaque alpha is built" );
+		}
+		finally
+		{
+			Device.WaitIdle();
+			RenderHost.Current = previousHost;
+		}
+	}
+
+	/// <summary>
 	/// A surface that owns its vertex stage (rock_stage.slang, IVertexStageSurface): its vertex input is its own struct's,
 	/// read in every pass, with the instance transform; its Varyings' float fields get derivatives and its integer ones
 	/// don't; its clip distance is in the depth stage too; it has no skinned or GPU-driven passes, so it draws classic.
@@ -2015,6 +2069,50 @@ public class SurfaceTests : GpuTest
 		{
 			foreach ( var material in materials ) material.Dispose();
 			RenderHost.Current = previousHost;
+		}
+	}
+
+	/// <summary>
+	/// A closed map's materials' records go: once most of the records buffer holds records no draw has used for a while, the
+	/// records start again in a buffer sized for those still drawn, the materials behind the rest are let go, and the
+	/// buffers they moved out of are destroyed. Before, the buffer and every one it grew out of stayed, a map's worth more
+	/// each session.
+	/// </summary>
+	[TestMethod]
+	public void UnusedSurfaceRecordsGo()
+	{
+		using var records = new SurfaceRecords( Device );
+		using var kept = new Rock();
+		var map = new List<Rock>();
+		try
+		{
+			for ( int i = 0; i < 12000; i++ )
+			{
+				var rock = new Rock { Tint = new Vector3( i / 12000f, 0.5f, 0.5f ) };
+				map.Add( rock );
+				records.Offset( rock );
+			}
+
+			records.Offset( kept );
+			var grown = records.Use.Size;
+			Assert.IsTrue( grown >= 256 * 1024, $"{grown} bytes" );
+			Assert.IsTrue( records.Retired > 0 );
+
+			for ( int frame = 0; frame < SurfaceRecords.IdleFrames + 120; frame++ )
+			{
+				records.BeginFrame();
+				records.Offset( kept );
+			}
+
+			Assert.AreEqual( 1, records.Restarts );
+			Assert.AreEqual( 1, records.Materials, "only the material still drawn has a record" );
+			Assert.AreEqual( 64 * 1024, records.Use.Size );
+			Assert.AreEqual( 0, records.Retired, "the old buffers are destroyed" );
+			Assert.AreEqual( 0u, records.Offset( kept ), "the kept material's record was written again at the start" );
+		}
+		finally
+		{
+			foreach ( var rock in map ) rock.Dispose();
 		}
 	}
 

@@ -410,6 +410,14 @@ internal sealed partial class BackendContext : GpuContext
 	{
 		if ( viewSet.IsValid ) Gpu.Destroy( viewSet );
 		viewSet = default;
+
+		// Its drawers' pipelines (culls, skinning): a closed game's views' contexts kept theirs for good, about 18 a session
+		cullDrawer?.Dispose();
+		cullDrawer = null;
+		skinningDrawer?.Dispose();
+		skinningDrawer = null;
+		residentPipeline = default;
+		residentShader = null;
 		plannedLayouts.Clear();
 		session = null;
 	}

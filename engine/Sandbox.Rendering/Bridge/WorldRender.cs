@@ -605,12 +605,14 @@ internal sealed partial class WorldRender : ISceneWorldRender, IAttributeSource,
 
 	/// <summary>
 	/// An aggregate's fragments as Borealis draws them: fragment i draws its model's mesh's draw call i, in world space, with
-	/// the draw's tint and uv density, its index the base instance. The draw calls come from the model's file, or from its
-	/// mesh's draws for a model without one.
+	/// the draw's tint and uv density, its index the base instance. The draw calls (with their base vertices) come from the
+	/// file the mesh was made from, a model made at run time's too (a game's ground chunks, built with <c>Model.Builder</c>),
+	/// or from the model's file; from the mesh's draws for neither.
 	/// </summary>
 	static AggregateObject.FragmentDraw[] FragmentDraws( SceneAggregateObject source, Model model, RenderMesh mesh )
 	{
-		var file = model.ResourcePath is { Length: > 0 } path && MirrorContent.Gpu is { } gpu && gpu.ReadModel( path ) is { IsCompletedSuccessfully: true } read ? read.Result : null;
+		var file = (mesh.Geometry as Borealis.Backend.BackendModel)?.File
+			?? (model.ResourcePath is { Length: > 0 } path && MirrorContent.Gpu is { } gpu && gpu.ReadModel( path ) is { IsCompletedSuccessfully: true } read ? read.Result : null);
 		var calls = file is { Meshes.Count: > 0 } ? file.Meshes[0].DrawCalls : null;
 
 		var fragments = source.Fragments;

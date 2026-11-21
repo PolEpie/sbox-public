@@ -440,7 +440,7 @@ public sealed partial class BackendDevice
 	/// <paramref name="pending"/> set while it's read or once this frame's budget is spent; ask again later. Null without
 	/// pending when it couldn't be read. Call on one thread at a time.
 	/// </summary>
-	public RenderMesh MakeModel( Task<ModelFile> read, ulong meshGroups, bool drawFastPath, out bool pending )
+	public RenderMesh MakeModel( Task<ModelFile> read, ulong meshGroups, bool drawFastPath, out bool pending, bool generateLevels = true )
 	{
 		pending = false;
 		if ( !read.IsCompleted || !WithinBudget() )
@@ -453,7 +453,7 @@ public sealed partial class BackendDevice
 		if ( !read.IsCompletedSuccessfully || read.Result is not { } file ) return null;
 		using ( Zones.ModelMake.Start() )
 		using ( Gpu.DeferUploads() )
-			return BackendModel.Create( this, file, meshGroups, drawFastPath: drawFastPath );
+			return BackendModel.Create( this, file, meshGroups, drawFastPath: drawFastPath, generateLevels: generateLevels );
 	}
 
 	/// <summary>
