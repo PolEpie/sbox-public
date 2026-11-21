@@ -4,15 +4,15 @@ using System.Runtime.InteropServices;
 namespace Sandbox;
 
 /// <summary>
-/// A scene model's animation: the <see cref="ModelAnimationInstance"/> every scene model managed code makes animates on. A
-/// scene model native code made (a tool's preview) has none: native code animates its twin, a
-/// <see cref="CSceneAnimatableObject"/>, and managed code only reads the twin's pose, bounds and attachments. Draw state (body
-/// groups) is always the twin's; deformation volumes are kept in managed code.
+/// A scene model's animation: the <see cref="ModelAnimationInstance"/> every scene model managed code makes animates on (its
+/// native twin is a plain scene object). A scene model native code made (a tool's preview) has none: native code animates its
+/// twin, a <see cref="CSceneAnimatableObject"/>, and managed code only reads the twin's pose, bounds and attachments.
+/// Deformation volumes are kept in managed code.
 /// </summary>
 internal readonly unsafe struct SceneModelAnimation
 {
 	/// <summary>
-	/// The scene model's native twin: it keeps draw state.
+	/// The animated native twin of a scene model native code made; null for one managed code made.
 	/// </summary>
 	internal readonly CSceneAnimatableObject Twin;
 
@@ -30,7 +30,7 @@ internal readonly unsafe struct SceneModelAnimation
 		this.owner = owner;
 	}
 
-	internal bool IsNull => Twin.IsNull;
+	internal bool IsNull => Twin.IsNull && Instance.IsNull;
 	internal bool IsValid => !IsNull;
 	internal bool HasInstance => !Instance.IsNull;
 
@@ -166,9 +166,6 @@ internal readonly unsafe struct SceneModelAnimation
 	internal Transform GetRootMotion() => HasInstance ? Instance.GetRootMotion() : Transform.Zero;
 
 	internal IAnimParameterInstance GetAnimParameter( int index ) => HasInstance ? Instance.GetAnimParameter( index ) : default;
-
-	// Draw state: the twin's whichever animates
-	internal void SetBodyGroup( string name, int value ) => Twin.SetBodyGroup( name, value );
 }
 
 /// <summary>
