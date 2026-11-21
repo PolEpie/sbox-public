@@ -62,7 +62,8 @@ internal static class MirrorContent
 	/// <summary>
 	/// A model made at run time (no file to read): saved as a compiled model in memory
 	/// (<c>Model.SaveToVmdl</c>, its buffers as its meshes keep them) and read as a model file is, its materials by
-	/// path; loading asynchronously (<see cref="BackendDevice.AsyncModels"/>) that's on a worker, and it's made within the
+	/// path, drawn whole as native draws it (no generated levels: its vertices may be what a vertex stage places, a water
+	/// surface's clipmap cells); loading asynchronously (<see cref="BackendDevice.AsyncModels"/>) that's on a worker, and it's made within the
 	/// frame's load budget, null with <paramref name="pending"/> set until then. Its buffers are freed once the engine's model
 	/// is gone.
 	/// </summary>
@@ -85,12 +86,12 @@ internal static class MirrorContent
 		if ( gpu.AsyncModels )
 		{
 			var read = runtimeReads.GetValue( model, m => gpu.ReadModelAsync( m.SaveToVmdl ) );
-			mesh = gpu.MakeModel( read, ulong.MaxValue, drawFastPath: true, out pending );
+			mesh = gpu.MakeModel( read, ulong.MaxValue, drawFastPath: true, out pending, generateLevels: false );
 			if ( pending ) return null;
 			runtimeReads.Remove( model );
 			if ( mesh is null && read.Exception?.GetBaseException() is { } e ) Log.Warning( e, $"Couldn't read run-time model {model.Name}: {e.Message}" );
 		}
-		else mesh = BackendModel.Create( gpu, ModelFile.Read( model.SaveToVmdl(), gpu.Content.TryRead ), meshGroups: ulong.MaxValue, drawFastPath: true );
+		else mesh = BackendModel.Create( gpu, ModelFile.Read( model.SaveToVmdl(), gpu.Content.TryRead ), meshGroups: ulong.MaxValue, drawFastPath: true, generateLevels: false );
 
 		runtimeMeshes.AddOrUpdate( model, new RuntimeModel( mesh ) );
 		if ( mesh is not null ) gpu.TrackModel( mesh );
@@ -207,7 +208,7 @@ internal static class MirrorContent
 
 		// A view rendered for it on this device (a water body's refraction) drew into Borealis's own texture (a render
 		// target's path is its name, with no file behind it)
-		if ( captures.TryGetValue( texture, out var capture ) && capture.Texture is { IsValid: true } drawn && !capture.Owned ) return drawn;
+		if ( texture.DrawnByView && captures.TryGetValue( texture, out var capture ) && capture.Texture is { IsValid: true } drawn && !capture.Owned ) return drawn;
 
 		// A cube made at run time for compute to write (a realtime probe's) is what cube captures draw into
 		if ( IsCaptureCube( texture ) ) return CaptureCube( texture );
@@ -275,6 +276,7 @@ internal static class MirrorContent
 	{
 		if ( texture is null || !captures.TryGetValue( texture, out var capture ) ) return;
 		captures.Remove( texture );
+		texture.DrawnByView = false;
 		if ( capture.Owned && capture.Texture is not null ) releasedCaptures.Enqueue( (capture.Texture, collectFrames) );
 		capture.Owned = false;
 		capture.Texture = null;
@@ -330,7 +332,36 @@ internal static class MirrorContent
 	/// Note that a view rendered for <paramref name="texture"/> (an engine render target a command list's view asked for) drew
 	/// into <paramref name="drawn"/>, a texture of Borealis's: what Borealis's draws read for the engine texture from then on.
 	/// </summary>
-	public static void SetCapture( Texture texture, GpuTexture drawn ) => captures.GetOrCreateValue( texture ).Texture = drawn;
+	public static void SetCapture( Texture texture, GpuTexture drawn )
+	{
+		captures.GetOrCreateValue( texture ).Texture = drawn;
+		texture.DrawnByView = true;
+	}
+
+	/// <summary>
+	/// What the engine's drawing on <paramref name="backend"/> reads for <paramref name="texture"/> when Borealis renders into
+	/// it on the same device (<c>BorealisGpuRenderBackend.RenderedInto</c>): a realtime probe's cube's capture
+	/// (<see cref="CaptureCube"/>), or what a view drew for a render target (<see cref="ViewCapture"/>). Null otherwise.
+	/// </summary>
+	public static GpuTexture RenderedInto( BorealisGpuRenderBackend backend, Texture texture )
+	{
+		if ( Gpu is null || Gpu != backend.Services ) return null;
+		return IsCaptureCube( texture ) ? CaptureCube( texture ) : ViewCapture( texture );
+	}
+
+	/// <summary>
+	/// What a view drew for <paramref name="texture"/> (<see cref="SetCapture"/>), for the engine's own draws to read in its place
+	/// (<c>BorealisGpuRenderBackend.RenderedInto</c>): only when it has the engine texture's shape (size, format, mips, one
+	/// sample), so a draw binding it sees what it expects. Null otherwise.
+	/// </summary>
+	public static GpuTexture ViewCapture( Texture texture )
+	{
+		if ( texture is null || !texture.DrawnByView || !captures.TryGetValue( texture, out var capture ) || capture.Owned ) return null;
+		if ( capture.Texture is not { IsValid: true, IsCube: false, IsArray: false, Samples: 1 } drawn ) return null;
+		if ( drawn.Width != texture.Width || drawn.Height != texture.Height || drawn.Mips != Math.Max( texture.Mips, 1 ) ) return null;
+		if ( Source2Formats.Samples( texture.MultisampleType ) != 1 || drawn.Format != Source2Formats.From( texture.ImageFormat ) ) return null;
+		return drawn;
+	}
 
 	/// <summary>
 	/// Set on <paramref name="into"/> what <paramref name="attributes"/> had set after its version was <paramref name="version"/>:

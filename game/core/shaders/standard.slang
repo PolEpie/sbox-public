@@ -329,9 +329,11 @@ public struct Standard : ICombinerSurface
 			m.AmbientOcclusionDirectSpecular = AmbientOcclusionDirectSpecular;
 		}
 
-		// Metalness: a value, or with the feature the colour's alpha (the metalness texture's green when the alpha is opacity)
+		// Metalness: a value, or with the feature the colour's alpha (the metalness texture's green when the alpha is opacity).
+		// complex's rule Allow1( F_CLOTH_SHADING, F_METALNESS_TEXTURE ) keeps cloth when a material sets both, so then the
+		// colour's alpha isn't metalness (Needlestack's gloves) and the value stands
 		m.Metalness = Metalness;
-		if ( UseMetalnessTexture ) m.Metalness = UseAlphaTest || UseTranslucent ? i.Sample( MetalnessMap, uv, g_StandardTrilinear ).g : color.a;
+		if ( UseMetalnessTexture && ClothShading == 0 ) m.Metalness = UseAlphaTest || UseTranslucent ? i.Sample( MetalnessMap, uv, g_StandardTrilinear ).g : color.a;
 
 		float detailMask = 0;
 		if ( DetailMode != 0 ) detailMask = max( i.Sample( DetailMask, uv ).r, DetailBlendToFull ) * DetailBlendFactor;

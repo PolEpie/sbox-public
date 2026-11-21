@@ -183,6 +183,10 @@ public sealed class BackendModel : GpuMesh, IBackendGeometry, ISkinnedGeometry
 		if ( !device.MeshLods || device.LodStore is not { } store || File.LodCount > 1 || (uint)mesh >= (uint)draws.Length || (uint)call >= (uint)draws[mesh].Length ) return GeneratedLevels.None;
 		if ( levels[mesh][call] is { } known ) return known;
 
+		// A model made at run time, or a material that places its vertices itself, keeps its own mesh: its positions needn't
+		// be its shape (a water surface's clipmap)
+		if ( !GeneratesLevels || draw.Material?.PlacesVertices == true ) return levels[mesh][call] = GeneratedLevels.None;
+
 		// A skinned mesh's draws, or a draw outside the GPU-driven pages, have none
 		var geometry = draws[mesh][call];
 		if ( geometry.Pooled is not { } pooled || File.Meshes[mesh].IsSkinned ) return levels[mesh][call] = GeneratedLevels.None;
@@ -218,10 +222,17 @@ public sealed class BackendModel : GpuMesh, IBackendGeometry, ISkinnedGeometry
 	/// <inheritdoc/>
 	public override string Name => File.Name;
 
-	BackendModel( BackendDevice device, ModelFile file )
+	/// <summary>
+	/// Whether its draws may get generated levels: not a model made at run time (<c>Model.Builder</c>'s, which native draws
+	/// whole), whose vertices may be cells a vertex stage places rather than positions (a water surface's clipmap).
+	/// </summary>
+	internal bool GeneratesLevels { get; }
+
+	BackendModel( BackendDevice device, ModelFile file, bool generatesLevels )
 	{
 		this.device = device;
 		File = file;
+		GeneratesLevels = generatesLevels;
 		draws = new DrawGeometry[file.Meshes.Count][];
 		meshletRequested = new int[file.Meshes.Count][];
 		levels = new GeneratedLevels[file.Meshes.Count][];
@@ -311,7 +322,7 @@ public sealed class BackendModel : GpuMesh, IBackendGeometry, ISkinnedGeometry
 				var format = source.Size == 4 ? IndexFormat.UInt32 : IndexFormat.UInt16;
 				if ( indexTables is not null )
 				{
-					var (page, slot, first) = indexTables.AddIndices( source.Data, format, skinned ? 0 : LevelCandidateBytes( file, mesh, i ) );
+					var (page, slot, first) = indexTables.AddIndices( source.Data, format, skinned || !GeneratesLevels ? 0 : LevelCandidateBytes( file, mesh, i ) );
 					pageRanges.Add( (slot, source.Data.Length) );
 					indexBuffers[i] = (page, first * (long)source.Size, format, page, slot, first);
 					continue;
@@ -571,10 +582,11 @@ public sealed class BackendModel : GpuMesh, IBackendGeometry, ISkinnedGeometry
 	/// Make the mesh Borealis draws from a model already read (see <see cref="Load"/>). <paramref name="drawFastPath"/> takes
 	/// each draw's depth fast path from its own flag (<c>m_bUseShadowFastPath</c>) as well as its material, as native's mesh
 	/// system sets it for a model made at run time (a water surface, which moves its vertices in its vertex shader, has it off).
+	/// Without <paramref name="generateLevels"/> its draws get no generated levels (<see cref="GeneratesLevels"/>).
 	/// </summary>
-	public static RenderMesh Create( BackendDevice device, ModelFile file, ulong? meshGroups = null, int materialGroup = 0, bool drawFastPath = false )
+	public static RenderMesh Create( BackendDevice device, ModelFile file, ulong? meshGroups = null, int materialGroup = 0, bool drawFastPath = false, bool generateLevels = true )
 	{
-		var geometry = new BackendModel( device, file );
+		var geometry = new BackendModel( device, file, generateLevels );
 		try
 		{
 			return Create( geometry, device, file, meshGroups, materialGroup, drawFastPath );
