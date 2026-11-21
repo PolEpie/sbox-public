@@ -159,9 +159,7 @@ internal static partial class PanelWindowInput
 				var copy = windowEvent;
 				var window = Sdl.GetWindowFromEvent( (IntPtr)(&copy) );
 				if ( window == IntPtr.Zero ) return;
-				if ( PanelWindows.Find( window ) is not { } target ) return;
-				// An STA wait pumps messages mid-frame, so draw on the next frame instead
-				if ( CSceneSystem.IsRenderingBusy() ) { target.Resized(); return; }
+				if ( PanelWindows.Find( window ) is null ) return;
 				// Modal resize loops park the normal frame update, including scratch-target expiry.
 				CSceneSystem.FrameUpdate();
 				OnResized( window );
