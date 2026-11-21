@@ -26,6 +26,12 @@ public sealed class DeviceOptions
 	public bool SynchronizationValidation { get; init; }
 
 	/// <summary>
+	/// With <see cref="Validation"/>, also report the layer's best practices checks (as warnings), for
+	/// tests that hold what a device makes to them.
+	/// </summary>
+	internal bool BestPracticesValidation { get; init; }
+
+	/// <summary>
 	/// With <see cref="Validation"/>, also instrument shaders to check on the GPU what they read: descriptors indexed out of
 	/// range, never written or whose resource is gone, and out-of-bounds buffer accesses. Much slower; for tests.
 	/// </summary>
