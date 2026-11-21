@@ -273,6 +273,77 @@ public class ObjectAttributeTests : GpuTest
 	}
 
 	/// <summary>
+	/// blendable.slang reads either packing a material's <c>ShaderVersion</c> names: version 1's hemi-octahedral normal with
+	/// roughness in its blue, and version 0's normal map with roughness, metalness, occlusion and the blend mask in the
+	/// second texture. The same textures read the other way draw another normal and roughness. Each frame, lit and in the
+	/// albedo, roughness, occlusion and normal views, with the vertex paint's tint in the tint masks or after the layers, is
+	/// saved (borealis-gpu-tests in the temp folder) to compare with another build's.
+	/// </summary>
+	[TestMethod]
+	public void BlendableReadsEitherPacking()
+	{
+		using var backend = new BackendDevice( Device );
+		var previousHost = RenderHost.Current;
+		RenderHost.Current = new BackendRenderHost( backend );
+		try
+		{
+			using var system = new RenderSystem { ParallelRecording = false };
+			using var target = ViewTarget.Create( new Vector2Int( Width, Height ), 1, TextureFormat.RGBA16161616F, TextureFormat.D32FS8, "Blendable packing test" );
+			if ( backend.Content.Find( "materials/dev/simple/simple_blend.vmat" ) is null ) Assert.Inconclusive( "simple_blend isn't built" );
+			var material = backend.LoadMaterial( "materials/dev/simple/simple_blend.vmat" ) as ConvertedMaterial;
+			Assert.IsNotNull( material, "simple_blend draws as the blendable surface" );
+
+			// The rope's textures in layer A, so every pixel decodes another texel (simple_blend's normal map is flat)
+			Assert.IsTrue( material.Set( "g_tColorA", backend.LoadTexture( "materials/default/rope_color_png_95bee33c.generated.vtex" ) ), "blendable has layer A's colour" );
+			Assert.IsTrue( material.Set( "g_tNormalA", backend.LoadTexture( "materials/default/rope_normal_png_b8960e44.generated.vtex" ) ), "blendable has layer A's normal map" );
+			Assert.IsTrue( material.Set( "g_tRmaA", backend.LoadTexture( "materials/default/rope01_vmat_g_trma_bbf6a2a.generated.vtex" ) ), "blendable has layer A's second texture" );
+
+			var world = new RenderWorld();
+			world.Lighting.SunShadowCascades = 0;
+			world.Add( new MeshObject( BoxMesh( backend, material ), Transform.Zero ) );
+
+			var view = new RenderView { Name = "Blendable packing test", FieldOfView = 60, ZNear = 4, ZFar = 4000, ClearColor = Color.Black, Viewport = new Rect( 0, 0, Width, Height ) };
+			view.Position = new Vector3( -200, -200, 150 );
+			view.Rotation = Rotation.LookAt( -view.Position );
+
+			byte[] Frame( int version, bool tintInPaint, int toolsVis )
+			{
+				Assert.IsTrue( material.Set( "ShaderVersion", [version] ), "blendable has a field for the shader version" );
+				Assert.IsTrue( material.Set( "F_USE_TINT_MASKS_IN_VERTEX_PAINT", [tintInPaint ? 1 : 0] ), "blendable has a field for the tint feature" );
+				view.ToolsVisMode = toolsVis;
+				backend.BeginFrame();
+				RenderHost.Current.NextFrame();
+				system.Render( world, view, target );
+				Device.WaitIdle();
+				var (texture, layout) = BackendDevice.Unwrap( target.Color );
+				var pixels = ReadBack( texture, layout );
+				BackendDevice.SetLayout( target.Color, ImageLayout.CopySource );
+
+				var rgba = new byte[Width * Height * 4];
+				for ( int i = 0; i < rgba.Length; i++ ) rgba[i] = i % 4 == 3 ? (byte)255 : (byte)Math.Clamp( MathF.Pow( Math.Max( (float)BitConverter.ToHalf( pixels, i * 2 ), 0 ), 1 / 2.2f ) * 255 + 0.5f, 0, 255 );
+				Save( rgba, Width, Height, $"blendable-v{version}-tint{(tintInPaint ? 1 : 0)}-vis{toolsVis}" );
+				return pixels;
+			}
+
+			var black = new byte[Width * Height * 8];
+			foreach ( var vis in new[] { 0, 10, 12, 14, 21 } )
+			{
+				var packed = Frame( 1, false, vis );
+				var mapped = Frame( 0, false, vis );
+				Frame( 1, true, vis );
+				Frame( 0, true, vis );
+				Assert.IsTrue( Different( packed, black ) > Width * Height / 10, $"view {vis}: the box draws" );
+				if ( vis is 12 or 21 ) Assert.IsTrue( Different( packed, mapped ) > 0, $"view {vis}: the two packings read the textures differently" );
+			}
+		}
+		finally
+		{
+			Device.WaitIdle();
+			RenderHost.Current = previousHost;
+		}
+	}
+
+	/// <summary>
 	/// With GPU occlusion culling on, draws come from the culler's arguments and surviving instance ids (one indirect draw
 	/// each) and the frame is the one drawn without culling, through material objects as by reflection. Nothing is hidden
 	/// yet: the depth chain the cull tests against is built by compute dispatches with their own parameters, which this
