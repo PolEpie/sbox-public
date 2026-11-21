@@ -62,6 +62,39 @@ public class ModelFileTests
 	}
 
 	/// <summary>
+	/// A draw binding two vertex buffers (Hammer's meshes: positions in one, vertex paint and tint in another) reads one
+	/// buffer with both streams' fields, each vertex's bytes side by side from where the draw binds each; its tangent frame
+	/// is the first stream's. A draw binding one buffer is left as it was.
+	/// </summary>
+	[TestMethod]
+	public void DrawsBindingSeveralStreamsReadOneBuffer()
+	{
+		var positions = new MeshVertexBuffer( 3, 16, [new VertexField( "POSITION", 0, ColorFormat.R32G32B32_FLOAT, 0, 0, false, 0 ), new VertexField( "NORMAL", 0, ColorFormat.R10G10B10A2_UNORM, 12, 0, false, 0 )], Enumerable.Range( 0, 48 ).Select( x => (byte)x ).ToArray() );
+		var paint = new MeshVertexBuffer( 4, 4, [new VertexField( "TEXCOORD", 5, ColorFormat.R8G8B8A8_UNORM, 0, 1, false, 0 )], Enumerable.Range( 100, 16 ).Select( x => (byte)x ).ToArray() );
+		var draws = new List<MeshDrawCall>
+		{
+			new() { IndexCount = 3, VertexBuffers = [(0, 0), (1, 4)] },
+			new() { IndexCount = 3, VertexBuffers = [(0, 0)] },
+		};
+
+		var buffers = ModelMesh.MergeDrawStreams( draws, [positions, paint] );
+
+		Assert.AreEqual( 3, buffers.Length, "a buffer added" );
+		Assert.AreEqual( 1, draws[0].VertexBuffers.Count );
+		Assert.AreEqual( (2, 0), draws[0].VertexBuffers[0] );
+		Assert.IsTrue( draws[0].CompressedTangentFrame, "the positions' normals are packed" );
+		Assert.AreEqual( (0, 0), draws[1].VertexBuffers[0], "one stream: unchanged" );
+
+		var merged = buffers[2];
+		Assert.AreEqual( 3, merged.Count, "the vertices both streams have from their bindings" );
+		Assert.AreEqual( 20, merged.Stride );
+		Assert.AreEqual( 16, merged.Find( "TEXCOORD", 5 )?.Offset );
+		Assert.AreEqual( 0, merged.Find( "TEXCOORD", 5 )?.Slot );
+		CollectionAssert.AreEqual( positions.Data[16..32], merged.Data[20..36], "vertex 1's positions" );
+		CollectionAssert.AreEqual( paint.Data[8..12], merged.Data[36..40], "vertex 1's paint is the paint buffer's vertex 2: bound one vertex in" );
+	}
+
+	/// <summary>
 	/// A world aggregate's fragment names its draw by mesh id, not by place: Construct's red-brick aggregate
 	/// (<c>node000_lr0_agg72_16_wall_brick_b</c>) has its two draws with culling data, mesh ids 1 and 12, written last in a
 	/// vertex buffer of their own, so fragment 8 draws the eighth draw in the file (mesh id 8), as native does.

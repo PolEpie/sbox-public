@@ -682,7 +682,10 @@ internal sealed partial class WorldRender : ISceneWorldRender, IAttributeSource,
 		var flags = sceneObject.Flags;
 		SceneObject.WriteLayerFlags( mesh, flags );
 		mesh.DrawsOpaque = flags.HasFlag( SceneObjectFlags.IsOpaque );
-		mesh.DrawsTranslucent = flags.HasFlag( SceneObjectFlags.IsTranslucent );
+		// A draw that blends is drawn with the translucent objects, as Source 2's device flags its object when the mesh loads
+		// (ComputeSceneObjectTranslucencyFlags); without that device native keeps the flags the object was made with (Hammer's
+		// meshes: opaque, their tools volumes and glass too)
+		mesh.DrawsTranslucent = flags.HasFlag( SceneObjectFlags.IsTranslucent ) || mesh.Mesh is { } drawn && drawn.BlendForLod( 0 ) != MeshBlend.Opaque;
 		mesh.DepthPrepass = !flags.HasFlag( SceneObjectFlags.NoZPrepass );
 		mesh.OcclusionCulling = !flags.HasFlag( SceneObjectFlags.NoOcclusionCulling );
 		mesh.WantsFrameBufferCopy = flags.HasFlag( SceneObjectFlags.WantsFrameBufferCopyTexture );

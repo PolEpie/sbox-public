@@ -64,6 +64,10 @@ internal class SlangMaterialCompiler : ResourceCompiler
 			return Task.FromResult( true );
 		}
 
+		// The shader's vertex inputs, which the model compiler lays out the meshes of models using the material by (as the
+		// native compiler writes a .shader's): without them a model falls back to the error shader's, position alone
+		if ( compiled.VertexSignature is { } signature ) Context.AddEditData( "VSInputSignature", signature );
+
 		Context.ResourceVersion = 1; // VMAT_RESOURCE_VERSION_KV3
 		Context.Data.Write( data );
 		return Task.FromResult( true );

@@ -104,6 +104,17 @@ public sealed partial class SceneCamera : IDisposable, IManagedCamera
 	/// </summary>
 	internal bool HasEarlyPostProcess( Rendering.Stage stage, PostProcessQueue queue ) => HasEarlyPostProcessHook?.Invoke( stage, queue ) ?? false;
 
+	/// <summary>
+	/// Whether the camera component has command lists at a stage.
+	/// </summary>
+	internal Func<Rendering.Stage, bool> HasCommandListsHook;
+
+	/// <summary>
+	/// Whether command lists run at <paramref name="stage"/> (<see cref="CameraComponent.AddCommandList"/>), which can draw
+	/// into the frame's colour there.
+	/// </summary>
+	internal bool HasCommandLists( Rendering.Stage stage ) => HasCommandListsHook?.Invoke( stage ) ?? false;
+
 	internal void ScheduleEarlyPostProcess( Rendering.Stage stage, bool enabled ) => ScheduleEarlyPostProcessHook?.Invoke( stage, enabled );
 
 	/// <summary>

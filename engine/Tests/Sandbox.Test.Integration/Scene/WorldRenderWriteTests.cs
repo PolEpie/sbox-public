@@ -266,4 +266,42 @@ public class WorldRenderWriteTests
 			world.Delete();
 		}
 	}
+
+	/// <summary>
+	/// An object whose draw blends is drawn with the translucent objects though its flags say opaque alone, as native's
+	/// flags stay without Source 2's device for an object native code made (Hammer's meshes: its tools volumes and glass
+	/// drew nowhere, the opaque pass passing over their blended draws).
+	/// </summary>
+	[TestMethod]
+	public void BlendedDrawsDrawTranslucentWhateverTheFlags()
+	{
+		if ( !Graphics.IsAvailable )
+			Assert.Inconclusive( "Requires SBOX_TEST_GRAPHICS=1: meshes are made on the device." );
+
+		typeof( ThreadSafe ).GetMethod( "MarkMainThread", Any ).Invoke( null, null );
+
+		var world = new SceneWorld();
+		var camera = new SceneCamera { World = world };
+		var render = (System.IDisposable)System.Activator.CreateInstance( RenderType, [world] );
+		try
+		{
+			// The human's eyelashes: its translucent material
+			var glass = Material.Load( "models/citizen_human/heads/citizen_human_femalehead01/eyelashes_01_opacity.vmat" );
+			var pane = new SceneObject( world, Model.Load( "models/dev/box.vmdl" ) );
+			pane.SetMaterialOverride( glass );
+			pane.ChangeFlags( SceneObjectFlags.IsOpaque, SceneObjectFlags.IsOpaque | SceneObjectFlags.IsTranslucent );
+			RenderType.GetMethod( "Prepare", Any ).Invoke( render, [camera, false] );
+
+			var mesh = (Borealis.MeshObject)pane.RenderObject;
+			Assert.IsNotNull( mesh.Mesh, "the box's mesh" );
+			Assert.IsTrue( mesh.Mesh.Draws.Any( x => x.Translucent ), "its draw blends" );
+			Assert.IsTrue( mesh.DrawsTranslucent, "drawn with the translucent objects" );
+		}
+		finally
+		{
+			render.Dispose();
+			camera.Dispose();
+			world.Delete();
+		}
+	}
 }
