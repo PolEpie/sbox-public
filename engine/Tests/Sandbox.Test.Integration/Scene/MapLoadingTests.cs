@@ -158,6 +158,67 @@ public class MapLoadingTests
 		}
 	}
 
+	/// <summary>
+	/// An aggregate of a model made at run time (a game's ground chunks, built with <c>Model.Builder</c>) whose draw calls each
+	/// start at their own vertex: each fragment draws its draw call's vertices, as the file Borealis made the mesh from has
+	/// them. With every base vertex 0, Realistic Car Driving 2's ground drew other chunks' vertices across the view.
+	/// </summary>
+	[TestMethod]
+	public void AggregateOfARunTimeModelKeepsItsBaseVertices()
+	{
+		TestGraphics.Require();
+		using var borealis = BorealisGpuRenderBackend.Create( validation: true );
+		var host = Borealis.RenderHost.Current;
+		Borealis.RenderHost.Current = new DeviceHost( borealis.Services );
+		var world = new SceneWorld();
+		try
+		{
+			// Two triangles, the second's vertices after the first's, each draw call indexing its own from 0
+			var material = Material.Load( "materials/default/white.vmat" );
+			var built = new Mesh( material );
+			built.CreateVertexBuffer( 6, Enumerable.Range( 0, 6 ).Select( v => new Vertex { Position = new Vector3( v % 3 == 1 ? 32 : 0, v % 3 == 2 ? 32 : 0, v / 3 * 100 ), Normal = Vector3.Up } ).ToArray() );
+			built.CreateIndexBuffer( 6, new[] { 0, 1, 2, 0, 1, 2 } );
+			built.Bounds = new BBox( Vector3.Zero, new Vector3( 32, 32, 100 ) );
+			built.AddSubMesh( material, 3, 3, 3, 3 );
+			var model = Model.Builder.AddMesh( built ).Create();
+			Assert.IsTrue( model.IsProcedural );
+
+			Borealis.RenderMesh mesh = null;
+			for ( int i = 0; i < 200 && mesh is null; i++ )
+			{
+				mesh = Sandbox.Rendering.Bridge.MirrorContent.Mesh( model, out _ );
+				if ( mesh is null ) System.Threading.Thread.Sleep( 10 );
+			}
+
+			Assert.IsNotNull( mesh, "the run-time model was made" );
+			var calls = ((Borealis.Backend.BackendModel)mesh.Geometry).File.Meshes[0].DrawCalls;
+			Assert.IsTrue( calls.Count >= 2 && calls.Any( c => c.BaseVertex != 0 ), "a draw call starts past the first vertex" );
+
+			var fragments = Enumerable.Range( 0, calls.Count ).Select( i => new AggregateFragment { Transform = Transform.Zero, BoundsMax = new Vector3( 32, 32, 100 ), Tint = Color.White, DrawDescriptorIndex = i } ).ToArray();
+			var aggregate = new SceneAggregateObject( world, model, fragments, true );
+			var drawn = (Borealis.AggregateObject.FragmentDraw[])RenderType.GetMethod( "FragmentDraws", Any ).Invoke( null, [aggregate, model, mesh] );
+			for ( int i = 0; i < calls.Count; i++ )
+			{
+				Assert.AreEqual( calls[i].BaseVertex, drawn[i].Args.BaseVertex, $"fragment {i} draws its draw call's vertices" );
+				Assert.AreEqual( (uint)calls[i].StartIndex, drawn[i].Args.FirstIndex, $"fragment {i} draws its draw call's indices" );
+			}
+
+			aggregate.Delete();
+		}
+		finally
+		{
+			world.Delete();
+			Borealis.RenderHost.Current = host;
+		}
+
+		Assert.AreEqual( 0, borealis.ValidationErrors );
+	}
+
+	sealed class DeviceHost( Borealis.GpuDevice device ) : Borealis.RenderHost
+	{
+		public override Borealis.GpuDevice Device => device;
+	}
+
 	[TestMethod]
 	public void AggregateNeedsAFragmentPerDrawCall()
 	{
