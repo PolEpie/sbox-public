@@ -364,6 +364,10 @@ public sealed unsafe class SwapChain : IDisposable
 	public bool PresentOnThread { get; set; }
 
 	System.Threading.Thread presentThread;
+
+	/// <summary>Whether the present thread is running, for the tests.</summary>
+	internal bool PresentThreadRunning => presentThread is { IsAlive: true };
+
 	readonly object presentGate = new();
 	int presentWaiting = -1;
 	bool presentStopping;

@@ -66,6 +66,46 @@ public class SdlWindowTests
 	}
 
 	/// <summary>
+	/// Presents queued on the swap chain's own thread (<see cref="SwapChain.PresentOnThread"/>, as the game window's are):
+	/// frames go through a resize with validation seeing nothing wrong, and the thread stops when the swap chain goes.
+	/// </summary>
+	[TestMethod]
+	public void PresentsOnThreadThroughAResize()
+	{
+		if ( !SdlLibrary.IsAvailable ) Assert.Inconclusive( "No SDL3 library" );
+		if ( !Device.IsSupported ) Assert.Inconclusive( "No Vulkan loader is installed" );
+		if ( !Sdl.TryInit( out var error ) ) Assert.Inconclusive( error );
+
+		var errors = new List<string>();
+		try
+		{
+			using var window = new SdlWindow( new SdlWindowOptions { Title = "Borealis.Sdl present thread test", Width = 320, Height = 240, Hidden = true } );
+			using ( var device = CreateDevice( Sdl.VulkanInstanceExtensions, errors ) )
+			{
+				var swapChain = device.CreateSwapChain( new SwapChainInfo { Surface = SurfaceSource.Custom( window.CreateVulkanSurface ), Width = 320, Height = 240, PresentMode = PresentMode.Immediate } );
+				using ( swapChain )
+				{
+					swapChain.PresentOnThread = true;
+					for ( int i = 0; i < 20; i++ ) Present( device, swapChain, new Vector4( i % 2, 0, 1, 1 ) );
+					Assert.IsTrue( swapChain.PresentThreadRunning, "presents went to the swap chain's thread" );
+
+					swapChain.Resize( 400, 300 );
+					for ( int i = 0; i < 20; i++ ) Present( device, swapChain, new Vector4( 0, i % 2, 1, 1 ) );
+				}
+
+				device.WaitIdle();
+				Assert.IsFalse( swapChain.PresentThreadRunning, "the present thread stops with its swap chain" );
+			}
+		}
+		finally
+		{
+			Sdl.Quit();
+		}
+
+		Assert.AreEqual( 0, errors.Count, "Validation errors:\n" + string.Join( "\n", errors.Take( 10 ) ) );
+	}
+
+	/// <summary>
 	/// A frame presented with nothing submitted for its image, and one submitted for twice, would leave the queue waiting on a
 	/// semaphore nothing signals (the GPU's watchdog then resets the device, as Construct's load did one time in ten): the
 	/// present submits an empty frame for the image, and the second submission goes as an ordinary one. Both are counted and
