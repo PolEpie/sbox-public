@@ -90,6 +90,32 @@ public class ContentLifetimeTests : GpuTest
 	}
 
 	/// <summary>
+	/// A freed material's GPU-driven records are forgotten at the next frame's start: their keys held the material (and its
+	/// textures) for good, a map's worth each load.
+	/// </summary>
+	[TestMethod]
+	public void AFreedMaterialsRecordsAreForgotten()
+	{
+		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true };
+		var path = new[] { "materials/default.vmat", "materials/dev/dev_measuregeneric01.vmat", "materials/dev/reflectivity_30.vmat" }.FirstOrDefault( p => backend.Content.TryRead( p ) is not null );
+		if ( path is null ) { Assert.Inconclusive( "No compiled dev material" ); return; }
+
+		var material = backend.ModelMaterial( path );
+		Assert.IsNotNull( material, path );
+		var key = new GpuDrivenTables.MaterialRecordKey( material, 0, null, false, 0 );
+		backend.GpuDrivenTables.Material( key, 16, 0, static ( _, bytes ) => bytes.Clear() );
+		Assert.IsTrue( backend.GpuDrivenTables.TryMaterial( key, out _ ), "the record is made" );
+
+		backend.BeginFrame();
+		Assert.IsTrue( backend.GpuDrivenTables.TryMaterial( key, out _ ), "kept while the material is held" );
+
+		backend.ReleaseModelMaterial( path );
+		backend.BeginFrame();
+		Assert.IsFalse( backend.GpuDrivenTables.TryMaterial( key, out _ ), "forgotten once the material is freed" );
+		Device.WaitIdle();
+	}
+
+	/// <summary>
 	/// A loaded model freed after its last holder let go takes its file as read with it (its vertices and indices): the
 	/// reads of a map's models stayed for good, about 270 MiB after three rounds of a large map.
 	/// </summary>

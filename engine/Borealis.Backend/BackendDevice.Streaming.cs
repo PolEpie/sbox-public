@@ -394,6 +394,15 @@ public sealed partial class BackendDevice
 			freeing.Clear();
 		}
 
+		lock ( freedMaterials )
+		{
+			if ( freedMaterials.Count > 0 )
+			{
+				gpuDrivenTables?.ForgetMaterials( freedMaterials );
+				freedMaterials.Clear();
+			}
+		}
+
 		gpuDrivenTables?.FreeEmptyPages();
 		Borealis.Source2.ContentBuffers.TrimIdle();
 	}
