@@ -213,6 +213,10 @@ internal sealed partial class SceneBridge : ISceneRenderer
 	/// </summary>
 	internal const ulong ViewIdleFrames = 600;
 
+	// The frame FreeInvalid last ran in, and how often BeginFrame runs it while no view is prepared
+	ulong freedFrame;
+	const ulong FreeIdleEveryFrames = 60;
+
 	/// <summary>
 	/// Release views whose camera went away or that haven't rendered for <see cref="ViewIdleFrames"/>, and worlds deleted,
 	/// without being reported.
@@ -220,6 +224,7 @@ internal sealed partial class SceneBridge : ISceneRenderer
 	void FreeInvalid()
 	{
 		var frame = Application.FrameCount;
+		freedFrame = frame;
 		foreach ( var (key, state) in views )
 		{
 			if ( state.IsOrphaned || (!state.Rendering && frame - state.LastFrame > ViewIdleFrames) ) invalidViews.Add( key );
@@ -343,6 +348,24 @@ internal sealed partial class SceneBridge : ISceneRenderer
 	/// <inheritdoc/>
 	public void BeginFrame()
 	{
+		// Views and worlds are let go of as views are prepared; with none prepared (the menu has no scene of its own) a
+		// closed game's worlds and views would stay until the next scene renders
+		if ( rendering is null && Gpu is { } device && Application.FrameCount - freedFrame > FreeIdleEveryFrames )
+		{
+			device.FollowFrame();
+			FreeInvalid();
+			// The shadow caches evict as views render, which none does now
+			Borealis.Shadows.ShadowMapper.Update();
+			Borealis.Shadows.ShadowMapper.ForgetStaleCascades();
+
+			// What the last view drew from (its world's drawer and lighting), set again by the next view prepared
+			if ( gpuView is not null )
+			{
+				gpuView.RenderSceneObject = null;
+				gpuView.LightingWorld = null;
+			}
+		}
+
 		// Until the game first draws its scene (behind the loading screen, and in the frames the game starts in after its load)
 		// nothing renders the scene's world, so nothing would ask for its models until the first frame that does: its
 		// objects are applied each frame instead, as they arrive, so their models are read and made, within the device's

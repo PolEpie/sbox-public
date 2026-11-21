@@ -3260,6 +3260,10 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 		lodStore?.BeginFrame();
 		GpuDrivenFrame++;
 		loadFrame++;
+
+		// Resident culls forget last frame's assignments and stale calls here too, not only when a view culls: with nothing
+		// rendering (the menu) they kept a closed game's views, and those views' visibility resources
+		ResidentCulls.BeginFrame( GpuDrivenFrame, Gpu );
 		TimeFrame();
 		Poll();
 

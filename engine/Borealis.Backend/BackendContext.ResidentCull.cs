@@ -211,6 +211,9 @@ internal sealed partial class BackendContext
 			residentWork.Add( assignment );
 		}
 
+		// Not kept past the cull: it names views' visibility, which a context kept with its render system would hold on to
+		residentFound.Clear();
+
 		foreach ( var work in residentWork )
 		{
 			if ( work.Lists || !work.Plan.Key.Ids || work.Visibility is null ) continue;
@@ -722,8 +725,16 @@ internal sealed class ResidentCullState
 		if ( frame == now ) return;
 		frame = now;
 
+		// The assignments let go of what they named: kept in the pool, they held views (and so their visibility resources)
+		// after the views had gone
 		lock ( assigned )
 		{
+			for ( int i = 0; i < pooled; i++ )
+			{
+				var assignment = pool[i];
+				(assignment.Plan, assignment.View, assignment.Visibility, assignment.Stamps) = (null, null, null, default);
+			}
+
 			assigned.Clear();
 			pooled = 0;
 		}
