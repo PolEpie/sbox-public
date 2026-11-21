@@ -40,14 +40,6 @@ native class CSceneAnimatableObject as NativeEngine.CSceneAnimatableObject : CSc
 	[nogc]
 	int GetClosestBoneIndex( Vector3 vWorldPoint );
 
-	// s&box: a CModelAnimationInstance animates this object's SceneModel. It stops animating itself (now and when its model
-	// changes) and keeps its bind pose
-	inline void SetExternalAnimation()
-	{
-		self->m_bExternalAnimation = true;
-		self->m_bManaged = false;
-	}
-
 	[nogc]
 	Transform GetParentSpaceBone( int index );
 	[nogc]
