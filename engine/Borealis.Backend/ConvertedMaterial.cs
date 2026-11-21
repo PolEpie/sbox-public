@@ -2,6 +2,7 @@ using Borealis.Source2.Materials;
 using Borealis.Source2.Shaders;
 using Sandbox.ShaderCompiler;
 using System.IO;
+using System.Linq;
 
 namespace Borealis.Backend;
 
@@ -69,6 +70,17 @@ internal sealed class ConvertedMaterial : SurfaceMaterial
 		return null;
 	}
 
+	/// <summary>The value of the field a feature (<c>F_ALPHA_TEST</c>) fills, as the material draws with it; null when the surface has none.</summary>
+	internal int? FeatureValue( string feature )
+	{
+		foreach ( var field in layout.Fields )
+		{
+			if ( field.Kind != MaterialFieldKind.Texture2D && field.Kind != MaterialFieldKind.Float && string.Equals( field.Source, feature, StringComparison.OrdinalIgnoreCase ) ) return GetInt( field.Offset );
+		}
+
+		return null;
+	}
+
 	/// <summary>Every texture field nothing has set takes <paramref name="texture"/>: a material made in code, as native makes one.</summary>
 	public void FillUnsetTextures( GpuTexture texture )
 	{
@@ -80,22 +92,36 @@ internal sealed class ConvertedMaterial : SurfaceMaterial
 
 	IReadOnlyDictionary<string, int> featuresSet;
 
+	/// <summary>The surface's feature rules for the material's shader (<see cref="RulesFor"/>), applied to its feature values.</summary>
+	FeatureRules rules = FeatureRules.None;
+
 	/// <summary>
 	/// Feature values (<c>F_*</c>) set in code over the material's own, as <c>Material.SetFeature</c> does: every feature
-	/// code set, so one no longer set goes back to the material's value (its file's, else off). The surface's
-	/// fields whose <c>[Source]</c> is the feature take it; features it has no field for change nothing.
+	/// code set, so one no longer set goes back to the material's value (its file's, else off). The surface's feature rules
+	/// apply to the two together, as native applies a shader's to them, so a feature code sets can turn off one of the
+	/// file's (and back on once code stops setting it). The surface's fields whose <c>[Source]</c> is the feature take it;
+	/// features it has no field for change nothing.
 	/// </summary>
 	public void SetFeatures( IReadOnlyDictionary<string, int> features )
 	{
+		var values = new Dictionary<string, int>( StringComparer.OrdinalIgnoreCase );
+		foreach ( var (name, value) in File?.Ints ?? new Dictionary<string, int>() )
+		{
+			if ( name.StartsWith( "F_", StringComparison.OrdinalIgnoreCase ) ) values[name] = value;
+		}
+
+		foreach ( var (name, value) in features ?? new Dictionary<string, int>() ) values[name] = value;
+		rules.ApplyInPlace( values );
+
 		Span<float> one = stackalloc float[1];
 		foreach ( var (name, _) in featuresSet ?? new Dictionary<string, int>() )
 		{
-			if ( features is not null && features.ContainsKey( name ) ) continue;
-			one[0] = File?.Value( name ) is { Length: > 0 } v ? v[0] : 0;
+			if ( values.ContainsKey( name ) ) continue;
+			one[0] = 0;
 			Set( name, one );
 		}
 
-		foreach ( var (name, value) in features ?? new Dictionary<string, int>() )
+		foreach ( var (name, value) in values )
 		{
 			one[0] = value;
 			Set( name, one );
@@ -169,7 +195,11 @@ internal sealed class ConvertedMaterial : SurfaceMaterial
 
 	public static ConvertedMaterial Create( CompiledShader compiled, MaterialFile file, string name, Func<string, GpuTexture> loadTexture )
 	{
-		var material = new ConvertedMaterial( compiled.Path, compiled.Material ) { DisplayName = name, File = file };
+		var rules = RulesFor( compiled, file.Shader );
+		var material = new ConvertedMaterial( compiled.Path, compiled.Material ) { DisplayName = name, File = file, rules = rules };
+
+		// The material's features through the surface's rules, as native applies its shader's before drawing it
+		var features = rules.IsEmpty ? null : rules.Apply( file.Ints );
 
 		foreach ( var field in compiled.Material.Fields )
 		{
@@ -180,6 +210,7 @@ internal sealed class ConvertedMaterial : SurfaceMaterial
 			}
 
 			var value = field.Source == "ShaderVersion" ? new float[] { file.ShaderVersion } : Value( field, file ) ?? field.Default;
+			if ( features is not null && field.Source is { } feature && file.Value( feature ) is not null && features.TryGetValue( feature, out var ruled ) ) value = [ruled];
 			if ( value is null ) continue;
 			for ( int i = 0; i < field.Components && i < value.Length; i++ )
 			{
@@ -189,6 +220,36 @@ internal sealed class ConvertedMaterial : SurfaceMaterial
 		}
 
 		return material;
+	}
+
+	/// <summary>
+	/// The feature rules of <paramref name="compiled"/>'s module (<see cref="FeatureRules"/>, from its <c>MATERIAL_INPUTS</c>
+	/// block) for a material of <paramref name="shader"/>: read with the shader's place in the surface's
+	/// <c>[Source( "Shader: ..." )]</c> list (standard's complex, simple, generic), the first when it isn't in it. So a surface
+	/// standing in for a deleted <c>.shader</c> carries that shader's rules itself. None when the module declares none.
+	/// </summary>
+	internal static FeatureRules RulesFor( CompiledShader compiled, string shader )
+	{
+		var index = compiled.Material.Fields.FirstOrDefault( f => f.ShaderNames is not null ) is { ShaderNames: { } names } ? Math.Max( 0, ShaderIndex( names, shader ) ) : 0;
+		return ModuleOf( compiled.Path ) is { } module ? FeatureRules.Read( module, index ) : FeatureRules.None;
+	}
+
+	static readonly Dictionary<string, (DateTime Written, PassModule Module)> modules = new( StringComparer.OrdinalIgnoreCase );
+
+	/// <summary>A surface's module, read again when its file changes; null when it has no <c>MATERIAL_INPUTS</c> block (or no file).</summary>
+	static PassModule ModuleOf( string path )
+	{
+		if ( string.IsNullOrEmpty( path ) || !System.IO.File.Exists( path ) ) return null;
+		var written = System.IO.File.GetLastWriteTimeUtc( path );
+		lock ( modules )
+		{
+			if ( modules.TryGetValue( path, out var known ) && known.Written == written ) return known.Module;
+		}
+
+		var text = System.IO.File.ReadAllText( path );
+		var module = text.Contains( "MATERIAL_INPUTS", StringComparison.Ordinal ) ? PassModule.FromText( Path.GetFullPath( path ), text, [Path.GetDirectoryName( Path.GetFullPath( path ) )] ) : null;
+		lock ( modules ) modules[path] = (written, module);
+		return module;
 	}
 
 	static float[] Value( MaterialField field, MaterialFile file )

@@ -1615,7 +1615,8 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	/// <summary>
 	/// <paramref name="file"/> with its feature values (<c>F_*</c>) through its shader's feature rules, as native applies them
 	/// and the <c>.shader</c> material reads them (<see cref="BackendMaterial.FeatureValues"/>): a surface standing in for the shader
-	/// takes the same features. The file itself when the rules change nothing.
+	/// takes the same features. The file itself when the rules change nothing, or when the shader is a surface alone (no
+	/// <c>.shader_c</c>): the surface then applies the rules its own module declares (<see cref="ConvertedMaterial.RulesFor"/>).
 	/// </summary>
 	MaterialFile WithFeatureRules( MaterialFile file )
 	{

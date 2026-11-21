@@ -109,9 +109,12 @@ public sealed partial class MaterialInputs
 		IReadOnlyList<VertexInput> vertexInputs = [];
 		string representative = null;
 
+		// The block's feature rules first, as vfx applies a shader's before it reads anything for a material's values
+		features = FeatureRules.Read( module ).Apply( features );
+
 		// A surface has no entry points or features of its own: its inputs are in its MATERIAL_INPUTS block (the textures
 		// its fields take, by name), read with the material's features as the pixel stage would see them
-		var surface = SurfaceStruct().IsMatch( module.Text );
+		var surface = IsSurface( module );
 		StageKind[] stages = surface ? [StageKind.Pixel] : [StageKind.Vertex, StageKind.Pixel, StageKind.Compute];
 
 		foreach ( var stage in stages )
@@ -233,7 +236,7 @@ public sealed partial class MaterialInputs
 		if ( representative is not null && !textures.Exists( t => t.Name == representative ) && textures.Find( t => t.Name.TrimEnd( '0', '1', '2', '3', '4', '5', '6', '7', '8', '9' ) == representative ) is { } numbered )
 			representative = numbered.Name;
 
-		return new MaterialInputs { Version = HeaderVersion().Match( module.Text ) is { Success: true } version ? int.Parse( version.Groups[1].Value, CultureInfo.InvariantCulture ) : 0, Inputs = inputs, Textures = [.. textures.Where( t => used.Contains( t.Name ) )], Declared = textures, Attributes = attributes, RepresentativeTexture = representative, Parameters = parameters, VertexInputs = vertexInputs, ExpressionAttributes = expressionAttributes, ShownTextures = [.. textures.Where( t => (used.Contains( t.Name ) || conditioned.Contains( t.Name )) && !hidden.Contains( t.Name ) )], FeatureLines = string.Join( "\n", featureLines ) };
+		return new MaterialInputs { Version = HeaderVersion().Match( module.Text ) is { Success: true } version ? int.Parse( version.Groups[1].Value, CultureInfo.InvariantCulture ) : 0, Inputs = inputs, Textures = [.. textures.Where( t => used.Contains( t.Name ) )], Declared = textures, Attributes = attributes, RepresentativeTexture = representative, Parameters = parameters, VertexInputs = vertexInputs, ExpressionAttributes = expressionAttributes, ShownTextures = [.. textures.Where( t => (used.Contains( t.Name ) || conditioned.Contains( t.Name )) && !hidden.Contains( t.Name ) )], FeatureLines = EditorLines( featureLines ) };
 	}
 
 	/// <summary>
@@ -281,12 +284,28 @@ public sealed partial class MaterialInputs
 	}
 
 	/// <summary>The lines as one text without comments, so declarations spanning lines read as one.</summary>
-	static string Code( IReadOnlyList<string> lines )
+	internal static string Code( IReadOnlyList<string> lines )
 	{
 		var text = string.Join( "\n", lines );
 		text = BlockComment().Replace( text, " " );
 		return LineComment().Replace( text, "" );
 	}
+
+	/// <summary>Whether a module is a surface (a <c>[Material]</c> struct), whose block is read with its pixel stage's lines alone.</summary>
+	internal static bool IsSurface( PassModule module ) => SurfaceStruct().IsMatch( module.Text );
+
+	/// <summary>
+	/// The FEATURES lines the material editor reads: every one but the rules naming a feature the lines don't declare (the
+	/// features a surface doesn't do, whose rules still apply to materials' values: <see cref="FeatureRules"/>).
+	/// </summary>
+	static string EditorLines( List<string> lines )
+	{
+		var declared = new HashSet<string>( lines.Select( l => DeclaredFeature().Match( l ) ).Where( m => m.Success ).Select( m => m.Groups[1].Value ), StringComparer.Ordinal );
+		return string.Join( "\n", lines.Where( l => !l.StartsWith( "FeatureRule", StringComparison.Ordinal ) || FeatureRules.Parse( l ).Features.All( declared.Contains ) ) );
+	}
+
+	[GeneratedRegex( @"^Feature\s*\(\s*(\w+)" )]
+	private static partial Regex DeclaredFeature();
 
 	/// <summary>The comma-separated arguments of a call, split only at its top level.</summary>
 	static List<string> Arguments( string text )
