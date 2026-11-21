@@ -33,22 +33,7 @@ public static class OfflineShaders
 
 		SlangCompiler.CompileThreads = Environment.ProcessorCount;
 		if ( UpdateRecords( game, log ) != 0 ) return 1;
-		var roots = ContentFiles.FindGame().Roots;
-		var library = Path.Combine( shaders, "sbox" ) + Path.DirectorySeparatorChar;
-		var sources = roots.Select( r => Path.Combine( r, "shaders" ) ).Prepend( shaders ).Distinct( StringComparer.OrdinalIgnoreCase ).Where( Directory.Exists )
-			.SelectMany( f => Directory.GetFiles( f, "*.slang", SearchOption.AllDirectories ) )
-			.Where( f => !Path.GetFullPath( f ).StartsWith( library, StringComparison.OrdinalIgnoreCase ) )
-			.Select( f => (Source: f, Output: (string)null) )
-			.ToList();
-
-		// The surfaces converted from core .shader files at run time: compiled from the same text, kept in the core shaders
-		var converted = Path.Combine( game, ".source2", "borealisoffline", "converted" );
-		foreach ( var file in SurfaceShaders.DefaultSurfaceFiles( shaders, roots, converted, log ) )
-		{
-			if ( Path.GetFullPath( file ).StartsWith( Path.GetFullPath( converted ), StringComparison.OrdinalIgnoreCase ) )
-				sources.Add( (file, SlangOutput.PathOf( Path.Combine( shaders, Path.GetFileName( file ) ) )) );
-		}
-
+		var sources = Sources( game, log );
 		var compiler = new SlangCompiler( EngineFolders.NativeIn( game ), [shaders] ) { CacheFolder = Path.Combine( game, ".source2", "borealisoffline" ), UseOffline = false };
 		var results = Task.WhenAll( sources.Select( s => Task.Run( async () =>
 		{
@@ -59,6 +44,96 @@ public static class OfflineShaders
 
 		var failed = results.Count( r => r == OfflineResult.Failed );
 		log?.Invoke( $"Slang offline: {results.Count( r => r == OfflineResult.Compiled )} compiled, {results.Count( r => r == OfflineResult.UpToDate )} up to date, {failed} failed, {results.Count( r => r == OfflineResult.Skipped )} not shaders, in {clock.Elapsed.TotalSeconds:F0} s" );
+		return failed;
+	}
+
+	/// <summary>
+	/// The Slang sources <see cref="CompileAll"/> compiles, each with where its offline compile goes (null: beside it): every
+	/// <c>.slang</c> under the content roots' <c>shaders</c> folders but the surface library, and the surfaces converted from
+	/// core <c>.shader</c> files at run time, compiled from the same text and kept in the core shaders.
+	/// </summary>
+	static List<(string Source, string Output)> Sources( string game, Action<string> log )
+	{
+		var shaders = Path.Combine( game, "core", "shaders" );
+		var roots = ContentFiles.FindGame().Roots;
+		var library = Path.Combine( shaders, "sbox" ) + Path.DirectorySeparatorChar;
+		var sources = roots.Select( r => Path.Combine( r, "shaders" ) ).Prepend( shaders ).Distinct( StringComparer.OrdinalIgnoreCase ).Where( Directory.Exists )
+			.SelectMany( f => Directory.GetFiles( f, "*.slang", SearchOption.AllDirectories ) )
+			.Where( f => !Path.GetFullPath( f ).StartsWith( library, StringComparison.OrdinalIgnoreCase ) )
+			.Select( f => (Source: f, Output: (string)null) )
+			.ToList();
+
+		var converted = Path.Combine( game, ".source2", "borealisoffline", "converted" );
+		foreach ( var file in SurfaceShaders.DefaultSurfaceFiles( shaders, roots, converted, log ) )
+		{
+			if ( Path.GetFullPath( file ).StartsWith( Path.GetFullPath( converted ), StringComparison.OrdinalIgnoreCase ) )
+				sources.Add( (file, SlangOutput.PathOf( Path.Combine( shaders, Path.GetFileName( file ) ) )) );
+		}
+
+		return sources;
+	}
+
+	record struct DumpCombo( ulong Static, ulong Dynamic, string Name, string Spirv );
+	record class DumpProgram( string Shader, string Stage, List<DumpCombo> Combos );
+
+	/// <summary>
+	/// <c>ShaderCompiler -slang --dump-spirv folder [source ...]</c>: the vertex and pixel stages of every surface
+	/// <see cref="CompileAll"/> compiles (or of the sources in <paramref name="only"/>), compiled first where stale, as SPIR-V
+	/// for <c>SboxBuild shader-stats</c>, in the shape it reads for a <c>.shader</c> (Sandbox.Engine's SpirvDump):
+	/// <c>programs/{shader}.{stage}.json</c> per surface and stage with a combo per pass (Forward first), naming each module
+	/// once in <c>spirv/{hash}.spv</c>. Specialization constants keep their defaults, as in a pipeline that isn't specialised
+	/// for a material's features. Returns how many sources failed.
+	/// </summary>
+	public static int DumpSurfaces( string game, string folder, IReadOnlyCollection<string> only, Action<string> log )
+	{
+		var failed = CompileAll( game, log );
+		var shaders = Path.Combine( game, "core", "shaders" );
+		var spirvFolder = Path.Combine( folder, "spirv" );
+		var programFolder = Path.Combine( folder, "programs" );
+		Directory.CreateDirectory( spirvFolder );
+		Directory.CreateDirectory( programFolder );
+
+		var wanted = only.Select( Path.GetFullPath ).ToHashSet( StringComparer.OrdinalIgnoreCase );
+		var compiler = new SlangCompiler( EngineFolders.NativeIn( game ), [shaders] ) { CacheFolder = Path.Combine( game, ".source2", "borealisoffline" ) };
+		foreach ( var (source, output) in Sources( game, log ) )
+		{
+			// The converted surfaces are named as the core shader their offline compile sits beside
+			var path = output is null ? Path.GetFullPath( source ) : Path.Combine( shaders, Path.GetFileName( source ) );
+			if ( wanted.Count > 0 && !wanted.Contains( path ) ) continue;
+
+			var text = File.ReadAllText( source );
+			if ( text.Contains( "sbox/pass.slangh", StringComparison.Ordinal ) || SlangCompiler.IsRaw( text ) || !System.Text.RegularExpressions.Regex.IsMatch( text, @"\[\s*Material\b" ) ) continue;
+
+			CompiledShader shader;
+			try
+			{
+				shader = compiler.CompileSurface( source );
+			}
+			catch ( ShaderCompileException e )
+			{
+				failed++;
+				log?.Invoke( $"{Path.GetFileName( source )}: {e.Errors}" );
+				continue;
+			}
+
+			var name = Path.GetRelativePath( game, path ).Replace( '\\', '/' );
+			foreach ( var (stage, of) in new (string, Func<CompiledPass, CompiledStage>)[] { ("VS", p => p.Vertex), ("PS", p => p.Pixel) } )
+			{
+				var program = new DumpProgram( name, stage, [] );
+				foreach ( var pass in shader.Passes.Values.OrderBy( p => p.Name != ShaderPasses.Forward ) )
+				{
+					if ( of( pass )?.Spirv is not { } spirv ) continue;
+					var hash = Convert.ToHexString( System.Security.Cryptography.SHA256.HashData( spirv ), 0, 16 ).ToLowerInvariant();
+					var file = Path.Combine( spirvFolder, hash + ".spv" );
+					if ( !File.Exists( file ) ) File.WriteAllBytes( file, spirv );
+					program.Combos.Add( new DumpCombo( (ulong)program.Combos.Count, 0, pass.Name, hash ) );
+				}
+
+				if ( program.Combos.Count == 0 ) continue;
+				File.WriteAllText( Path.Combine( programFolder, name.Replace( '/', '_' ).Replace( ':', '_' ) + "." + stage + ".json" ), System.Text.Json.JsonSerializer.Serialize( program ) );
+			}
+		}
+
 		return failed;
 	}
 
