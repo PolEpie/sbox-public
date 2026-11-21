@@ -207,7 +207,7 @@ internal static class MirrorContent
 
 		// A view rendered for it on this device (a water body's refraction) drew into Borealis's own texture (a render
 		// target's path is its name, with no file behind it)
-		if ( captures.TryGetValue( texture, out var capture ) && capture.Texture is { IsValid: true } drawn && !capture.Owned ) return drawn;
+		if ( texture.DrawnByView && captures.TryGetValue( texture, out var capture ) && capture.Texture is { IsValid: true } drawn && !capture.Owned ) return drawn;
 
 		// A cube made at run time for compute to write (a realtime probe's) is what cube captures draw into
 		if ( IsCaptureCube( texture ) ) return CaptureCube( texture );
@@ -275,6 +275,7 @@ internal static class MirrorContent
 	{
 		if ( texture is null || !captures.TryGetValue( texture, out var capture ) ) return;
 		captures.Remove( texture );
+		texture.DrawnByView = false;
 		if ( capture.Owned && capture.Texture is not null ) releasedCaptures.Enqueue( (capture.Texture, collectFrames) );
 		capture.Owned = false;
 		capture.Texture = null;
@@ -330,7 +331,36 @@ internal static class MirrorContent
 	/// Note that a view rendered for <paramref name="texture"/> (an engine render target a command list's view asked for) drew
 	/// into <paramref name="drawn"/>, a texture of Borealis's: what Borealis's draws read for the engine texture from then on.
 	/// </summary>
-	public static void SetCapture( Texture texture, GpuTexture drawn ) => captures.GetOrCreateValue( texture ).Texture = drawn;
+	public static void SetCapture( Texture texture, GpuTexture drawn )
+	{
+		captures.GetOrCreateValue( texture ).Texture = drawn;
+		texture.DrawnByView = true;
+	}
+
+	/// <summary>
+	/// What the engine's drawing on <paramref name="backend"/> reads for <paramref name="texture"/> when Borealis renders into
+	/// it on the same device (<c>BorealisGpuRenderBackend.RenderedInto</c>): a realtime probe's cube's capture
+	/// (<see cref="CaptureCube"/>), or what a view drew for a render target (<see cref="ViewCapture"/>). Null otherwise.
+	/// </summary>
+	public static GpuTexture RenderedInto( BorealisGpuRenderBackend backend, Texture texture )
+	{
+		if ( Gpu is null || Gpu != backend.Services ) return null;
+		return IsCaptureCube( texture ) ? CaptureCube( texture ) : ViewCapture( texture );
+	}
+
+	/// <summary>
+	/// What a view drew for <paramref name="texture"/> (<see cref="SetCapture"/>), for the engine's own draws to read in its place
+	/// (<c>BorealisGpuRenderBackend.RenderedInto</c>): only when it has the engine texture's shape (size, format, mips, one
+	/// sample), so a draw binding it sees what it expects. Null otherwise.
+	/// </summary>
+	public static GpuTexture ViewCapture( Texture texture )
+	{
+		if ( texture is null || !texture.DrawnByView || !captures.TryGetValue( texture, out var capture ) || capture.Owned ) return null;
+		if ( capture.Texture is not { IsValid: true, IsCube: false, IsArray: false, Samples: 1 } drawn ) return null;
+		if ( drawn.Width != texture.Width || drawn.Height != texture.Height || drawn.Mips != Math.Max( texture.Mips, 1 ) ) return null;
+		if ( Source2Formats.Samples( texture.MultisampleType ) != 1 || drawn.Format != Source2Formats.From( texture.ImageFormat ) ) return null;
+		return drawn;
+	}
 
 	/// <summary>
 	/// Set on <paramref name="into"/> what <paramref name="attributes"/> had set after its version was <paramref name="version"/>:

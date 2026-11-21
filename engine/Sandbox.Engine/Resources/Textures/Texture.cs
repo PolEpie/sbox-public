@@ -79,6 +79,13 @@ public partial class Texture : Resource, IDisposable
 	/// </summary>
 	internal bool MadeAtRunTime { get; set; }
 
+	/// <summary>
+	/// A view Borealis rendered into a texture of its own drew this render target last (a command list's
+	/// <c>DrawReflection</c> or <c>DrawView</c> on Borealis.Gpu): what reads it through the engine reads that texture, until the
+	/// engine writes the target itself.
+	/// </summary>
+	internal bool DrawnByView { get; set; }
+
 	internal void CopyFrom( Texture texture )
 	{
 		if ( !texture.IsValid() )

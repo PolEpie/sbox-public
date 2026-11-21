@@ -266,6 +266,53 @@ public class BorealisGpuTexturesTest
 	}
 
 	/// <summary>
+	/// A render target a child view drew into a texture of Borealis's (a mirror's <c>DrawReflection</c> in GAMMA, which a
+	/// command list's quad then samples): what the engine's draws and copies read for it is that texture, as the scene's own
+	/// draws read it, not the engine's copy nothing drew into. Once the engine writes the target itself, its copy is read again.
+	/// </summary>
+	[TestMethod]
+	public void TargetsAViewDrewAreReadFromWhatItDrew()
+	{
+		RequireVulkan();
+		using var borealis = BorealisGpuRenderBackend.Create( validation: true );
+
+		var host = Borealis.RenderHost.Current;
+		var renderedInto = BorealisGpuRenderBackend.RenderedInto;
+		Borealis.RenderHost.Current = new DeviceHost( borealis.Services );
+		BorealisGpuRenderBackend.RenderedInto = Sandbox.Rendering.Bridge.MirrorContent.RenderedInto;
+		try
+		{
+			const int size = 16;
+
+			// A pooled target, as a command list's GetRenderTarget makes one (with UAV binding), and what a view drew for it
+			using var target = Texture.CreateRenderTarget().WithSize( size, size ).WithFormat( ImageFormat.RGBA8888 ).WithUAVBinding().Create();
+			using var plain = Texture.CreateRenderTarget().WithSize( size, size ).WithFormat( ImageFormat.RGBA8888 ).Create();
+			using var drawn = borealis.Services.CreateTexture( Borealis.TextureDesc.Target( size, size, Borealis.TextureFormat.RGBA8888 ), "view" );
+			borealis.Services.Clear( drawn, Color.Green );
+
+			Sandbox.Rendering.Bridge.MirrorContent.SetCapture( target, drawn );
+			Assert.AreEqual( drawn.BindlessIndex, borealis.TextureIndex( target ), "a draw reads what the view drew" );
+			Assert.AreSame( drawn, Sandbox.Rendering.Bridge.MirrorContent.Texture( target ), "as the scene's draws do" );
+
+			borealis.CopyTexture( target, plain, 0, 0, 0, 0 );
+			Assert.AreEqual( new Color32( 0, 255, 0, 255 ), borealis.ReadPixels( plain )[5 * size + 3], "a copy reads what the view drew" );
+
+			// The engine clears it: its own copy holds the target again, for every reader
+			target.Clear( Color.Red );
+			Assert.AreNotEqual( drawn.BindlessIndex, borealis.TextureIndex( target ), "after the engine wrote it, its copy is read" );
+			Assert.AreNotSame( drawn, Sandbox.Rendering.Bridge.MirrorContent.Texture( target ) );
+			Assert.AreEqual( new Color32( 255, 0, 0, 255 ), borealis.ReadPixels( target )[5 * size + 3] );
+		}
+		finally
+		{
+			Borealis.RenderHost.Current = host;
+			BorealisGpuRenderBackend.RenderedInto = renderedInto;
+		}
+
+		Assert.AreEqual( 0, borealis.ValidationErrors );
+	}
+
+	/// <summary>
 	/// A texture's pixels read back from the device's copy (what <see cref="Texture.GetPixels(int)"/> reads when the
 	/// device is the process's): a rectangle, converted to the format asked for, at a place in a bigger image.
 	/// </summary>

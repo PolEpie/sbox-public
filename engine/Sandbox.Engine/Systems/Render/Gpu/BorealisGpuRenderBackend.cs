@@ -750,7 +750,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 
 	public override IntPtr UploadContext => uploadKey;
 
-	public override int TextureIndex( Texture texture ) => gpu.BindlessIndex( TextureOf( texture ) );
+	public override int TextureIndex( Texture texture ) => gpu.BindlessIndex( SampledTextureOf( texture ) );
 
 	public override int SamplerIndex( SamplerState state )
 	{
@@ -892,6 +892,48 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 			if ( texture.Width <= 0 || texture.Height <= 0 ) return ErrorTexture();
 			return textures.TryGetValue( texture, out backing ) ? backing.Handle : Make( texture );
 		}
+	}
+
+	/// <summary>
+	/// The texture a draw or a copy reads for <paramref name="texture"/>: for a render target a view of Borealis's drew last
+	/// (<see cref="Texture.DrawnByView"/>, a mirror's <c>DrawReflection</c>), the texture that view drew into
+	/// (<see cref="RenderedInto"/>), as the scene's own draws read it; else <see cref="TextureOf"/>.
+	/// </summary>
+	TextureHandle SampledTextureOf( Texture texture )
+	{
+		if ( texture.DrawnByView && RenderedInto?.Invoke( this, texture ) is BackendTexture rendered )
+		{
+			texture.UsedOnDevice();
+			return rendered.Handle;
+		}
+
+		return TextureOf( texture );
+	}
+
+	/// <summary>A texture attribute's binding: what a draw samples, or for a dispatch the engine's own copy.</summary>
+	TextureHandle BoundTextureOf( Texture texture )
+	{
+		if ( !loweringDispatch ) return SampledTextureOf( texture );
+		EngineWrites( texture );
+		return TextureOf( texture );
+	}
+
+	/// <summary>
+	/// The engine is about to draw into, copy into or clear <paramref name="texture"/>: from now on its own copy is the one
+	/// read. Unless the engine overwrites all of it (<paramref name="whole"/>), what a view of Borealis's last drew for it is
+	/// copied into it first, so what the engine draws lands over that.
+	/// </summary>
+	void EngineWrites( Texture texture, bool whole = false )
+	{
+		if ( texture is null || !texture.DrawnByView ) return;
+		texture.DrawnByView = false;
+		if ( whole || RenderedInto?.Invoke( this, texture ) is not BackendTexture drawn ) return;
+
+		// The view's texture is left where Borealis's frames expect it: readable
+		var layout = drawn.Layout;
+		context.Track( drawn.Handle, layout );
+		context.CopyTexture( drawn.Handle, TextureOf( texture ) );
+		context.PrepareNative( drawn.Handle, layout, false );
 	}
 
 	/// <summary>Layouts of textures workers made, for the main thread's context (<see cref="Track"/>).</summary>
@@ -1333,6 +1375,9 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	/// </summary>
 	public override bool Update( Texture texture, ReadOnlySpan<byte> data, int x, int y, int z, int width, int height, int depth )
 	{
+		// The engine wrote it: its copy is what's read from now on
+		texture.DrawnByView = false;
+
 		if ( !textures.TryGetValue( texture, out var backing ) )
 		{
 			if ( !(texture.Desc.IsArray || texture.Desc.IsCube) && (z != 0 || depth > 1) ) return true;
@@ -1392,6 +1437,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	/// </summary>
 	public override bool Cleared( Texture texture, Color color )
 	{
+		texture.DrawnByView = false;
 		if ( !textures.TryGetValue( texture, out var backing ) ) return true;
 		if ( !ThreadSafe.IsMainThread ) return false;
 
@@ -1615,6 +1661,26 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 		return attributeIds[token] = AttributeIds.Of( name );
 	}
 
+	// Whether the attributes being lowered are a dispatch's (LowerForDispatch)
+	bool loweringDispatch;
+
+	/// <summary>
+	/// <see cref="Lower(RenderAttributes)"/> for a dispatch, which may write what it binds: a texture a view of Borealis's drew
+	/// last is copied into the engine's own copy first (<see cref="EngineWrites"/>), and the dispatch binds that.
+	/// </summary>
+	ShaderAttributes LowerForDispatch( RenderAttributes attributes )
+	{
+		loweringDispatch = true;
+		try
+		{
+			return Lower( attributes );
+		}
+		finally
+		{
+			loweringDispatch = false;
+		}
+	}
+
 	/// <summary>Lower managed attributes into what <see cref="ShaderDrawer"/> binds by name.</summary>
 	ShaderAttributes Lower( RenderAttributes attributes )
 	{
@@ -1644,10 +1710,10 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 					lowered.SetById( AttributeId( token, name ), floats );
 					break;
 				case ManagedRenderAttributes.TextureValue { Texture: { } texture, Mip: < 0 }:
-					lowered.SetById( AttributeId( token, name ), TextureOf( texture ) );
+					lowered.SetById( AttributeId( token, name ), BoundTextureOf( texture ) );
 					break;
 				case ManagedRenderAttributes.TextureValue { Texture: { } texture, Mip: var mip }:
-					lowered.SetById( AttributeId( token, name ), context.View( TextureOf( texture ), mip ) );
+					lowered.SetById( AttributeId( token, name ), context.View( BoundTextureOf( texture ), mip ) );
 					break;
 				case GpuBuffer buffer:
 					LowerBuffer( name, buffer );
@@ -1841,6 +1907,8 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	internal void BindRenderTarget( RenderTarget target, bool srgbWrite, int depthSlice )
 	{
 		_ = Recording;
+		EngineWrites( target.ColorTarget );
+		EngineWrites( target.DepthTarget );
 		context.SetTarget( target.ColorTarget is { } color ? TextureOf( color ) : default, target.DepthTarget is { } depth ? TextureOf( depth ) : default, srgbWrite, depthSlice );
 	}
 
@@ -1854,6 +1922,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	public override void ClearTexture( Texture texture, Color color )
 	{
 		_ = Recording;
+		EngineWrites( texture, whole: true );
 		context.ClearTexture( TextureOf( texture ), new Num.Vector4( color.r, color.g, color.b, color.a ) );
 	}
 
@@ -2035,7 +2104,8 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 		}
 
 		_ = Recording;
-		var from = TextureOf( source );
+		var from = SampledTextureOf( source );
+		EngineWrites( destination );
 		var to = TextureOf( destination );
 		if ( sourceMip == destinationMip && sourceSlice == 0 && destinationSlice == 0 )
 		{
@@ -2051,6 +2121,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	public override void ResolveColor( Texture destination, Rect viewport )
 	{
 		_ = Recording;
+		EngineWrites( destination );
 		var saved = context.Viewport;
 		SetViewport( viewport );
 		context.CopyTarget( TextureOf( destination ) );
@@ -2070,6 +2141,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	public override void ResolveDepth( Texture destination, Rect viewport )
 	{
 		_ = Recording;
+		EngineWrites( destination );
 
 		// Over a frame's output (AfterPostProcess, AfterUI) no depth is bound: the frame's, as native's view still has it
 		if ( !context.Depth.IsValid && OutputDepth is { } frameDepth )
@@ -2101,6 +2173,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 		}
 
 		_ = Recording;
+		EngineWrites( texture );
 		switch ( method )
 		{
 			// Gaussian and GGX: downsample_cs, a mip a pass, its kernel by the method
@@ -2130,7 +2203,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 
 		_ = Recording;
 		drawer.Material = null;
-		if ( !context.Dispatch( Require( computeMaterial ), Lower( attributes ), threadsX, threadsY, threadsZ ) )
+		if ( !context.Dispatch( Require( computeMaterial ), LowerForDispatch( attributes ), threadsX, threadsY, threadsZ ) )
 			throw new InvalidOperationException( $"{computeMaterial} didn't dispatch on Borealis.Gpu" );
 	}
 
@@ -2144,7 +2217,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 
 		_ = Recording;
 		drawer.Material = null;
-		if ( !context.DispatchIndirect( Require( computeMaterial ), Lower( attributes ), BufferOf( indirectBuffer ), bufferOffset ) )
+		if ( !context.DispatchIndirect( Require( computeMaterial ), LowerForDispatch( attributes ), BufferOf( indirectBuffer ), bufferOffset ) )
 			throw new InvalidOperationException( $"{computeMaterial} didn't dispatch on Borealis.Gpu" );
 	}
 
