@@ -1831,6 +1831,41 @@ public class SurfaceTests : GpuTest
 	}
 
 	/// <summary>
+	/// A mode a shader leaves to another (<c>Depth( "depth_only.shader" )</c>, as a package shader with only VrForward has)
+	/// draws with the material's features carried over by name, as native's: an alpha-tested material's depth is
+	/// depth_only's alpha-tested variant, whose pixel shader cuts the depth where the colour pass clips (Jumper's plant
+	/// leaves left their quads' depth in the prepass without it); one that doesn't alpha test has no cut.
+	/// </summary>
+	[TestMethod]
+	public void ModeFallbacksTakeTheMaterialsFeatures()
+	{
+		using var backend = new BackendDevice( Device );
+		var library = backend.Shaders;
+		Assert.IsNotNull( library.Load( "shaders/depth_only.shader" ), "no depth_only.shader" );
+
+		var leaves = ShaderFile.FromModule( "leaves",
+			[new ShaderMode { Name = "VrForward", Fallback = "", Settings = [] }, new ShaderMode { Name = "Depth", Fallback = "depth_only.shader", Settings = [] }],
+			[new ShaderCombo { Name = "F_TEXTURE_FILTERING", Min = 0, Max = 4, FeatureIndex = 0, Strings = [] }, new ShaderCombo { Name = "F_ALPHA_TEST", Min = 0, Max = 1, FeatureIndex = 1, Strings = [] }],
+			[] );
+
+		ShaderVariant DepthVariant( int alphaTest )
+		{
+			var until = DateTime.UtcNow + TimeSpan.FromSeconds( 120 );
+			while ( true )
+			{
+				var variant = library.Variant( leaves, "Depth", [0, alphaTest], null, null, false, out var pending );
+				if ( !pending || DateTime.UtcNow > until ) return variant;
+				System.Threading.Thread.Sleep( 100 );
+			}
+		}
+
+		var cut = DepthVariant( 1 );
+		Assert.IsNotNull( cut, "no depth variant" );
+		Assert.IsTrue( cut.Pixel?.Reflection is { Discards: true }, "an alpha-tested material's fallback depth doesn't cut" );
+		Assert.IsFalse( DepthVariant( 0 )?.Pixel?.Reflection is { Discards: true }, "an opaque material's fallback depth cuts" );
+	}
+
+	/// <summary>
 	/// A translucency feature a material's shader declares but never reads doesn't make it blend, as on native: blendable.shader
 	/// has common/features.hlsl's <c>F_ADDITIVE_BLEND</c> and no combo follows it, so a blendable material that kept the value
 	/// from another shader (Unicycle Frenzy's start pad trim) is opaque and converts to blendable.slang; complex's own

@@ -543,6 +543,26 @@ public sealed class ShaderLibrary : IDisposable
 		return false;
 	}
 
+	/// <summary>How many features a mode's fallback shader has, capped for the stack.</summary>
+	static int FallbackFeatureCount( ShaderFile fallback ) => Math.Min( fallback.Features?.StaticCombos.Length ?? 0, 64 );
+
+	/// <summary>
+	/// A material's feature values for a mode's fallback shader (<c>Depth( "depth_only.shader" )</c>), by name: each of the
+	/// fallback's features takes the value of the feature of the same name in <paramref name="shader"/>, 0 where it has none,
+	/// as native's material carries its features over. depth_only's <c>F_ALPHA_TEST</c> then cuts an alpha-tested material's
+	/// depth where its own shader has no Depth mode (Jumper's plant leaves, a package shader with only VrForward).
+	/// </summary>
+	static void FallbackFeatures( ShaderFile shader, ReadOnlySpan<int> features, ShaderFile fallback, Span<int> carried )
+	{
+		carried.Clear();
+		var names = fallback.Features?.StaticCombos;
+		for ( int i = 0; i < carried.Length; i++ )
+		{
+			var index = shader.FeatureIndex( names[i].Name );
+			if ( index >= 0 && index < features.Length ) carried[i] = features[index];
+		}
+	}
+
 	/// <summary>
 	/// The variant of <paramref name="shader"/> that draws <paramref name="mode"/> for a material with these feature
 	/// values (by feature index; see <see cref="ShaderFile.FeatureIndex"/>), with dynamic combos from
@@ -566,7 +586,10 @@ public sealed class ShaderLibrary : IDisposable
 		if ( !string.IsNullOrEmpty( drawMode.Fallback ) )
 		{
 			var fallback = Load( drawMode.Fallback.Contains( '/' ) ? drawMode.Fallback : $"shaders/{drawMode.Fallback}" );
-			return fallback is null ? null : Variant( fallback, mode, [], dynamicCombos, attributes, gpuDriven, out pending );
+			if ( fallback is null ) return null;
+			Span<int> carried = stackalloc int[FallbackFeatureCount( fallback )];
+			FallbackFeatures( shader, features, fallback, carried );
+			return Variant( fallback, mode, carried, dynamicCombos, attributes, gpuDriven, out pending );
 		}
 
 		// A shader with a module draws from it; one whose module doesn't compile draws from its programs, and so does one
@@ -702,7 +725,10 @@ public sealed class ShaderLibrary : IDisposable
 		if ( !string.IsNullOrEmpty( drawMode.Fallback ) )
 		{
 			var fallback = Load( drawMode.Fallback.Contains( '/' ) ? drawMode.Fallback : $"shaders/{drawMode.Fallback}" );
-			return fallback is null ? null : PixelState( fallback, mode, [], out pending );
+			if ( fallback is null ) return null;
+			Span<int> carried = stackalloc int[FallbackFeatureCount( fallback )];
+			FallbackFeatures( shader, features, fallback, carried );
+			return PixelState( fallback, mode, carried, out pending );
 		}
 
 		if ( Modules is { } modules && (!CompiledFirst || shader.ModuleOnly) && modules.Has( shader ) )
