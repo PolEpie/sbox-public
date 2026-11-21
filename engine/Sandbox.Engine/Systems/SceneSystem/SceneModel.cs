@@ -10,6 +10,12 @@ public sealed partial class SceneModel : SceneObject
 {
 	internal SceneModelAnimation animNative;
 
+	/// <summary>
+	/// Made by managed code: its native twin is a plain scene object and it animates on its own instance. A scene model
+	/// native code made (a tool's preview) wraps the <see cref="CSceneAnimatableObject"/> native animates.
+	/// </summary>
+	readonly bool plainTwin;
+
 	internal SceneModel() { }
 	internal SceneModel( HandleCreationData _ ) { }
 
@@ -22,16 +28,20 @@ public sealed partial class SceneModel : SceneObject
 
 		if ( !model.HasRenderMeshes() ) model = Model.Error;
 
+		plainTwin = true;
+
 		using ( var h = IHandle.MakeNextHandle( this ) )
 		{
 			var flags = Rendering.SceneObjectFlags.CastShadows | Rendering.SceneObjectFlags.IsLoaded;
 			var typeFlags = ESceneObjectTypeFlags.NONE;
 
-			MeshSystem.CreateSceneObject( model.native, transform, "AnimatableSceneObjectDesc", flags, typeFlags, sceneWorld, 0x1 );
+			// A plain mesh object, as SceneObject's: it animates on its own instance, and native only keeps its draw state,
+			// bounds and render meshes for traces
+			MeshSystem.CreateSceneObject( model.native, transform, null, flags, typeFlags, sceneWorld, 0x1 );
 			StartResolvingDraws( model );
 			FlagsAtCreation( model, flags );
 
-			if ( !animNative.IsValid )
+			if ( native.IsNull )
 			{
 				Log.Warning( "SceneModel: Didn't get a valid native pointer" );
 				throw new System.ArgumentException( "Error creating AnimSceneObject - possible invalid model?" );
@@ -52,8 +62,9 @@ public sealed partial class SceneModel : SceneObject
 	{
 		base.OnNativeInit( ptr );
 
-		animNative = new SceneModelAnimation( (NativeEngine.CSceneAnimatableObject)ptr, default, this );
-		RegisterAnimationControllerCallback();
+		// Native code made it (a tool's preview): its twin is the CSceneAnimatableObject native animates
+		if ( !plainTwin )
+			animNative = new SceneModelAnimation( (NativeEngine.CSceneAnimatableObject)ptr, default, this );
 	}
 
 	internal override void OnNativeDestroy()

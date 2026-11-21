@@ -160,22 +160,19 @@ public struct Blendable : IInterpolatedSurface
 
 		Material m = {};
 		m.Albedo = c.rgb;
-		if ( Version >= 1 )
-		{
-			m.Normal = i.NormalFromHemiOctahedron( n.rg );
-			m.Roughness = n.b;
-			m.Metalness = r.r;
-			m.AmbientOcclusion = r.g;
-			mask = r.b;
-		}
-		else
-		{
-			m.Normal = i.NormalFromMap( n.rgb );
-			m.Roughness = r.r;
-			m.Metalness = r.g;
-			m.AmbientOcclusion = r.b;
-			mask = r.a;
-		}
+
+		// Version picks the channels and the normal's encoding by selects, with one transform to world space for both
+		// encodings (NormalFromHemiOctahedron's and NormalFromMap's maths): a branch between the two whole decodes holds six
+		// more registers through the shading's decal loop
+		bool packed = Version >= 1;
+		float2 d = float2( n.r + n.g - 1.00392163, n.r - n.g );
+		float3 t = normalize( packed ? float3( d, 1.0 - abs( d.x ) - abs( d.y ) ) : 2.0 * n.rgb - 1.0 );
+		t.y = -t.y;
+		m.Normal = normalize( t.x * normalize( i.TangentU ) + t.y * normalize( i.TangentV ) + t.z * i.Normal );
+		m.Roughness = packed ? n.b : r.r;
+		m.Metalness = packed ? r.r : r.g;
+		m.AmbientOcclusion = packed ? r.g : r.b;
+		mask = packed ? r.b : r.a;
 
 		m.TintMask = c.a;
 		tint *= i.Color.rgb;

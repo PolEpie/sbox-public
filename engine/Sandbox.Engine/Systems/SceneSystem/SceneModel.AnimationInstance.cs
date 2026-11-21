@@ -12,22 +12,20 @@ public sealed partial class SceneModel
 	internal BBox AnimatedWorldBounds { get; private set; }
 
 	/// <inheritdoc cref="AnimatedWorldBounds"/>
-	internal BBox AnimatedLocalBounds { get; private set; }
+	internal BBox AnimatedLocalBounds { get; set; }
 
 	AnimationBoneBox[] _boneBoxes = [];
 	int _boneBoxesVersion = -1;
 
 	/// <summary>
-	/// Animate on an instance of its own from here: the twin stops animating and keeps its bind pose until it's given one.
+	/// Animate on an instance of its own: what managed code makes has no animated twin.
 	/// </summary>
 	void CreateAnimationInstance( Model model, in Transform transform )
 	{
 		var instance = ModelAnimationInstance.Create();
-		animNative.Twin.SetExternalAnimation();
 		instance.SetModel( model.native, transform );
-		animNative = new SceneModelAnimation( animNative.Twin, instance, this );
+		animNative = new SceneModelAnimation( default, instance, this );
 
-		// The twin had the callback; its controller is the instance's now
 		RegisterAnimationControllerCallback();
 	}
 
@@ -56,7 +54,7 @@ public sealed partial class SceneModel
 	}
 
 	/// <summary>
-	/// The instance's pose changed: its bounds follow it. The twin keeps its bind pose; nothing reads its bones.
+	/// The instance's pose changed: its bounds follow it. The twin is a plain object with no bones.
 	/// </summary>
 	unsafe void PoseChanged()
 	{
@@ -68,7 +66,7 @@ public sealed partial class SceneModel
 	/// <summary>
 	/// Native's <c>CSceneAnimatableObject::UpdateBoundsFromRenderBones</c> over the instance's pose: each of the model's
 	/// render-bone boxes through its bone, a boneless mesh's box through the model's transform, the view bounds for a model
-	/// without bones; a quarter bigger with deformation volumes. The twin gets the world box, which the renderer reads.
+	/// without bones; a quarter bigger with deformation volumes. The world box is kept for the renderer.
 	/// </summary>
 	unsafe void UpdatePoseBounds( AnimationPose* pose )
 	{
@@ -130,7 +128,7 @@ public sealed partial class SceneModel
 		AnimatedWorldBounds = world;
 		AnimatedLocalBounds = local;
 
-		// Kept here for the renderer and Bounds; the twin gets them too, for render-mesh traces
+		// Kept here for the renderer and Bounds
 		SetPoseBounds( world );
 	}
 

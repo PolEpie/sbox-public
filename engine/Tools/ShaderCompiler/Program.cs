@@ -15,8 +15,19 @@ public static partial class Program
 	{
 		// Slang: every surface, raw module and pass module under the shaders folders compiled offline into name.slang_c beside
 		// it (Borealis.Backend.OfflineShaders), only those whose inputs changed. Needs no engine
+		// With --dump-spirv folder, every surface's stages written as SPIR-V for SboxBuild shader-stats as well (the surfaces
+		// among the files named after it, when there are any)
 		if ( args.Any( x => x.Equals( "-slang", StringComparison.OrdinalIgnoreCase ) ) )
+		{
+			var dump = Array.IndexOf( args, "--dump-spirv" );
+			if ( dump >= 0 && dump + 1 < args.Length )
+			{
+				var only = args.Skip( dump + 2 ).Where( x => !x.StartsWith( '-' ) ).ToArray();
+				return Borealis.Backend.OfflineShaders.DumpSurfaces( System.IO.Directory.GetCurrentDirectory(), System.IO.Path.GetFullPath( args[dump + 1] ), only, Console.WriteLine ) == 0 ? 0 : 1;
+			}
+
 			return Borealis.Backend.OfflineShaders.CompileAll( System.IO.Directory.GetCurrentDirectory(), Console.WriteLine ) == 0 ? 0 : 1;
+		}
 
 		// The record definitions (core/shaders/sbox/records.slangh): the C# structs and HLSL offsets they make, where stale
 		if ( args.Any( x => x.Equals( "-records", StringComparison.OrdinalIgnoreCase ) ) )

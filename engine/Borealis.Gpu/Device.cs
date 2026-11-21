@@ -134,11 +134,13 @@ public sealed unsafe partial class Device : IDisposable
 			pUserData = (void*)GCHandle.ToIntPtr( self ),
 		};
 
-		// VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT, VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_EXT
-		var enabledValidation = stackalloc int[2];
+		// VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT, VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_EXT,
+		// VK_VALIDATION_FEATURE_ENABLE_BEST_PRACTICES_EXT
+		var enabledValidation = stackalloc int[3];
 		var enabledValidationCount = 0u;
 		if ( options.SynchronizationValidation ) enabledValidation[enabledValidationCount++] = 4;
 		if ( options.GpuAssistedValidation ) enabledValidation[enabledValidationCount++] = 0;
+		if ( options.BestPracticesValidation ) enabledValidation[enabledValidationCount++] = 2;
 		var validationFeatures = new VkValidationFeaturesEXT
 		{
 			sType = VkStructureType.ValidationFeaturesExt,

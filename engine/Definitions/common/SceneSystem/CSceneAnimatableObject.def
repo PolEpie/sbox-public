@@ -1,6 +1,8 @@
 
 #include "scenesystem/sceneanimatableobject.h"
+#include "animationsystem/sboxanimcallbacks.h"
 
+// Nothing here uses these any more: CModelAnimationInstance (animationinstance.def) does, and they're only declared here
 delegate SboxAnimationEventCallback;
 delegate SboxAnimTagEventCallback;
 delegate SboxAnimGraphChangedCallback;
@@ -40,19 +42,11 @@ native class CSceneAnimatableObject as NativeEngine.CSceneAnimatableObject : CSc
 	[nogc]
 	int GetClosestBoneIndex( Vector3 vWorldPoint );
 
-	// s&box: a CModelAnimationInstance animates this object's SceneModel. It stops animating itself (now and when its model
-	// changes) and keeps its bind pose
-	inline void SetExternalAnimation()
-	{
-		self->m_bExternalAnimation = true;
-		self->m_bManaged = false;
-	}
-
 	[nogc]
 	Transform GetParentSpaceBone( int index );
 	[nogc]
 	void GetParentSpaceBones( int nNumBones, void* pOut );
-	// The flex controllers' weights as the object morphs with them (animation, then overrides), one float each by the
+	// The flex controllers' weights as the object morphs with them (as written in by whoever poses it), one float each by the
 	// model's flex controller index, into pOut up to nMax; returns how many it has
 	[nogc]
 	inline int GetFlexControllerWeights( void* pOut, int nMax )

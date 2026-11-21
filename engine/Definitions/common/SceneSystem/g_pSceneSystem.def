@@ -100,7 +100,6 @@ native accessor g_pSceneSystem as NativeEngine.CSceneSystem
     void FinishFrameWithoutViews();
 
     bool WaitForRenderingToComplete();
-    bool IsRenderingBusy();
 
     inline CSceneLightObject CreatePointLight( ISceneWorld pWorld )
     {

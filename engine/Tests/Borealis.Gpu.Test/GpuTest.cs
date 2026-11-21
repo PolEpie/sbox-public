@@ -94,20 +94,23 @@ public abstract class GpuTest
 	/// <summary>
 	/// A render target's mip 0, read back as bytes, after it was last used in <paramref name="from"/>.
 	/// </summary>
-	protected byte[] ReadBack( TextureHandle texture, ImageLayout from )
-	{
-		var info = Device.InfoOf( texture );
-		var size = info.Width * info.Height * info.Format.BytesPerBlock();
-		var buffer = Device.CreateBuffer( new BufferInfo { Size = size, Memory = MemoryLocation.Readback, Name = "Readback" } );
+	protected byte[] ReadBack( TextureHandle texture, ImageLayout from ) => ReadBack( Device, texture, from );
 
-		var list = Device.BeginCommandList( QueueType.Graphics, "Read back" );
+	/// <summary>A render target's mip 0 on <paramref name="device"/>, read back as bytes, after it was last used in <paramref name="from"/>.</summary>
+	protected static byte[] ReadBack( Device device, TextureHandle texture, ImageLayout from )
+	{
+		var info = device.InfoOf( texture );
+		var size = info.Width * info.Height * info.Format.BytesPerBlock();
+		var buffer = device.CreateBuffer( new BufferInfo { Size = size, Memory = MemoryLocation.Readback, Name = "Readback" } );
+
+		var list = device.BeginCommandList( QueueType.Graphics, "Read back" );
 		list.Barrier( TextureBarrier.Transition( texture, from, ImageLayout.CopySource, PipelineStage.AllCommands, MemoryAccess.MemoryWrite, PipelineStage.Transfer, MemoryAccess.TransferRead ) );
 		list.CopyTextureToBuffer( texture, 0, 0, buffer );
 		list.Barrier( new BufferBarrier { Buffer = buffer, SourceStage = PipelineStage.Transfer, SourceAccess = MemoryAccess.TransferWrite, DestinationStage = PipelineStage.Host, DestinationAccess = MemoryAccess.HostRead } );
-		Device.Wait( Device.Submit( list ) );
+		device.Wait( device.Submit( list ) );
 
-		var data = Device.Map( buffer ).ToArray();
-		Device.Destroy( buffer );
+		var data = device.Map( buffer ).ToArray();
+		device.Destroy( buffer );
 		return data;
 	}
 
