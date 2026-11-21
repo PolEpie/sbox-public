@@ -390,15 +390,15 @@ public class GraphicsContextTests : GpuTest
 
 	/// <summary>
 	/// Drawing into depth alone at a slice, as a custom object draws into a shadow map on Borealis.Gpu: with the mode
-	/// <c>Depth</c> asked for, vertex_color draws its Depth mode (depth_only.shader) into layer 1 of a two-layer depth, a
-	/// shader with no Depth mode (ui_filter) doesn't draw, layer 0 stays cleared, and the depth bias moves what the draw after
-	/// it writes by that many of the depth's units.
+	/// <c>Depth</c> asked for, scene_renderer_attribute_test draws its Depth mode (depth_only.shader) into layer 1 of a
+	/// two-layer depth, a shader with no Depth mode (ui_filter) doesn't draw, layer 0 stays cleared, and the depth bias moves
+	/// what the draw after it writes by that many of the depth's units.
 	/// </summary>
 	[TestMethod]
 	public void DepthAloneDrawsItsModeIntoTheSlice()
 	{
-		var color = library.Load( "shaders/vertex_color.shader" );
-		if ( color is null || library.Load( "shaders/depth_only.shader" ) is null ) Assert.Inconclusive( "vertex_color or depth_only isn't compiled" );
+		var color = library.Load( "shaders/scene_renderer_attribute_test.shader" );
+		if ( color is null || library.Load( "shaders/depth_only.shader" ) is null ) Assert.Inconclusive( "scene_renderer_attribute_test or depth_only isn't compiled" );
 
 		var list = Device.BeginCommandList( QueueType.Graphics, "Depth alone" );
 		var context = new GraphicsContext( Device, drawer, list );
@@ -425,7 +425,7 @@ public class GraphicsContextTests : GpuTest
 
 		context.SetTarget( default, depth, false, 1 );
 		context.Mode = "Depth";
-		Assert.IsTrue( context.DrawVertices( color, attributes, System.Runtime.InteropServices.MemoryMarshal.AsBytes( left.AsSpan() ), VertexStreamLayout.EngineVertex, 4, PrimitiveTopology.TriangleStrip ), "vertex_color draws its Depth mode" );
+		Assert.IsTrue( context.DrawVertices( color, attributes, System.Runtime.InteropServices.MemoryMarshal.AsBytes( left.AsSpan() ), VertexStreamLayout.EngineVertex, 4, PrimitiveTopology.TriangleStrip ), "scene_renderer_attribute_test draws its Depth mode" );
 		Assert.IsFalse( context.DrawQuad( library.Load( "shaders/ui_filter.shader" ), Composite( depth, 0, 0 ), new Vector4( 0, 0, Size, Size ), 0xFFFFFFFF ), "ui_filter has no Depth mode" );
 		drawer.DepthBias = (1000, 0);
 		Assert.IsTrue( context.DrawVertices( color, attributes, System.Runtime.InteropServices.MemoryMarshal.AsBytes( right.AsSpan() ), VertexStreamLayout.EngineVertex, 4, PrimitiveTopology.TriangleStrip ) );

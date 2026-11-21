@@ -56,6 +56,7 @@ public static class ContentBuffers
 			return GC.AllocateUninitializedArray<byte>( size );
 		}
 
+		Volatile.Write( ref lastRentTicks, System.Diagnostics.Stopwatch.GetTimestamp() );
 		var shift = ShiftOf( size );
 		var stack = free[shift - SmallestShift];
 		Volatile.Write( ref lastRent[shift - SmallestShift], Interlocked.Increment( ref rents ) );
@@ -117,7 +118,21 @@ public static class ContentBuffers
 		return true;
 	}
 
-	/// <summary>Let every kept array go, for tests.</summary>
+	static long lastRentTicks;
+
+	/// <summary>Seconds without a rent after which <see cref="TrimIdle"/> lets the kept arrays go.</summary>
+	public const double IdleSeconds = 30;
+
+	/// <summary>Let the kept arrays go once nothing has been rented for <paramref name="seconds"/>: nothing streams (a map has
+	/// gone, or everything it shows is in). Cheap enough for every frame.</summary>
+	public static void TrimIdle( double seconds = IdleSeconds )
+	{
+		if ( Interlocked.Read( ref keptBytes ) == 0 ) return;
+		if ( System.Diagnostics.Stopwatch.GetElapsedTime( Volatile.Read( ref lastRentTicks ) ).TotalSeconds < seconds ) return;
+		Clear();
+	}
+
+	/// <summary>Let every kept array go.</summary>
 	public static void Clear()
 	{
 		foreach ( var stack in free )

@@ -26,6 +26,8 @@ internal sealed partial class GameWindow : IDisposable
 	// With -borealisgpu: the window's swap chain on Borealis.Gpu, in place of Source 2's (docs/reference/borealis-gpu-path.md, stage 5)
 	BorealisGpuWindow borealis;
 
+	/// <summary>The window's swap chain on Borealis.Gpu (<c>-borealisgpu</c>); null on Source 2's device.</summary>
+	internal BorealisGpuWindow Borealis => borealis;
 
 	internal IntPtr Handle => window.Handle;
 

@@ -27,7 +27,7 @@ internal sealed partial class BorealisGpuRenderBackend
 			return;
 		}
 
-		TransferList().CopyBuffer( from, sourceOffset, to, destinationOffset, size );
+		TransferList( to ).CopyBuffer( from, sourceOffset, to, destinationOffset, size );
 	}
 
 	/// <summary>Every 32-bit value of the buffer's elements, as native fills the whole buffer.</summary>
@@ -46,18 +46,21 @@ internal sealed partial class BorealisGpuRenderBackend
 			return;
 		}
 
-		TransferList().FillBuffer( buffer, value, offset, size );
+		TransferList( buffer ).FillBuffer( buffer, value, offset, size );
 	}
 
 	/// <summary>
 	/// The list of uploads, with everything recorded in it so far finished before what's recorded next: a copy or fill outside a
-	/// block, which may read or write what an upload before it wrote.
+	/// block, which may read or write what an upload before it wrote. It writes <paramref name="destination"/>, so an upload
+	/// to that buffer after it waits for it (<see cref="SetBufferData"/>): a buffer cleared and then filled in part, as a
+	/// clutter batch's spheres are, keeps what was uploaded rather than the clear.
 	/// </summary>
-	GpuCommandList TransferList()
+	GpuCommandList TransferList( BufferHandle destination )
 	{
 		var uploads = UploadList();
 		uploads.Barrier( PipelineStage.AllCommands, MemoryAccess.MemoryWrite, PipelineStage.AllCommands, MemoryAccess.MemoryRead | MemoryAccess.MemoryWrite );
 		written.Clear();
+		written.Add( destination );
 		return uploads;
 	}
 
@@ -121,7 +124,7 @@ internal sealed partial class BorealisGpuRenderBackend
 			return;
 		}
 
-		TransferList().CopyBuffer( counter, 0, to, destinationOffset, sizeof( uint ) );
+		TransferList( to ).CopyBuffer( counter, 0, to, destinationOffset, sizeof( uint ) );
 	}
 
 	//
@@ -175,7 +178,7 @@ internal sealed partial class BorealisGpuRenderBackend
 			return;
 		}
 
-		var uploads = TransferList();
+		var uploads = TransferList( readback.Buffer );
 		uploads.CopyBuffer( source, offset, readback.Buffer, 0, size );
 		uploads.Barrier( new BufferBarrier { Buffer = readback.Buffer, SourceStage = PipelineStage.Transfer, SourceAccess = MemoryAccess.TransferWrite, DestinationStage = PipelineStage.Host, DestinationAccess = MemoryAccess.HostRead } );
 		uploadReadbacks.Add( readback );

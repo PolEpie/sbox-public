@@ -898,6 +898,10 @@ internal sealed class SurfaceProgram : IDisposable
 		public CompiledPass Pass;
 		public ShaderHandle Vertex, Pixel;
 		public BindingLayoutHandle[] Sets;
+
+		/// <summary>The pixel stage's outputs, read once (<see cref="FitOutputs"/>); its modules without some of them, by locations.</summary>
+		internal IReadOnlyList<SpirvInput> PixelOutputs;
+		internal readonly Dictionary<uint, ShaderHandle> PixelWithoutOutputs = new();
 	}
 
 	/// <summary>The device it's made on.</summary>
@@ -1359,7 +1363,38 @@ internal sealed class SurfaceProgram : IDisposable
 			if ( normals ) BackendDevice.AddNormalsTarget( ref info, pixel && !state.DrawsTranslucent && WritesNormals( pass ) );
 		}
 
+		FitOutputs( ref info, pass );
 		return info;
+	}
+
+	/// <summary>
+	/// Leave out of a pipeline's pixel stage the outputs its colour targets don't take, at a location with no target or one
+	/// of the other numeric type, as <c>BackendDevice.FitOutputs</c> does for compiled variants: a forward pass's normals
+	/// output at target 1 where the pass has no normals target. Location 0 stays (alpha to coverage reads its alpha).
+	/// </summary>
+	void FitOutputs( ref GraphicsPipelineInfo info, PassObjects pass )
+	{
+		if ( !info.FragmentShader.IsValid || info.FragmentShader != pass.Pixel || pass.Pass.Pixel?.Spirv is not { } spirv ) return;
+
+		var colors = info.ColorFormats ?? [];
+		lock ( pass.PixelWithoutOutputs )
+		{
+			pass.PixelOutputs ??= SpirvReflection.Read( spirv ).Outputs;
+			var unused = 0u;
+			foreach ( var output in pass.PixelOutputs )
+			{
+				if ( output.Location is < 1 or >= 32 ) continue;
+				var fits = output.Location < colors.Length && colors[output.Location] != Format.Unknown && colors[output.Location].IsInteger() == (output.Kind != SpirvScalar.Float);
+				if ( !fits ) unused |= 1u << output.Location;
+			}
+
+			if ( unused == 0 ) return;
+
+			// None made (an output reached other than by whole loads and stores): the stage's own
+			if ( !pass.PixelWithoutOutputs.TryGetValue( unused, out var module ) )
+				pass.PixelWithoutOutputs[unused] = module = SpirvReflection.WithoutOutputs( spirv, unused ) is { } changed ? device.Gpu.CreateShader( changed, $"{Compiled.Name} {pass.Pass.Pixel.Entry} without outputs {unused:x}" ) : default;
+			if ( module.IsValid ) info.FragmentShader = module;
+		}
 	}
 
 	/// <summary>
@@ -1422,6 +1457,16 @@ internal sealed class SurfaceProgram : IDisposable
 			pipelines.Clear();
 			toolsPipelines.Clear();
 			immediatePipelines.Clear();
+		}
+
+		// The pixel modules made without some outputs, now no pipeline is made with them
+		foreach ( var pass in passes.Values )
+		{
+			lock ( pass.PixelWithoutOutputs )
+			{
+				foreach ( var module in pass.PixelWithoutOutputs.Values.Where( m => m.IsValid ) ) device.Gpu.Destroy( module );
+				pass.PixelWithoutOutputs.Clear();
+			}
 		}
 	}
 }

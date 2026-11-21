@@ -90,9 +90,14 @@ public sealed class ModelFile
 	}
 
 	/// <summary>The same model with other meshes (as many, in the same order): a copy with its meshes cooked (<see cref="MeshletCooker.Cook"/>).</summary>
-	internal ModelFile WithMeshes( IReadOnlyList<ModelMesh> meshes ) => new( remapping, remappingStarts )
+	internal ModelFile WithMeshes( IReadOnlyList<ModelMesh> meshes ) => Copy( Name, meshes, HasAnimation );
+
+	/// <summary>This model as a model made on it reads (<see cref="Read(byte[], Func{string, byte[]})"/>): the same, under that model's name, with its animation.</summary>
+	ModelFile MadeOn( string name, bool hasAnimation ) => Copy( name, Meshes, HasAnimation || hasAnimation );
+
+	ModelFile Copy( string name, IReadOnlyList<ModelMesh> meshes, bool hasAnimation ) => new( remapping, remappingStarts )
 	{
-		Name = Name,
+		Name = name,
 		Flags = Flags,
 		Meshes = meshes,
 		LodSwitchDistances = LodSwitchDistances,
@@ -105,9 +110,23 @@ public sealed class ModelFile
 		Mins = Mins,
 		Maxs = Maxs,
 		KeyValues = KeyValues,
-		HasAnimation = HasAnimation,
+		HasAnimation = hasAnimation,
 		HasPhysics = HasPhysics,
 	};
+
+	/// <summary>
+	/// The base model a model's key values name (<c>base_model_resource</c>, as ModelDoc compiles a model's base model), or
+	/// null for none.
+	/// </summary>
+	internal static string BaseModel( string keyValues )
+	{
+		if ( string.IsNullOrEmpty( keyValues ) || !keyValues.Contains( "base_model_resource", StringComparison.Ordinal ) ) return null;
+		var match = BaseModelKey.Match( keyValues );
+		return match.Success && match.Groups[1].Length > 0 ? match.Groups[1].Value : null;
+	}
+
+	// base_model_resource = resource:"models/citizen/citizen.vmdl", the value's type prefix optional
+	static readonly System.Text.RegularExpressions.Regex BaseModelKey = new( @"\bbase_model_resource\s*=\s*(?:[A-Za-z_]+:)?""([^""]*)""", System.Text.RegularExpressions.RegexOptions.CultureInvariant );
 
 	/// <summary>
 	/// The model bone each of a mesh's bones is (<c>m_remappingTable</c> from <c>m_remappingTableStarts[mesh]</c>);
@@ -200,14 +219,32 @@ public sealed class ModelFile
 
 	/// <summary>
 	/// Read a model from its <c>.vmdl_c</c> bytes. Meshes kept in <c>.vmesh_c</c> files of their own are read through
-	/// <paramref name="external"/> (a compiled path to bytes, or null when it isn't there); without it they throw.
+	/// <paramref name="external"/> (a compiled path to bytes, or null when it isn't there); without it they throw. A model
+	/// made on a base model (<c>base_model_resource</c> in its key values) reads as its base, read through
+	/// <paramref name="external"/> too, under its own name.
 	/// </summary>
-	public static ModelFile Read( byte[] data, Func<string, byte[]> external = null )
+	public static ModelFile Read( byte[] data, Func<string, byte[]> external = null ) => Read( data, external, 0 );
+
+	/// <summary>How deep base models may nest before a chain of them counts as a loop.</summary>
+	const int MostBaseModels = 8;
+
+	static ModelFile Read( byte[] data, Func<string, byte[]> external, int depth )
 	{
 		var resource = ResourceFile.Read( data );
 		if ( Kv3.Read( resource.Block( "DATA" ) ) is not Dictionary<string, object> root ) throw new InvalidDataException( "Model DATA isn't an object" );
 		var control = resource.Has( "CTRL" ) ? Kv3.Read( resource.Block( "CTRL" ) ) as Dictionary<string, object> : null;
 		var name = root.Get( "m_name" ) as string;
+		var info2 = root.Get( "m_modelInfo" ) as Dictionary<string, object>;
+
+		// A model made on a base model (ModelDoc's base model, which adds animation to another model) is its base: meshes,
+		// skeleton, groups and physics, with its own animation added (CModel_Imp::InitFromV0Data's InitFromModel)
+		if ( BaseModel( info2?.Get( "m_keyValueText" ) as string ) is { } basePath )
+		{
+			if ( depth >= MostBaseModels ) throw new InvalidDataException( $"{name}'s base models nest more than {MostBaseModels} deep" );
+			var bytes = external?.Invoke( basePath ) ?? throw new FileNotFoundException( $"{name} is made on {basePath}, which isn't there" );
+			return Read( bytes, external, depth + 1 ).MadeOn( name, hasAnimation: control?.Get( "embedded_animation" ) is not null );
+		}
+
 		var blocks = BlockTable( resource );
 
 		var references = root.Get( "m_refMeshes" ) as object[] ?? [];
@@ -264,7 +301,6 @@ public sealed class ModelFile
 			.Select( x => new MaterialGroup( x.Get( "m_name" ) as string ?? "", Kv.Strings( x.Get( "m_materials" ) ) ) )
 			.ToArray();
 
-		var info2 = root.Get( "m_modelInfo" ) as Dictionary<string, object>;
 		return new ModelFile( Kv.Numbers( root.Get( "m_remappingTable" ) ).Select( x => (short)x ).ToArray(), Kv.Numbers( root.Get( "m_remappingTableStarts" ) ).Select( x => (ushort)x ).ToArray() )
 		{
 			Name = name,

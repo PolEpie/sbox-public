@@ -259,6 +259,7 @@ public sealed partial class BackendDevice
 	readonly Dictionary<RenderMesh, ModelLife> modelLives = new( ReferenceEqualityComparer.Instance );
 	readonly List<ModelLife> unheldModels = new();
 	readonly List<RenderMesh> freeing = new();
+	HashSet<string> freedPaths;
 	List<string> warnings;
 
 	/// <summary>Seconds a model nothing holds is kept, so the same map loaded again soon finds it.</summary>
@@ -363,8 +364,17 @@ public sealed partial class BackendDevice
 					{
 						modelLives.Remove( mesh );
 						freeing.Add( mesh );
+						(freedPaths ??= new( StringComparer.OrdinalIgnoreCase )).Add( life.Key.Path );
 					}
 				}
+			}
+
+			// A freed model's file (its vertices and indices as read) goes too, unless another of its mesh group sets is still made
+			if ( freedPaths is { Count: > 0 } )
+			{
+				foreach ( var key in streamedModels.Keys ) freedPaths.Remove( key.Path );
+				foreach ( var path in freedPaths ) modelReads.TryRemove( path, out _ );
+				freedPaths.Clear();
 			}
 
 			if ( warnings is not null )
@@ -384,7 +394,17 @@ public sealed partial class BackendDevice
 			freeing.Clear();
 		}
 
+		lock ( freedMaterials )
+		{
+			if ( freedMaterials.Count > 0 )
+			{
+				gpuDrivenTables?.ForgetMaterials( freedMaterials );
+				freedMaterials.Clear();
+			}
+		}
+
 		gpuDrivenTables?.FreeEmptyPages();
+		Borealis.Source2.ContentBuffers.TrimIdle();
 	}
 
 	/// <summary>

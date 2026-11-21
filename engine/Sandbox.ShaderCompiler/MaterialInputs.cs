@@ -63,6 +63,13 @@ public sealed partial class MaterialInputs
 	public IReadOnlyList<(string Name, string Kind, float[] Value)> Attributes { get; init; }
 
 	/// <summary>
+	/// The shader's version, which its materials record (<c>m_shaderVersion</c>) for code that reads one layout or another
+	/// by it (<c>Source( "ShaderVersion" )</c>): a module's <c>// HEADER: Version = 1;</c>, as a <c>.shader</c>'s HEADER
+	/// <c>Version</c>. 0 when it declares none.
+	/// </summary>
+	public int Version { get; init; }
+
+	/// <summary>
 	/// The made texture whose first input's size the material records (<c>TextureAttribute( RepresentativeTexture, g_tColor )</c>):
 	/// what tools map a face's uvs by. Null for none.
 	/// </summary>
@@ -207,7 +214,7 @@ public sealed partial class MaterialInputs
 		if ( representative is not null && !textures.Exists( t => t.Name == representative ) && textures.Find( t => t.Name.TrimEnd( '0', '1', '2', '3', '4', '5', '6', '7', '8', '9' ) == representative ) is { } numbered )
 			representative = numbered.Name;
 
-		return new MaterialInputs { Inputs = inputs, Textures = [.. textures.Where( t => used.Contains( t.Name ) )], Declared = textures, Attributes = attributes, RepresentativeTexture = representative, Parameters = parameters, ExpressionAttributes = expressionAttributes, ShownTextures = [.. textures.Where( t => (used.Contains( t.Name ) || conditioned.Contains( t.Name )) && !hidden.Contains( t.Name ) )], FeatureLines = string.Join( "\n", featureLines ) };
+		return new MaterialInputs { Version = HeaderVersion().Match( module.Text ) is { Success: true } version ? int.Parse( version.Groups[1].Value, CultureInfo.InvariantCulture ) : 0, Inputs = inputs, Textures = [.. textures.Where( t => used.Contains( t.Name ) )], Declared = textures, Attributes = attributes, RepresentativeTexture = representative, Parameters = parameters, ExpressionAttributes = expressionAttributes, ShownTextures = [.. textures.Where( t => (used.Contains( t.Name ) || conditioned.Contains( t.Name )) && !hidden.Contains( t.Name ) )], FeatureLines = string.Join( "\n", featureLines ) };
 	}
 
 	/// <summary>The lines as one text without comments, so declarations spanning lines read as one.</summary>
@@ -266,6 +273,9 @@ public sealed partial class MaterialInputs
 
 	[GeneratedRegex( @"//[^\n]*" )]
 	private static partial Regex LineComment();
+
+	[GeneratedRegex( @"^[ \t]*//[ \t]*HEADER:[ \t]*Version[ \t]*=[ \t]*(\d+)[ \t]*;", RegexOptions.Multiline )]
+	private static partial Regex HeaderVersion();
 
 	[GeneratedRegex( @"\bCreateInputTexture(?<type>2D|Cube|3D)\s*\((?<args>(?:[^()]|\((?:[^()]|\([^()]*\))*\))*)\)" )]
 	private static partial Regex InputDeclaration();

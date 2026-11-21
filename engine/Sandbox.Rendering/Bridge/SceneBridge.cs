@@ -213,6 +213,10 @@ internal sealed partial class SceneBridge : ISceneRenderer
 	/// </summary>
 	internal const ulong ViewIdleFrames = 600;
 
+	// The frame FreeInvalid last ran in, and how often BeginFrame runs it while no view is prepared
+	ulong freedFrame;
+	const ulong FreeIdleEveryFrames = 60;
+
 	/// <summary>
 	/// Release views whose camera went away or that haven't rendered for <see cref="ViewIdleFrames"/>, and worlds deleted,
 	/// without being reported.
@@ -220,6 +224,7 @@ internal sealed partial class SceneBridge : ISceneRenderer
 	void FreeInvalid()
 	{
 		var frame = Application.FrameCount;
+		freedFrame = frame;
 		foreach ( var (key, state) in views )
 		{
 			if ( state.IsOrphaned || (!state.Rendering && frame - state.LastFrame > ViewIdleFrames) ) invalidViews.Add( key );
@@ -343,6 +348,24 @@ internal sealed partial class SceneBridge : ISceneRenderer
 	/// <inheritdoc/>
 	public void BeginFrame()
 	{
+		// Views and worlds are let go of as views are prepared; with none prepared (the menu has no scene of its own) a
+		// closed game's worlds and views would stay until the next scene renders
+		if ( rendering is null && Gpu is { } device && Application.FrameCount - freedFrame > FreeIdleEveryFrames )
+		{
+			device.FollowFrame();
+			FreeInvalid();
+			// The shadow caches evict as views render, which none does now
+			Borealis.Shadows.ShadowMapper.Update();
+			Borealis.Shadows.ShadowMapper.ForgetStaleCascades();
+
+			// What the last view drew from (its world's drawer and lighting), set again by the next view prepared
+			if ( gpuView is not null )
+			{
+				gpuView.RenderSceneObject = null;
+				gpuView.LightingWorld = null;
+			}
+		}
+
 		// Until the game first draws its scene (behind the loading screen, and in the frames the game starts in after its load)
 		// nothing renders the scene's world, so nothing would ask for its models until the first frame that does: its
 		// objects are applied each frame instead, as they arrive, so their models are read and made, within the device's
@@ -368,17 +391,19 @@ internal sealed partial class SceneBridge : ISceneRenderer
 
 		// Once its models are made, its camera's view renders unseen every few frames: the first frame after the load finds
 		// the view's resident lists, child views (water's refraction), pipelines and targets made, and its textures streamed
-		if ( !WarmWhileLoading || gpu.Services.LoadingModels || warmSize.x < 1 || Application.FrameCount < warmFrame || render.UnseenRenders >= MaxUnseenRenders ) return;
-		if ( ShownCamera( scene ) is not { } camera ) return;
+		if ( !WarmWhileLoading || gpu.Services.LoadingModels || Application.FrameCount < warmFrame || render.UnseenRenders >= MaxUnseenRenders ) return;
+		if ( !WarmTarget( out var size, out var samples ) || ShownCamera( scene ) is not { } camera ) return;
 
 		warmFrame = Application.FrameCount + WarmEveryFrames;
 		render.UnseenRenders++;
 		using var zone = Borealis.Zones.LoadWarm.Start();
 		using var context = new Sandbox.Engine.GlobalContext.GlobalContextScope( Sandbox.Engine.GlobalContext.Game );
+		warmSize = size;
+		warmSamples = samples;
 		warming = true;
 		try
 		{
-			camera.AddToRenderList( default, warmSize );
+			camera.AddToRenderList( default, size );
 		}
 		finally
 		{
@@ -402,6 +427,34 @@ internal sealed partial class SceneBridge : ISceneRenderer
 		}
 
 		return best;
+	}
+
+	/// <summary>
+	/// The size and samples an unseen render draws at: the game window's, as its first frame will draw; else the last window a
+	/// camera drew into. The menu draws no scene, so before a game's first frame no camera has.
+	/// </summary>
+	bool WarmTarget( out Vector2 size, out int samples )
+	{
+		var window = Sandbox.Engine.GameWindow.Current?.Borealis;
+		return WarmTarget( window?.Size, window?.Samples ?? 1, warmSize, warmSamples, out size, out samples );
+	}
+
+	/// <summary>
+	/// <see cref="WarmTarget(out Vector2, out int)"/> from the game window's size and samples (null without one) and the last
+	/// window a camera drew into. False with neither.
+	/// </summary>
+	internal static bool WarmTarget( Vector2? window, int windowSamples, Vector2 last, int lastSamples, out Vector2 size, out int samples )
+	{
+		if ( window is { x: >= 1, y: >= 1 } shown )
+		{
+			size = shown;
+			samples = Math.Max( windowSamples, 1 );
+			return true;
+		}
+
+		size = last;
+		samples = Math.Max( lastSamples, 1 );
+		return size.x >= 1 && size.y >= 1;
 	}
 
 	/// <summary>Whether a loading scene's camera renders unseen once its models are made (<see cref="BeginFrame"/>; on). For comparisons.</summary>

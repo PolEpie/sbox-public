@@ -1063,6 +1063,30 @@ internal sealed class GpuDrivenTables : IDisposable
 	// Stages that have reached the limit: none, mostly, and then nothing is looked up per draw
 	int churning;
 
+	/// <summary>
+	/// Forget the records of materials that were freed: their keys held the materials, and through them their textures, for
+	/// good (a map's materials each load). The records' bytes stay in the table, so a draw record that still names one reads
+	/// what it was written with; a material drawn again makes new ones.
+	/// </summary>
+	public void ForgetMaterials( IReadOnlySet<GpuMaterial> freed )
+	{
+		if ( freed.Count == 0 ) return;
+		lock ( materialRecords )
+		{
+			foreach ( var key in materialRecords.Keys )
+			{
+				if ( key.Material is { } material && freed.Contains( material ) ) materialRecords.TryRemove( key, out _ );
+			}
+
+			foreach ( var (stage, made) in recordsPerStage )
+			{
+				if ( stage.Material is null || !freed.Contains( stage.Material ) ) continue;
+				recordsPerStage.TryRemove( stage, out _ );
+				if ( made >= MaxRecordsPerStage ) Interlocked.Decrement( ref churning );
+			}
+		}
+	}
+
 	/// <summary>Records in each table, for reports.</summary>
 	public (int Geometry, int Draws, int Materials) Records
 	{

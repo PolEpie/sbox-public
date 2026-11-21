@@ -90,6 +90,72 @@ public class ContentLifetimeTests : GpuTest
 	}
 
 	/// <summary>
+	/// A freed material's GPU-driven records are forgotten at the next frame's start: their keys held the material (and its
+	/// textures) for good, a map's worth each load.
+	/// </summary>
+	[TestMethod]
+	public void AFreedMaterialsRecordsAreForgotten()
+	{
+		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true };
+		var path = new[] { "materials/default.vmat", "materials/dev/dev_measuregeneric01.vmat", "materials/dev/reflectivity_30.vmat" }.FirstOrDefault( p => backend.Content.TryRead( p ) is not null );
+		if ( path is null ) { Assert.Inconclusive( "No compiled dev material" ); return; }
+
+		var material = backend.ModelMaterial( path );
+		Assert.IsNotNull( material, path );
+		var key = new GpuDrivenTables.MaterialRecordKey( material, 0, null, false, 0 );
+		backend.GpuDrivenTables.Material( key, 16, 0, static ( _, bytes ) => bytes.Clear() );
+		Assert.IsTrue( backend.GpuDrivenTables.TryMaterial( key, out _ ), "the record is made" );
+
+		backend.BeginFrame();
+		Assert.IsTrue( backend.GpuDrivenTables.TryMaterial( key, out _ ), "kept while the material is held" );
+
+		backend.ReleaseModelMaterial( path );
+		backend.BeginFrame();
+		Assert.IsFalse( backend.GpuDrivenTables.TryMaterial( key, out _ ), "forgotten once the material is freed" );
+		Device.WaitIdle();
+	}
+
+	/// <summary>
+	/// A loaded model freed after its last holder let go takes its file as read with it (its vertices and indices): the
+	/// reads of a map's models stayed for good, about 270 MiB after three rounds of a large map.
+	/// </summary>
+	[TestMethod]
+	public void AFreedModelsFileGoesWithIt()
+	{
+		const string box = "models/dev/box.vmdl";
+		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true };
+		if ( backend.Content.TryRead( box ) is null ) { Assert.Inconclusive( $"{box} isn't built" ); return; }
+
+		RenderMesh mesh = null;
+		for ( int i = 0; i < 500 && mesh is null; i++ )
+		{
+			backend.BeginFrame();
+			mesh = backend.LoadModelAsync( box, ulong.MaxValue, out var pending, pin: false );
+			if ( mesh is null && !pending ) break;
+			if ( pending ) System.Threading.Thread.Sleep( 2 );
+		}
+		Assert.IsNotNull( mesh, "the model loads" );
+		Assert.IsTrue( backend.ModelRead( box ), "its file is kept while the model is" );
+
+		var grace = BackendDevice.ModelGraceSeconds;
+		BackendDevice.ModelGraceSeconds = 0;
+		try
+		{
+			backend.HoldModel( mesh );
+			backend.ReleaseModel( mesh );
+			backend.BeginFrame();
+			Assert.IsTrue( ((BackendModel)mesh.Geometry).Freed, "let go, it's freed" );
+			Assert.IsFalse( backend.ModelRead( box ), "and its file with it" );
+		}
+		finally
+		{
+			BackendDevice.ModelGraceSeconds = grace;
+		}
+
+		Device.WaitIdle();
+	}
+
+	/// <summary>
 	/// A model's bytes with its first mesh's buffers (its <c>MBUF</c> block) empty: one vertex and one index buffer of
 	/// 0 x 0 bytes, as an empty run-time mesh saves them (a voxel chunk with no faces).
 	/// </summary>

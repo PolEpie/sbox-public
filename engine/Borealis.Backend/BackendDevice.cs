@@ -21,6 +21,9 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	readonly Stopwatch clock = Stopwatch.StartNew();
 	readonly Dictionary<string, GpuTexture> loadedTextures = new( StringComparer.OrdinalIgnoreCase );
 	readonly Dictionary<string, GpuMaterial> sharedMaterials = new( StringComparer.OrdinalIgnoreCase );
+
+	// Materials freed since the last frame's start, whose GPU-driven records are forgotten then (GpuDrivenTables.ForgetMaterials)
+	readonly HashSet<GpuMaterial> freedMaterials = new( ReferenceEqualityComparer.Instance );
 	readonly Dictionary<IntPtr, SyncPoint> semaphores = new();
 	readonly Dictionary<IntPtr, BufferHandle> constantBuffers = new();
 	readonly List<(SyncPoint Point, BufferHandle Buffer, int Bytes, GpuReadback Callback)> readbacks = new();
@@ -1543,7 +1546,10 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 			if ( --life.Holders > 0 || life.Pinned ) return;
 			materialLives.Remove( path );
 			released = sharedMaterials.GetValueOrDefault( path ) as IStreamDependent;
-			sharedMaterials.Remove( path );
+			// Not disposed here: forgotten by the GPU-driven tables at the next frame's start
+#pragma warning disable CA2000
+			if ( sharedMaterials.Remove( path, out var gone ) && gone is not null ) lock ( freedMaterials ) freedMaterials.Add( gone );
+#pragma warning restore CA2000
 			textures = life.Textures;
 			MaterialsFreed++;
 		}
@@ -1594,7 +1600,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 		// A material with features the surface doesn't do stays on its .shader; once the shader is a surface alone (no
 		// .shader_c) there's nothing else to draw it with, so the surface takes it without them
 		var shader = Shaders.Load( file.Shader );
-		if ( (shader is not null && !ConvertedMaterial.Accepts( compiled, file )) || tier.ConvertMaterial?.Invoke( path ) == false ) return null;
+		if ( (shader is not null && !ConvertedMaterial.Accepts( compiled, file, shader )) || tier.ConvertMaterial?.Invoke( path ) == false ) return null;
 		tier.CountConverted( path );
 		var converted = ConvertedMaterial.Create( compiled, WithFeatureRules( file ), path, MaterialTextureFile );
 
@@ -3342,6 +3348,10 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 			lodStore?.BeginFrame();
 			GpuDrivenFrame++;
 			loadFrame++;
+
+			// Resident culls forget last frame's assignments and stale calls here too, not only when a view culls: with nothing
+			// rendering (the menu) they kept a closed game's views, and those views' visibility resources
+			ResidentCulls.BeginFrame( GpuDrivenFrame, Gpu );
 			TimeFrame();
 			Poll();
 		}

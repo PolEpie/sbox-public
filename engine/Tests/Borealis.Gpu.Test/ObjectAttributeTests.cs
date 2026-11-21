@@ -207,26 +207,26 @@ public class ObjectAttributeTests : GpuTest
 	}
 
 	/// <summary>
-	/// A blendable material compiled for shader version 1 (<c>m_shaderVersion</c>, read through <c>Source( ShaderVersion )</c>)
-	/// takes its roughness from its normal map's blue channel. Version 0's layout would read it from the metalness channel
-	/// (black in <c>simple_blend</c>), so its roughness view (<c>ToolsVisMode</c> 12) is lit only with the version filled in.
-	/// The view is a specialization constant: changing it picks another variant, and changing it back draws the lit frame again,
-	/// through material objects as by reflection.
+	/// A blendable material compiled for shader version 1 (<c>m_shaderVersion</c>, which blendable.slang's <c>Version</c>
+	/// reads through <c>Source( "ShaderVersion" )</c>) takes its roughness from its normal map's blue channel. Version 0's
+	/// layout would read it from the metalness channel (black in <c>simple_blend</c>), so its roughness view
+	/// (<c>ToolsVisMode</c> 12) is lit only with the version filled in. The view is a specialization constant: changing it
+	/// picks another variant, and changing it back draws the lit frame again, with material objects on and off.
 	/// </summary>
 	[TestMethod]
 	public void BlendableMaterialsReadTheirShaderVersion()
 	{
 		using var backend = new BackendDevice( Device );
-		backend.Surfaces.ConvertShaders = false;   // blendable.shader itself, not the surface standing in for it
 		var previousHost = RenderHost.Current;
 		RenderHost.Current = new BackendRenderHost( backend );
 		try
 		{
 			using var system = new RenderSystem { ParallelRecording = false };
 			using var target = ViewTarget.Create( new Vector2Int( Width, Height ), 1, TextureFormat.RGBA16161616F, TextureFormat.D32FS8, "Shader version test" );
-			var material = (BackendMaterial)backend.LoadMaterial( "materials/dev/simple/simple_blend.vmat" );
-			if ( material.Shader is null ) Assert.Inconclusive( "blendable.shader isn't built" );
-			Assert.AreEqual( 1, material.ShaderVersion, "simple_blend is compiled for blendable's version 1" );
+			if ( backend.Content.Find( "materials/dev/simple/simple_blend.vmat" ) is null ) Assert.Inconclusive( "simple_blend isn't built" );
+			var material = backend.LoadMaterial( "materials/dev/simple/simple_blend.vmat" ) as ConvertedMaterial;
+			Assert.IsNotNull( material, "simple_blend draws as the blendable surface" );
+			Assert.AreEqual( 1, material.File.ShaderVersion, "simple_blend is compiled for blendable's version 1" );
 
 			var world = new RenderWorld();
 			world.Lighting.SunShadowCascades = 0;
@@ -397,10 +397,7 @@ public class ObjectAttributeTests : GpuTest
 	public void ResidentMeshesLitApartShareAGroup()
 	{
 		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDriven = true, GpuDrivenVisibility = true };
-		foreach ( var shader in (string[])["shaders/complex.shader", "shaders/depth_only.shader"] )
-		{
-			if ( backend.Shaders.GpuDriven( backend.Shaders.Load( shader ) ) is null ) Assert.Inconclusive( $"{shader} has no GPU-driven variant: ShaderCompiler -gpudriven" );
-		}
+		GpuDrivenTests.RequireGpuDrivenDepth( backend );
 
 		var previousHost = RenderHost.Current;
 		RenderHost.Current = new BackendRenderHost( backend );
@@ -494,10 +491,7 @@ public class ObjectAttributeTests : GpuTest
 	public void ResidentGroupsKeepTheirOwnersAcrossARescan()
 	{
 		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDriven = true, GpuDrivenVisibility = true, GpuDrivenResidentMeshes = true };
-		foreach ( var shader in (string[])["shaders/complex.shader", "shaders/depth_only.shader"] )
-		{
-			if ( backend.Shaders.GpuDriven( backend.Shaders.Load( shader ) ) is null ) Assert.Inconclusive( $"{shader} has no GPU-driven variant: ShaderCompiler -gpudriven" );
-		}
+		GpuDrivenTests.RequireGpuDrivenDepth( backend );
 
 		var previousHost = RenderHost.Current;
 		RenderHost.Current = new BackendRenderHost( backend );
@@ -567,10 +561,7 @@ public class ObjectAttributeTests : GpuTest
 	public void ResidentListsOutlastAMeshDrawnAnotherWayEachFrame()
 	{
 		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDriven = true, GpuDrivenVisibility = true, GpuDrivenResidentMeshes = true };
-		foreach ( var shader in (string[])["shaders/complex.shader", "shaders/depth_only.shader"] )
-		{
-			if ( backend.Shaders.GpuDriven( backend.Shaders.Load( shader ) ) is null ) Assert.Inconclusive( $"{shader} has no GPU-driven variant: ShaderCompiler -gpudriven" );
-		}
+		GpuDrivenTests.RequireGpuDrivenDepth( backend );
 
 		var previousHost = RenderHost.Current;
 		RenderHost.Current = new BackendRenderHost( backend );

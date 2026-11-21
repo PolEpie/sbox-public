@@ -11,15 +11,15 @@ namespace BorealisGpuTests;
 public class ShaderAttributesTests
 {
 	/// <summary>
-	/// complex.shader's dynamic combos: none set packs to zero, each set alone packs differently, the same values pack the
-	/// same, and a value past a byte doesn't pack (the caller keys by name).
+	/// A lit shader's dynamic combos (surface_test_rock's): none set packs to zero, each set alone packs differently, the
+	/// same values pack the same, and a value past a byte doesn't pack (the caller keys by name).
 	/// </summary>
 	[TestMethod]
 	public void ComboBitsTellCombosApart()
 	{
-		var shader = ShaderFile.Read( ShaderFileTests.Files.Read( "shaders/complex.shader" ), "complex" );
+		var shader = ShaderFile.Read( ShaderFileTests.Files.Read( "shaders/surface_test_rock.shader" ), "surface_test_rock" );
 		var names = new[] { ShaderProgramType.Vertex, ShaderProgramType.Pixel }.SelectMany( t => shader[t]?.DynamicCombos ?? [] ).Select( c => c.Name ).Distinct().ToArray();
-		if ( names.Length == 0 ) Assert.Inconclusive( "complex.shader has no dynamic combos" );
+		if ( names.Length == 0 ) Assert.Inconclusive( "surface_test_rock.shader has no dynamic combos" );
 
 		Assert.IsTrue( new ShaderAttributes().ComboBits( shader, out var none ) );
 		Assert.AreEqual( 0UL, none );
@@ -115,7 +115,7 @@ public class DrawConstantsTests : GpuTest
 		using var defaults = new ShaderDefaults( Device );
 		using var drawer = new ShaderDrawer( Device, library, defaults );
 		var compared = 0;
-		foreach ( var path in new[] { "shaders/sprite.shader", "shaders/line.shader", "shaders/tools_generic.shader", "shaders/tools_2d_generic.shader", "shaders/copytexture.shader", "shaders/complex.shader" } )
+		foreach ( var path in new[] { "shaders/sprite.shader", "shaders/line.shader", "shaders/tools_generic.shader", "shaders/tools_2d_generic.shader", "shaders/copytexture.shader", "shaders/surface_test_rock.shader" } )
 		{
 			var shader = library.Load( path );
 			if ( shader is null ) continue;
