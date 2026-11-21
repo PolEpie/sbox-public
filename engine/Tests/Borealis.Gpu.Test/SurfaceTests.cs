@@ -2,6 +2,8 @@ using Borealis;
 using Borealis.Backend;
 using Borealis.Gpu;
 using Borealis.Source2;
+using Borealis.Source2.Materials;
+using Borealis.Source2.Shaders;
 using Sandbox;
 using Sandbox.BorealisLab.Surfaces;
 using Sandbox.ShaderCompiler;
@@ -1826,6 +1828,44 @@ public class SurfaceTests : GpuTest
 		var material = (SurfaceMaterial)backend.Surfaces.CreateMaterial( Path.Combine( Core, "shaders", "glass.slang" ), null, new Dictionary<string, float[]>() );
 		Assert.IsTrue( material.IsTranslucent );
 		Assert.IsTrue( material.RenderState is { Blend: SurfaceBlend.Opaque, Translucent: true } );
+	}
+
+	/// <summary>
+	/// A translucency feature a material's shader declares but never reads doesn't make it blend, as on native: blendable.shader
+	/// has common/features.hlsl's <c>F_ADDITIVE_BLEND</c> and no combo follows it, so a blendable material that kept the value
+	/// from another shader (Unicycle Frenzy's start pad trim) is opaque and converts to blendable.slang; complex's own
+	/// translucency features still blend.
+	/// </summary>
+	[TestMethod]
+	public void TranslucencyFeaturesTheShaderDoesntReadDontBlend()
+	{
+		static MaterialFile MaterialOf( string shader, Dictionary<string, int> ints ) => new()
+		{
+			Name = "trim",
+			Shader = shader,
+			Ints = ints,
+			Floats = new Dictionary<string, float>(),
+			Vectors = new Dictionary<string, float[]>(),
+			Textures = new Dictionary<string, string>(),
+			IntAttributes = new Dictionary<string, int>(),
+		};
+
+		var blendable = ShaderFile.Read( ShaderFileTests.Files.Read( "shaders/blendable.shader" ), "blendable" );
+		var complex = ShaderFile.Read( ShaderFileTests.Files.Read( "shaders/complex.shader" ), "complex" );
+		Assert.IsTrue( blendable.FeatureIndex( "F_ADDITIVE_BLEND" ) >= 0, "blendable.shader declares F_ADDITIVE_BLEND" );
+		Assert.IsFalse( blendable.FeatureSelectsCode( blendable.FeatureIndex( "F_ADDITIVE_BLEND" ) ) );
+		Assert.IsTrue( blendable.FeatureSelectsCode( blendable.FeatureIndex( "F_MULTIBLEND" ) ) );
+		Assert.IsTrue( complex.FeatureSelectsCode( complex.FeatureIndex( "F_TRANSLUCENT" ) ) );
+
+		var trim = MaterialOf( "shaders/blendable.shader", new() { ["F_MULTIBLEND"] = 1, ["F_ADDITIVE_BLEND"] = 1 } );
+		using var trimMaterial = new BackendMaterial( "trim", blendable, trim, null );
+		Assert.IsFalse( trimMaterial.IsTranslucent, "a blendable material blends" );
+		var surface = Compiler().CompileSurface( Path.Combine( Core, "shaders", "blendable.slang" ) );
+		Assert.IsTrue( ConvertedMaterial.Accepts( surface, trim, blendable ), "blendable.slang doesn't take the material" );
+
+		var glass = MaterialOf( "shaders/complex.shader", new() { ["F_TRANSLUCENT"] = 1, ["F_ADDITIVE_BLEND"] = 1 } );
+		using var glassMaterial = new BackendMaterial( "glass", complex, glass, null );
+		Assert.IsTrue( glassMaterial.IsTranslucent, "a translucent complex material is opaque" );
 	}
 
 	/// <summary>

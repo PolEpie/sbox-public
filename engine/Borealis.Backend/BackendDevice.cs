@@ -1577,7 +1577,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	{
 		var tier = Surfaces;
 		if ( tier.ConversionFor( file.Shader ) is not { } surface || tier.Layout( surface ) is not { } compiled ) return null;
-		if ( !ConvertedMaterial.Accepts( compiled, file ) || tier.ConvertMaterial?.Invoke( path ) == false ) return null;
+		if ( !ConvertedMaterial.Accepts( compiled, file, Shaders.Load( file.Shader ) ) || tier.ConvertMaterial?.Invoke( path ) == false ) return null;
 		tier.CountConverted( path );
 		var converted = ConvertedMaterial.Create( compiled, WithFeatureRules( file ), path, MaterialTextureFile );
 

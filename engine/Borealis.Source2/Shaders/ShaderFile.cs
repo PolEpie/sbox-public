@@ -233,6 +233,26 @@ public sealed class ShaderFile
 	}
 
 	/// <summary>
+	/// Whether a feature (by <see cref="FeatureIndex"/>) selects code: a program's static combo follows it. A feature the
+	/// shader only declares changes nothing it draws, as <c>common/features.hlsl</c>'s <c>F_ADDITIVE_BLEND</c> in
+	/// blendable.shader, which no combo reads: a material's value for it is ignored, as native ignores it.
+	/// </summary>
+	public bool FeatureSelectsCode( int index )
+	{
+		if ( index < 0 ) return false;
+		for ( int p = 0; p < Programs.Length; p++ )
+		{
+			if ( p == (int)ShaderProgramType.Features || Programs[p]?.StaticCombos is not { } combos ) continue;
+			foreach ( var combo in combos )
+			{
+				if ( combo.FeatureIndex == index ) return true;
+			}
+		}
+
+		return false;
+	}
+
+	/// <summary>
 	/// The static combo id of <paramref name="program"/> for a mode and the material's feature values, as
 	/// <c>CMaterialLayer::ComputeStaticComboValuesForPerLayerProgramData</c> computes it: mode-set combos from the mode,
 	/// feature combos from <paramref name="features"/> (by feature index; missing ones are 0), system combos from
