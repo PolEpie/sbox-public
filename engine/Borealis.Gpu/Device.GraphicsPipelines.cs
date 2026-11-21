@@ -69,11 +69,16 @@ internal sealed class PipelinePart( PartKey key, uint kind, UInt128 shader, UInt
 	public bool Dropped;
 }
 
-/// <summary>The parts a graphics pipeline was linked from: four, or three for a mesh pipeline (no vertex input).</summary>
-internal sealed class LinkedParts( PipelinePart vertexInput, PipelinePart preRasterization, PipelinePart fragment, PipelinePart output, string name )
+/// <summary>
+/// The parts a graphics pipeline was linked from: four, or three for a mesh pipeline (no vertex input). With the target
+/// formats its output part was made for, which the link repeats.
+/// </summary>
+internal sealed class LinkedParts( PipelinePart vertexInput, PipelinePart preRasterization, PipelinePart fragment, PipelinePart output, string name, Format[] colorFormats, Format depthFormat )
 {
 	public readonly PipelinePart VertexInput = vertexInput, PreRasterization = preRasterization, Fragment = fragment, Output = output;
 	public readonly string Name = name;
+	public readonly Format[] ColorFormats = colorFormats;
+	public readonly Format DepthFormat = depthFormat;
 }
 
 /// <summary>The bytes of the pipeline info a part reads, compared whole.</summary>
@@ -233,8 +238,22 @@ public sealed unsafe partial class Device
 	static readonly object partLogLock = new();
 
 	// Pipelines kept for their shader statistics are made whole: a link has none of its own. Mesh pipelines link three
-	// parts: task and mesh shaders belong to pre-rasterisation, and there's no vertex input
-	bool UsesLibraries( in GraphicsPipelineInfo info ) => pipelineLibraries && !shaderStatistics;
+	// parts: task and mesh shaders belong to pre-rasterisation, and there's no vertex input. So are pipelines whose name has
+	// one of BOREALIS_WHOLE_PIPELINES' ';'-separated names in it, to find which pipeline a driver links wrong
+	bool UsesLibraries( in GraphicsPipelineInfo info ) => pipelineLibraries && !shaderStatistics && !MadeWholeByName( info.Name );
+
+	static readonly string[] wholePipelines = (Environment.GetEnvironmentVariable( "BOREALIS_WHOLE_PIPELINES" ) ?? "").Split( ';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries );
+
+	static bool MadeWholeByName( string name )
+	{
+		if ( wholePipelines.Length == 0 || name is null ) return false;
+		foreach ( var whole in wholePipelines )
+		{
+			if ( name.Contains( whole, StringComparison.OrdinalIgnoreCase ) ) return true;
+		}
+
+		return false;
+	}
 
 	/// <summary>The SPIR-V hash a pre-rasterisation part is made from: the mesh shader's in a mesh pipeline, else the vertex shader's.</summary>
 	UInt128 PreRasterizationShader( in GraphicsPipelineInfo info ) => ShaderHash( info.MeshShader.IsValid ? info.MeshShader : info.VertexShader );
@@ -383,7 +402,7 @@ public sealed unsafe partial class Device
 			throw;
 		}
 
-		return new LinkedParts( vertexInput, preRasterization, fragment, output, info.Name );
+		return new LinkedParts( vertexInput, preRasterization, fragment, output, info.Name, [.. info.ColorFormats ?? []], info.DepthFormat );
 	}
 
 	/// <summary>
@@ -592,7 +611,7 @@ public sealed unsafe partial class Device
 
 	/// <summary>
 	/// Link the parts into a pipeline (three for a mesh pipeline, four otherwise): fast, or optimised as a whole (slow, but
-	/// as fast on the GPU as one made whole).
+	/// as fast on the GPU as one made whole). The link gives the output part's target formats again.
 	/// </summary>
 	ulong Link( LinkedParts parts, ulong layout, bool optimise )
 	{
@@ -602,8 +621,8 @@ public sealed unsafe partial class Device
 		libraries[count++] = parts.PreRasterization.Pipeline;
 		libraries[count++] = parts.Fragment.Pipeline;
 		libraries[count++] = parts.Output.Pipeline;
-		GraphicsPipelineInfo none = default;
-		return MakeGraphics( none, PipelineParts.None, library: false, layout, libraries, count, optimise ? Vulkan.Vk.PipelineCreateLinkTimeOptimization : 0 );
+		var formats = new GraphicsPipelineInfo { ColorFormats = parts.ColorFormats, DepthFormat = parts.DepthFormat, Name = parts.Name };
+		return MakeGraphics( formats, PipelineParts.None, library: false, layout, libraries, count, optimise ? Vulkan.Vk.PipelineCreateLinkTimeOptimization : 0 );
 	}
 
 	/// <summary>
@@ -780,21 +799,24 @@ public sealed unsafe partial class Device
 
 		var dynamic = new VkPipelineDynamicStateCreateInfo { sType = VkStructureType.PipelineDynamicStateCreateInfo, dynamicStateCount = dynamicCount, pDynamicStates = dynamicStates };
 
-		// Formats belong to the output part; the shader parts render to whatever it says
-		var depthFormat = outputPart ? VkFormatOf( info.DepthFormat ) : VkFormat.Undefined;
+		// Formats belong to the output part; the shader parts render to whatever it says. A link of parts gives its output
+		// part's again: the state is the part's, and a link without them says it renders to nothing
+		var linking = libraryCount > 0 && !library;
+		var formats = outputPart || linking;
+		var depthFormat = formats ? VkFormatOf( info.DepthFormat ) : VkFormat.Undefined;
 		var rendering = new VkPipelineRenderingCreateInfo
 		{
 			sType = VkStructureType.PipelineRenderingCreateInfo,
-			colorAttachmentCount = outputPart ? (uint)colorFormats.Length : 0,
+			colorAttachmentCount = formats ? (uint)colorFormats.Length : 0,
 			pColorAttachmentFormats = vkColorFormats,
 			depthAttachmentFormat = depthFormat,
-			stencilAttachmentFormat = outputPart && info.DepthFormat.HasStencil() ? depthFormat : VkFormat.Undefined,
+			stencilAttachmentFormat = formats && info.DepthFormat.HasStencil() ? depthFormat : VkFormat.Undefined,
 		};
 
 		var libraryParts = new VkGraphicsPipelineLibraryCreateInfoEXT { sType = VkStructureType.GraphicsPipelineLibraryCreateInfoExt, flags = (uint)parts };
 		var linked = new VkPipelineLibraryCreateInfoKHR { sType = VkStructureType.PipelineLibraryCreateInfoKhr, libraryCount = (uint)libraryCount, pLibraries = libraries };
 		void* next = null;
-		if ( parts != PipelineParts.None )
+		if ( parts != PipelineParts.None || linking )
 		{
 			rendering.pNext = next;
 			next = &rendering;
@@ -851,7 +873,10 @@ public sealed unsafe partial class Device
 	internal bool LinksDiscardsOptimised { get; set; }
 
 	/// <summary>Whether a pipeline is linked optimised at once instead of fast linked first (<see cref="LinksDiscardsOptimised"/>).</summary>
-	bool LinksOptimisedAtOnce( in GraphicsPipelineInfo info ) => LinksDiscardsOptimised && info.FragmentShader.IsValid && Shaders.Get( info.FragmentShader.Index, info.FragmentShader.Generation ).Discards;
+	bool LinksOptimisedAtOnce( in GraphicsPipelineInfo info ) => linksAllOptimised || LinksDiscardsOptimised && info.FragmentShader.IsValid && Shaders.Get( info.FragmentShader.Index, info.FragmentShader.Generation ).Discards;
+
+	/// <summary>Every pipeline linked optimised at once, never fast linked (<c>BOREALIS_LINK_OPTIMISED=1</c>), to tell a driver's fast links from its optimised ones.</summary>
+	static readonly bool linksAllOptimised = Environment.GetEnvironmentVariable( "BOREALIS_LINK_OPTIMISED" ) == "1";
 
 	/// <summary>Whether SPIR-V has an instruction that discards: OpKill, OpTerminateInvocation or OpDemoteToHelperInvocation.</summary>
 	internal static bool Discards( ReadOnlySpan<byte> spirv )
@@ -924,9 +949,10 @@ public sealed unsafe partial class Device
 				using ( Zone( ZonePipeline ) ) made = Link( job.Parts, job.Layout, optimise: true );
 				SetName( VkObjectType.Pipeline, made, job.Parts.Name );
 			}
-			catch ( GpuException )
+			catch ( GpuException e )
 			{
 				// The fast link stays
+				message?.Invoke( new DeviceMessage( MessageSeverity.Warning, "Borealis.Gpu.OptimisedLinkFailed", $"{job.Parts.Name}: {e.Message}; its fast link stays" ) );
 			}
 
 			Interlocked.Add( ref optimiseTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started );
