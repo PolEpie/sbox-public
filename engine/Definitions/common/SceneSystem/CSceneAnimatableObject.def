@@ -1,6 +1,8 @@
 
 #include "scenesystem/sceneanimatableobject.h"
+#include "animationsystem/sboxanimcallbacks.h"
 
+// Nothing here uses these any more: CModelAnimationInstance (animationinstance.def) does, and they're only declared here
 delegate SboxAnimationEventCallback;
 delegate SboxAnimTagEventCallback;
 delegate SboxAnimGraphChangedCallback;
@@ -44,7 +46,7 @@ native class CSceneAnimatableObject as NativeEngine.CSceneAnimatableObject : CSc
 	Transform GetParentSpaceBone( int index );
 	[nogc]
 	void GetParentSpaceBones( int nNumBones, void* pOut );
-	// The flex controllers' weights as the object morphs with them (animation, then overrides), one float each by the
+	// The flex controllers' weights as the object morphs with them (as written in by whoever poses it), one float each by the
 	// model's flex controller index, into pOut up to nMax; returns how many it has
 	[nogc]
 	inline int GetFlexControllerWeights( void* pOut, int nMax )
