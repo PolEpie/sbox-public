@@ -157,6 +157,13 @@ public sealed partial class BackendDevice
 	/// </summary>
 	public bool LoadingModels => ModelReadsPending > 0 || pendingFrame + 2 > loadFrame;
 
+	/// <summary>
+	/// Whether shaders and pipelines the frames asked for are still being made on workers: pass module stages, surfaces, and
+	/// pipelines whose draws are skipped until they're ready. A load waits behind its loading screen until it's false, as for
+	/// <see cref="LoadingModels"/>, so the first frame it shows compiles nothing.
+	/// </summary>
+	public bool CompilingShaders => Passes.Compiling > 0 || (surfaces?.Compiling ?? 0) > 0 || Gpu.DeferredPipelines.Pending > 0;
+
 	/// <summary>The time between the last two frames' starts, for the load budget.</summary>
 	void TimeFrame()
 	{

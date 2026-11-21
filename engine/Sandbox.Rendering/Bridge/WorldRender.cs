@@ -184,6 +184,12 @@ internal sealed partial class WorldRender : ISceneWorldRender, IAttributeSource,
 	/// <summary>Unseen renders of this world before it was shown (<see cref="SceneBridge.BeginFrame"/>).</summary>
 	internal int UnseenRenders { get; set; }
 
+	/// <summary>
+	/// Whether an unseen render past their cap is still owed: one went past it while shaders compiled, and the next after
+	/// they're done makes the pipelines they draw with.
+	/// </summary>
+	internal bool UnseenOwed { get; set; }
+
 	/// <summary>The frame the game's load was first seen finished while this world wasn't shown yet, or 0.</summary>
 	internal ulong LoadedFrame { get; set; }
 

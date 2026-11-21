@@ -506,8 +506,13 @@ public sealed unsafe partial class Device
 			catch ( Exception e ) when ( e is GpuException or InvalidOperationException or ArgumentException )
 			{
 				// A part made ahead that fails is made again, and reported, by the pipeline that needs it (and a manifest's line
-				// for it dropped; not when its shader went meanwhile); a pipeline that fails stays unready and its draws skipped
-				if ( isJob ) Interlocked.Increment( ref deferredFailed );
+				// for it dropped; not when its shader went meanwhile); a pipeline that fails stays unready and its draws skipped,
+				// so it's reported here, once (each is made once)
+				if ( isJob )
+				{
+					Interlocked.Increment( ref deferredFailed );
+					message?.Invoke( new DeviceMessage( MessageSeverity.Error, "Borealis.Gpu.PipelineFailed", $"{job.Info.Name}: {e.Message}; its draws are skipped" ) );
+				}
 				else if ( e is GpuException && prepare.Line is { } line ) partManifest?.Drop( line );
 			}
 			finally
@@ -550,12 +555,13 @@ public sealed unsafe partial class Device
 			}
 			else
 			{
-				pipeline = MakeGraphics( info, PipelineParts.All, library: false, layout, null, 0, 0 );
+				pipeline = MakeGraphics( info, PipelineParts.All, library: false, layout, null, 0, shaderStatistics ? CaptureStatistics : 0 );
 			}
 		}
 
 		CountPipeline( started );
 		SetName( VkObjectType.Pipeline, pipeline, info.Name );
+		if ( shaderStatistics ) KeepStatistics( pipeline, info.Name );
 
 		bool alive;
 		lock ( partLock )

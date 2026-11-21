@@ -10,9 +10,10 @@ using static Facepunch.Constants;
 namespace Facepunch.Steps;
 
 /// <summary>
-/// Register pressure for every shader: dumps each combo's SPIR-V with <c>ShaderCompiler --dump-spirv</c>, compiles
-/// it for AMD GPUs with the pipeline compiler from the Radeon GPU Analyzer and writes the worst combo per shader and
-/// stage to <c>docs/reference/shader-stats.md</c>, so a change in VGPRs or occupancy shows up in the diff.
+/// Register pressure for every shader: dumps each combo's SPIR-V with <c>ShaderCompiler --dump-spirv</c> (each Slang
+/// surface's passes with <c>ShaderCompiler -slang --dump-spirv</c>), compiles it for AMD GPUs with the pipeline compiler
+/// from the Radeon GPU Analyzer and writes the worst combo per shader and stage to <c>docs/reference/shader-stats.md</c>,
+/// so a change in VGPRs or occupancy shows up in the diff.
 /// </summary>
 internal class ShaderStats( string[] asics, string[] shaders )
 {
@@ -191,26 +192,40 @@ internal class ShaderStats( string[] asics, string[] shaders )
 			}
 		}
 
-		var files = targets.Length == 0 ? "*" : string.Join( ' ', targets.Select( x => $"\"{x}\"" ) );
+		// .shader files through vfx; the Slang surfaces (.slang) through their own compile, a combo per pass
+		var vfxTargets = targets.Where( x => !x.EndsWith( ".slang", StringComparison.OrdinalIgnoreCase ) ).ToArray();
+		var slangTargets = targets.Where( x => x.EndsWith( ".slang", StringComparison.OrdinalIgnoreCase ) ).ToArray();
 		var failed = new List<string>();
 		string current = null;
-		BuildDisplay.Status( "Compile shaders and dump SPIR-V" );
+		var success = true;
+		if ( targets.Length == 0 || vfxTargets.Length > 0 )
+		{
+			var files = targets.Length == 0 ? "*" : string.Join( ' ', vfxTargets.Select( x => $"\"{x}\"" ) );
+			BuildDisplay.Status( "Compile shaders and dump SPIR-V" );
+			success = Utility.RunProcess( compiler, $"{files} --dump-spirv \"{cache}\"", game, timeoutMs: 7_200_000,
+				onDataReceived: ( _, e ) =>
+				{
+					if ( e.Data is null ) return;
+					var match = Regex.Match( e.Data, @"^\((\d+)/(\d+)\)\s*(.*)$" );
+					if ( match.Success )
+					{
+						current = match.Groups[3].Value;
+						BuildDisplay.Progress( int.Parse( match.Groups[1].Value ) - 1, int.Parse( match.Groups[2].Value ), current );
+					}
+					else if ( e.Data.Contains( "Compile failed." ) && current is not null )
+					{
+						lock ( failed ) failed.Add( current );
+					}
+				} );
+		}
 
-		var success = Utility.RunProcess( compiler, $"{files} --dump-spirv \"{cache}\"", game, timeoutMs: 7_200_000,
-			onDataReceived: ( _, e ) =>
-			{
-				if ( e.Data is null ) return;
-				var match = Regex.Match( e.Data, @"^\((\d+)/(\d+)\)\s*(.*)$" );
-				if ( match.Success )
-				{
-					current = match.Groups[3].Value;
-					BuildDisplay.Progress( int.Parse( match.Groups[1].Value ) - 1, int.Parse( match.Groups[2].Value ), current );
-				}
-				else if ( e.Data.Contains( "Compile failed." ) && current is not null )
-				{
-					lock ( failed ) failed.Add( current );
-				}
-			} );
+		if ( targets.Length == 0 || slangTargets.Length > 0 )
+		{
+			BuildDisplay.Status( "Compile Slang surfaces and dump SPIR-V" );
+			var files = string.Join( ' ', slangTargets.Select( x => $"\"{x}\"" ) );
+			if ( !Utility.RunProcess( compiler, $"-slang --dump-spirv \"{cache}\" {files}", game, timeoutMs: 7_200_000 ) )
+				Log.Warning( "Some Slang shaders failed to compile and are missing from the stats." );
+		}
 
 		// A broken shader shouldn't hide the stats for the rest; build-shaders is what fails on it
 		foreach ( var shader in failed ) Log.Warning( $"{shader} failed to compile and is missing from the stats." );
@@ -419,7 +434,9 @@ internal class ShaderStats( string[] asics, string[] shaders )
 		md.AppendLine( $"Every combo of every shader under `game/` is compiled to the SPIR-V that ships in its `.shader_c` (specialization" );
 		md.AppendLine( "constants baked in), then to AMD ISA by `amdllpc`, the AMDVLK pipeline compiler behind the offline Vulkan mode of the" );
 		md.AppendLine( $"[Radeon GPU Analyzer](https://gpuopen.com/rga/) {RgaVersion}. Each stage is compiled on its own without the real" );
-		md.AppendLine( "pipeline state, so treat the numbers as close, not exact. Columns:" );
+		md.AppendLine( "pipeline state, so treat the numbers as close, not exact. A Slang surface (`name.slang`) is compiled the same way, its" );
+		md.AppendLine( "passes as its combos (Forward the default) and its material's features at the record's values, as in a pipeline that" );
+		md.AppendLine( "isn't specialised for a material: its uniform branches keep every feature's code. Columns:" );
 		md.AppendLine();
 		md.AppendLine( "- **Worst** is the combo with the most VGPRs; the combo is named by the values that differ from the default." );
 		md.AppendLine( "  **Default** is the first combo, every combo at its minimum." );
