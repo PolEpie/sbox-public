@@ -590,7 +590,10 @@ public sealed unsafe partial class Device : IDisposable
 			var libraryProperties = new VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT { sType = VkStructureType.PhysicalDeviceGraphicsPipelineLibraryPropertiesExt };
 			var properties = new VkPhysicalDeviceProperties2 { sType = VkStructureType.PhysicalDeviceProperties2, pNext = &libraryProperties };
 			Instance.vkGetPhysicalDeviceProperties2( PhysicalDevice, &properties );
-			if ( supportedLibrary.graphicsPipelineLibrary != 0 && libraryProperties.graphicsPipelineLibraryFastLinking != 0 )
+			// NVIDIA's drivers draw nothing from some of the pipelines linked from parts (players' reports, 2026-11-21: the menu
+			// stays black), so pipelines are made whole there until that's found; BOREALIS_PIPELINE_LIBRARY=1 links them anyway
+			var nvidia = properties.properties.vendorID == 0x10DE && Environment.GetEnvironmentVariable( "BOREALIS_PIPELINE_LIBRARY" ) != "1";
+			if ( supportedLibrary.graphicsPipelineLibrary != 0 && libraryProperties.graphicsPipelineLibraryFastLinking != 0 && !nvidia )
 			{
 				extensions.Add( "VK_KHR_pipeline_library" );
 				extensions.Add( "VK_EXT_graphics_pipeline_library" );

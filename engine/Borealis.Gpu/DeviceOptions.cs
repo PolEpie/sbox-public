@@ -84,6 +84,7 @@ public sealed class DeviceOptions
 	/// Link graphics pipelines from parts (VK_EXT_graphics_pipeline_library) where the device links them fast; off makes
 	/// each pipeline whole. See <see cref="DeviceCapabilities.PipelineLibraries"/>. Off by default when the process has the
 	/// <c>-no-pipeline-library</c> switch or <c>BOREALIS_PIPELINE_LIBRARY=0</c>, for comparisons.
+	/// Off on NVIDIA until its linked pipelines draw (<c>BOREALIS_PIPELINE_LIBRARY=1</c> turns them on there).
 	/// </summary>
 	public bool PipelineLibraries { get; init; } = !Environment.GetCommandLineArgs().Contains( "-no-pipeline-library", StringComparer.OrdinalIgnoreCase )
 		&& Environment.GetEnvironmentVariable( "BOREALIS_PIPELINE_LIBRARY" ) != "0";
