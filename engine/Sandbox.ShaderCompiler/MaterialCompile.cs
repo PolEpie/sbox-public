@@ -203,7 +203,7 @@ public sealed class MaterialCompile
 		List<string>( kv, "m_textureAttributes", [], v => "" );
 		List( kv, "m_stringAttributes", stringAttributes, v => $"m_value = {Quote( v )}" );
 		kv.Append( "\tm_renderAttributesUsed = [  ]\n" );
-		kv.Append( "\tm_shaderVersion = 0\n" );
+		kv.Append( $"\tm_shaderVersion = {inputs.Version.ToString( CultureInfo.InvariantCulture )}\n" );
 		kv.Append( "}\n" );
 
 		return new MaterialCompile

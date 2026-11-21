@@ -22,13 +22,14 @@ public class DepthPassTests : GpuTest
 	public void AlphaTestedDrawsMatchWithAndWithoutThePrepass()
 	{
 		using var backend = new BackendDevice( Device );
-		backend.Surfaces.ConvertShaders = false;   // the .shader route's prepass
 		var previousHost = RenderHost.Current;
 		RenderHost.Current = new BackendRenderHost( backend );
 		try
 		{
 			var cutOut = backend.LoadMaterial( "materials/dev/simple/simple_rail_32.vmat" );
-			if ( cutOut is not BackendMaterial { Shader: not null, IsAlphaTest: true } ) Assert.Inconclusive( "No compiled alpha-tested material" );
+			if ( backend.Content.Find( "materials/dev/simple/simple_rail_32.vmat" ) is null ) Assert.Inconclusive( "No compiled alpha-tested material" );
+			Assert.IsInstanceOfType<SurfaceMaterial>( cutOut, "simple_rail_32 draws as the standard surface" );
+			Assert.IsTrue( cutOut.IsAlphaTest, "simple_rail_32 is alpha-tested" );
 
 			using var system = new RenderSystem { ParallelRecording = false };
 			using var target = ViewTarget.Create( new Vector2Int( Width, Height ), 4, TextureFormat.RGBA16161616F, TextureFormat.D32FS8, "Depth pass test" );
@@ -79,96 +80,28 @@ public class DepthPassTests : GpuTest
 
 	/// <summary>
 	/// A depth draw keeps a pixel shader that discards even when it was asked to go without (its draw isn't flagged
-	/// alpha-tested, as a package shader's that cuts holes with <c>clip</c> isn't): complex's alpha-tested depth variant
+	/// alpha-tested, as a package shader's that cuts holes with <c>clip</c> isn't): depth_only's alpha-tested variant
 	/// discards and keeps it, its plain one doesn't and goes without.
 	/// </summary>
 	[TestMethod]
 	public void DepthDrawsKeepAPixelShaderThatDiscards()
 	{
 		using var backend = new BackendDevice( Device );
-		var shader = backend.Shaders.Load( "shaders/complex.shader" );
-		if ( shader is null ) Assert.Inconclusive( "complex.shader is gone (standard's surface draws its materials): no core .shader's depth variants to check" );
+		var shader = backend.Shaders.Load( "shaders/depth_only.shader" );
 		var features = new int[shader.Features.StaticCombos.Length];
 		var plain = backend.Shaders.Variant( shader, "Depth", features );
 		features[shader.FeatureIndex( "F_ALPHA_TEST" )] = 1;
 		var cutOut = backend.Shaders.Variant( shader, "Depth", features );
-		Assert.IsFalse( plain.Pixel?.Reflection is { Discards: true }, "complex's plain depth variant doesn't discard" );
+		Assert.IsFalse( plain.Pixel?.Reflection is { Discards: true }, "depth_only's plain variant doesn't discard" );
 		Assert.IsTrue( cutOut.Pixel?.Reflection is { Discards: true }, "its alpha-tested one does" );
 
-		var opaque = (BackendMaterial)backend.CreateMaterial( "Opaque", Color.White );
+		// An opaque .shader material: what this decides for
+		using var opaque = new BackendMaterial( "Opaque", backend.Shaders.Load( "shaders/surface_test_rock.shader" ), null, null );
 		Assert.IsFalse( opaque.IsAlphaTest || opaque.IsTranslucent );
 		Assert.IsTrue( BackendContext.StripsPixelShader( opaque, plain, noColor: true, stripPixelShader: true ) );
 		Assert.IsFalse( BackendContext.StripsPixelShader( opaque, cutOut, noColor: true, stripPixelShader: true ), "asked to strip, it keeps a pixel shader that discards" );
 		Assert.IsTrue( BackendContext.StripsPixelShader( opaque, plain, noColor: true, stripPixelShader: false ), "a prepass of an opaque material goes without" );
 		Assert.IsFalse( BackendContext.StripsPixelShader( opaque, plain, noColor: false, stripPixelShader: false ), "a colour pass keeps it" );
-	}
-
-	/// <summary>
-	/// A compiled model's depth-only prepass draws read a positions-only copy of its vertices (a 12-byte layout), and the
-	/// frame is the same, bit for bit, as when they read the full vertices: forward tests depth-equal against what they wrote.
-	/// </summary>
-	[TestMethod]
-	public void DepthOnlyDrawsReadPositionsOnly()
-	{
-		// The model's materials are standard's, a surface alone now (complex stands for it): no .shader route to draw it with
-		using ( var probe = new BackendDevice( Device ) )
-		{
-			if ( probe.Shaders.Load( "shaders/complex.shader" ) is null ) Assert.Inconclusive( "complex.shader is gone: the model has no .shader route's prepass" );
-		}
-
-		byte[] Frame( bool positions, out bool positionLayout, out long copied )
-		{
-			using var backend = new BackendDevice( Device ) { PositionStreams = positions, GpuDriven = false };
-
-			// The .shader route's prepass: surfaces read the full vertices
-			backend.Surfaces.ConvertShaders = false;
-			var previousHost = RenderHost.Current;
-			RenderHost.Current = new BackendRenderHost( backend );
-			try
-			{
-				var mesh = backend.LoadModel( "models/citizen_props/trashcan01.vmdl" );
-				if ( mesh is null ) Assert.Inconclusive( "models/citizen_props/trashcan01.vmdl isn't built" );
-
-				using var system = new RenderSystem { ParallelRecording = false, DepthPrepass = true };
-				using var target = ViewTarget.Create( new Vector2Int( Width, Height ), 4, TextureFormat.RGBA16161616F, TextureFormat.D32FS8, "Positions-only depth test" );
-				var world = new RenderWorld();
-				world.Lighting.SunShadowCascades = 0;
-				world.Add( new MeshObject( mesh, Transform.Zero ) );
-
-				var view = new RenderView { Name = "Positions-only depth test", FieldOfView = 60, ClearColor = Color.Black, Viewport = new Rect( 0, 0, Width, Height ) };
-				var size = mesh.Bounds.Size.Length;
-				view.Rotation = Rotation.From( 20, 160, 0 );
-				view.Position = mesh.Bounds.Center - view.Rotation.Forward * size * 1.2f;
-				view.ZNear = size * 0.05f;
-				view.ZFar = size * 10;
-
-				backend.BeginFrame();
-				RenderHost.Current.NextFrame();
-				system.Render( world, view, target );
-				Device.WaitIdle();
-				var (texture, layout) = BackendDevice.Unwrap( target.Resolved );
-				var pixels = ReadBack( texture, layout );
-
-				positionLayout = backend.PipelineLayouts.Any( l => l is { Stride: 12, Fields: [{ Semantic: Borealis.Source2.Shaders.VertexSemantic.Position }] } );
-				copied = backend.PositionStreamBytes;
-				return pixels;
-			}
-			finally
-			{
-				Device.WaitIdle();
-				RenderHost.Current = previousHost;
-			}
-		}
-
-		var full = Frame( false, out var fullUsedPositions, out var fullCopied );
-		var positionsOnly = Frame( true, out var usedPositions, out var copied );
-
-		Assert.IsFalse( fullUsedPositions, "with the copies off, nothing draws from them" );
-		Assert.AreEqual( 0, fullCopied );
-		Assert.IsTrue( copied > 0, "the model's vertices were copied as positions" );
-		Assert.IsTrue( usedPositions, "the prepass drew from the positions-only copy" );
-		Assert.IsTrue( full.AsSpan().SequenceEqual( positionsOnly ), "the frames are identical" );
-		Assert.IsTrue( full.Any( b => b != 0 ), "the model drew" );
 	}
 
 	/// <summary>

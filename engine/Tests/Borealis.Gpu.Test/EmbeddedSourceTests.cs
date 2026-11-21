@@ -324,11 +324,14 @@ public class EmbeddedSourceTests : GpuTest
 	/// A sampler whose filter a feature chooses (Material.CommonInputs.hlsl's <c>TextureFiltering</c>, by
 	/// <c>F_TEXTURE_FILTERING</c>) follows each material's feature in a module made from embedded source, as in the
 	/// compiled programs: each value's module variant matches the recompiled file's, anisotropic, bilinear, trilinear, point.
+	/// The shader is the USP's glass_scope, a .shader the game still compiles.
 	/// </summary>
 	[TestMethod]
 	public void EmbeddedSamplersFollowTheMaterialsFeatures()
 	{
-		const string water = "shaders/water_simple.shader";
+		var game = Path.GetDirectoryName( ShaderFileTests.Files.Roots[0] );
+		var scope = Path.Combine( game, "addons", "content", "Assets", "weapons", "usp", "materials", "glass_scope.shader" );
+		if ( !File.Exists( scope ) || !File.Exists( scope + "_c" ) ) { Assert.Inconclusive( "glass_scope isn't compiled" ); return; }
 		var folder = Folder();
 		try
 		{
@@ -337,12 +340,9 @@ public class EmbeddedSourceTests : GpuTest
 			backend.Passes.Error = errors.Add;
 			backend.Shaders.UpgradeCache = Path.Combine( folder, "upgraded" );
 			backend.Shaders.Upgrader = ( _, _ ) => throw new AssertFailedException( "recompiled through the ShaderCompiler" );
-			// water_simple is a surface now (water_simple.slang): a runner may keep its old compiled file, but its source is gone
-			var source = Path.Combine( ShaderFileTests.Files.Roots[0], water );
-			if ( !File.Exists( source ) ) { Assert.Inconclusive( $"{water} has no source: it's a surface now" ); return; }
-			var current = ShaderFileTests.Files.Read( water );
-			Write( folder, Outdated( current, Embedded( File.ReadAllText( Path.Combine( ShaderFileTests.Files.Roots[0], water ) ) ) ), "package_water" );
-			var shader = backend.Shaders.Load( "shaders/package_water.shader" );
+			var current = File.ReadAllBytes( scope + "_c" );
+			Write( folder, Outdated( current, Embedded( File.ReadAllText( scope ) ) ), "package_scope" );
+			var shader = backend.Shaders.Load( "shaders/package_scope.shader" );
 			Assert.IsNotNull( shader?.Outdated );
 			var index = shader.FeatureIndex( "F_TEXTURE_FILTERING" );
 			Assert.IsTrue( index >= 0 );

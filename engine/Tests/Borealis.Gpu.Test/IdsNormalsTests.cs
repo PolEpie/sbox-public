@@ -33,10 +33,7 @@ public class IdsNormalsTests : GpuTest
 		if ( core is not null ) Borealis.Backend.Meshlets.MeshOptimizer.Directory = EngineFolders.NativeIn( Path.GetDirectoryName( core ) );
 
 		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDriven = true, GpuDrivenVisibility = true, Meshlets = true, IdsNormals = true };
-		foreach ( var shader in (string[])["shaders/complex.shader", "shaders/depth_only.shader"] )
-		{
-			if ( backend.Shaders.GpuDriven( backend.Shaders.Load( shader ) ) is null ) Assert.Inconclusive( $"{shader} has no GPU-driven variant: ShaderCompiler -gpudriven" );
-		}
+		GpuDrivenTests.RequireGpuDrivenDepth( backend );
 
 		if ( backend.IdsNormalsShader is null ) Assert.Inconclusive( "borealis_ids_normals_cs isn't built, or pass modules are off" );
 		if ( backend.MeshletStore is null ) Assert.Inconclusive( "meshopt isn't built" );
@@ -244,7 +241,7 @@ public class IdsNormalsTests : GpuTest
 		byte[] Draw( bool idsNormals )
 		{
 			using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDriven = true, GpuDrivenVisibility = true, Meshlets = true, IdsNormals = idsNormals };
-			if ( backend.Shaders.GpuDriven( backend.Shaders.Load( "shaders/complex.shader" ) ) is null ) Assert.Inconclusive( "complex.shader has no GPU-driven variant: ShaderCompiler -gpudriven" );
+			GpuDrivenTests.RequireGpuDrivenDepth( backend );
 			var previousHost = RenderHost.Current;
 			RenderHost.Current = new BackendRenderHost( backend );
 			try

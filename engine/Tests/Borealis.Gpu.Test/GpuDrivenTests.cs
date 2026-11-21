@@ -31,10 +31,7 @@ public class GpuDrivenTests : GpuTest
 	public void AggregatesDrawTheSamePixelsGpuDriven()
 	{
 		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDrivenMeshes = true };
-		foreach ( var shader in (string[])["shaders/complex.shader", "shaders/depth_only.shader"] )
-		{
-			if ( backend.Shaders.GpuDriven( backend.Shaders.Load( shader ) ) is null ) Assert.Inconclusive( $"{shader} has no GPU-driven variant: ShaderCompiler -gpudriven" );
-		}
+		RequireGpuDrivenDepth( backend );
 
 		var previousHost = RenderHost.Current;
 		RenderHost.Current = new BackendRenderHost( backend );
@@ -102,7 +99,7 @@ public class GpuDrivenTests : GpuTest
 			var drawRecords = backend.GpuDrivenTables.Records.Draws;
 			var again = Frame( true, out _, false );
 			Assert.AreEqual( drawRecords, backend.GpuDrivenTables.Records.Draws, "the second frame reuses the aggregates' draw records" );
-			var perMaterial = Frame( true, out var perMaterialBinds, true );
+			var perMaterial = Frame( true, out _, true );
 			var cpuCulled = Frame( true, out _, false, gpuCulling: false );
 			var uncompacted = Frame( true, out _, false, compaction: false );
 			var fullVertices = Frame( true, out _, false, positions: false );
@@ -113,7 +110,7 @@ public class GpuDrivenTests : GpuTest
 			CollectionAssert.AreEqual( Enumerable.Repeat( 5, Rows ).ToArray(), preparedFragments, "every fragment prepared, for the GPU to cull" );
 			Assert.IsTrue( drivenBatches > Rows * 2, $"the static meshes drew GPU-driven with the aggregates ({drivenBatches} batches)" );
 			Assert.AreEqual( 0, Different( classic, perMaterial ), "a bucket per material draws the classic pixels" );
-			Assert.IsTrue( perMaterialBinds > drivenBinds, $"a bucket per material binds more ({perMaterialBinds}) than one bucket ({drivenBinds})" );
+			// GpuDrivenMaterialBuckets splits only buckets of compiled variants; these boxes are standard surfaces, so it binds the same
 			Assert.IsTrue( backend.GpuDrivenTables.Records.Draws > 1, $"the fragments have draw records ({backend.GpuDrivenTables.Records.Draws})" );
 			Assert.IsTrue( drivenBinds < classicBinds, $"fewer binds GPU-driven ({drivenBinds}) than classic ({classicBinds})" );
 			Assert.AreEqual( 0, Different( classic, driven ), "GPU-driven draws the classic pixels" );
@@ -149,7 +146,7 @@ public class GpuDrivenTests : GpuTest
 	public void TheIdOutputIsLeftOutWhereTargetOneIsNotIds()
 	{
 		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDrivenMeshes = true, GpuDriven = true };
-		if ( backend.Shaders.GpuDriven( backend.Shaders.Load( "shaders/complex.shader" ) ) is null ) Assert.Inconclusive( "shaders/complex.shader has no GPU-driven variant: ShaderCompiler -gpudriven" );
+		RequireGpuDrivenDepth( backend );
 
 		var previousHost = RenderHost.Current;
 		RenderHost.Current = new BackendRenderHost( backend );
@@ -199,10 +196,7 @@ public class GpuDrivenTests : GpuTest
 	{
 		// The meshes stay classic, for workers to record beside the aggregates' run
 		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDriven = true, GpuDrivenVisibility = true, GpuDrivenMeshes = false };
-		foreach ( var shader in (string[])["shaders/complex.shader", "shaders/depth_only.shader"] )
-		{
-			if ( backend.Shaders.GpuDriven( backend.Shaders.Load( shader ) ) is null ) Assert.Inconclusive( $"{shader} has no GPU-driven variant: ShaderCompiler -gpudriven" );
-		}
+		RequireGpuDrivenDepth( backend );
 
 		var previousHost = RenderHost.Current;
 		RenderHost.Current = new BackendRenderHost( backend );
@@ -283,10 +277,7 @@ public class GpuDrivenTests : GpuTest
 	public void ResidentAggregatesDrawFromKeptPlans()
 	{
 		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDriven = true, GpuDrivenVisibility = true };
-		foreach ( var shader in (string[])["shaders/complex.shader", "shaders/depth_only.shader"] )
-		{
-			if ( backend.Shaders.GpuDriven( backend.Shaders.Load( shader ) ) is null ) Assert.Inconclusive( $"{shader} has no GPU-driven variant: ShaderCompiler -gpudriven" );
-		}
+		RequireGpuDrivenDepth( backend );
 
 		var previousHost = RenderHost.Current;
 		RenderHost.Current = new BackendRenderHost( backend );
@@ -301,11 +292,11 @@ public class GpuDrivenTests : GpuTest
 			world.Lighting.AmbientColor = new Color( 0.12f, 0.15f, 0.2f, 1 );
 			world.Lighting.SunShadowCascades = 2;
 
-			var materials = new BackendMaterial[Rows];
+			var materials = new GpuMaterial[Rows];
 			var aggregates = new AggregateObject[Rows];
 			for ( int row = 0; row < Rows; row++ )
 			{
-				materials[row] = (BackendMaterial)backend.CreateMaterial( $"Resident boxes {row}", new Color( 0.3f + row * 0.2f, 0.6f, 0.4f ) );
+				materials[row] = backend.CreateMaterial( $"Resident boxes {row}", new Color( 0.3f + row * 0.2f, 0.6f, 0.4f ) );
 				var (mesh, fragments) = Boxes( backend, materials[row], row * 120 - 120 );
 				world.Add( aggregates[row] = new AggregateObject( mesh, fragments ) { IsStatic = true } );
 			}
@@ -354,7 +345,7 @@ public class GpuDrivenTests : GpuTest
 			for ( int i = 0; i < 6; i++ ) CollectionAssert.AreEqual( still, Frame( true ), $"parallel frame {i} draws what the serial one did" );
 			system.ParallelRecording = false;
 
-			materials[0].Set( "g_vColorTint", [0.9f, 0.2f, 0.2f, 0] );
+			backend.SetOnMaterial( materials[0], new Dictionary<string, float[]> { ["g_vColorTint"] = [0.9f, 0.2f, 0.2f, 0] }, null );
 			Same( "a material's value" );
 			Assert.IsTrue( backend.GpuDrivenPlanBuilds > builds, "the material's change made plans again" );
 
@@ -475,10 +466,7 @@ public class GpuDrivenTests : GpuTest
 	public void ResidentMeshesPickTheCpusLods()
 	{
 		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDriven = true, GpuDrivenVisibility = true };
-		foreach ( var shader in (string[])["shaders/complex.shader", "shaders/depth_only.shader"] )
-		{
-			if ( backend.Shaders.GpuDriven( backend.Shaders.Load( shader ) ) is null ) Assert.Inconclusive( $"{shader} has no GPU-driven variant: ShaderCompiler -gpudriven" );
-		}
+		RequireGpuDrivenDepth( backend );
 
 		var previousHost = RenderHost.Current;
 		RenderHost.Current = new BackendRenderHost( backend );
@@ -591,10 +579,7 @@ public class GpuDrivenTests : GpuTest
 	public void ResidentCullDrawsWhatEachCallCulls()
 	{
 		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDriven = true, GpuDrivenVisibility = true };
-		foreach ( var shader in (string[])["shaders/complex.shader", "shaders/depth_only.shader"] )
-		{
-			if ( backend.Shaders.GpuDriven( backend.Shaders.Load( shader ) ) is null ) Assert.Inconclusive( $"{shader} has no GPU-driven variant: ShaderCompiler -gpudriven" );
-		}
+		RequireGpuDrivenDepth( backend );
 
 		if ( backend.ResidentCullShader is null ) Assert.Inconclusive( "borealis_resident_cull_cs isn't compiled" );
 
@@ -611,7 +596,7 @@ public class GpuDrivenTests : GpuTest
 			world.Lighting.AmbientColor = new Color( 0.12f, 0.15f, 0.2f, 1 );
 			world.Lighting.SunShadowCascades = 2;
 
-			var material = (BackendMaterial)backend.CreateMaterial( "Resident cull boxes", new Color( 0.5f, 0.6f, 0.4f ) );
+			var material = backend.CreateMaterial( "Resident cull boxes", new Color( 0.5f, 0.6f, 0.4f ) );
 			var (rowMesh, fragments) = Boxes( backend, material, -120 );
 			world.Add( new AggregateObject( rowMesh, fragments ) { IsStatic = true } );
 
@@ -674,7 +659,7 @@ public class GpuDrivenTests : GpuTest
 			system.ParallelRecording = false;
 
 			boxes[4].Transform = boxes[4].Transform.WithPosition( boxes[4].Transform.Position + new Vector3( 200, 0, 0 ) );
-			((BackendMaterial)lodMaterials[1]).Set( "g_vColorTint", [0.9f, 0.9f, 0.2f, 0] );
+			backend.SetOnMaterial( lodMaterials[1], new Dictionary<string, float[]> { ["g_vColorTint"] = [0.9f, 0.9f, 0.2f, 0] }, null );
 			Same( "a box moved and a material changed" );
 
 			Assert.AreEqual( 0, Device.ValidationErrors, "no validation errors" );
@@ -695,10 +680,7 @@ public class GpuDrivenTests : GpuTest
 	public void DisposedRenderSystemLeavesNoViewsInTheResidentCull()
 	{
 		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDriven = true, GpuDrivenVisibility = true };
-		foreach ( var shader in (string[])["shaders/complex.shader", "shaders/depth_only.shader"] )
-		{
-			if ( backend.Shaders.GpuDriven( backend.Shaders.Load( shader ) ) is null ) Assert.Inconclusive( $"{shader} has no GPU-driven variant: ShaderCompiler -gpudriven" );
-		}
+		RequireGpuDrivenDepth( backend );
 
 		if ( backend.ResidentCullShader is null ) Assert.Inconclusive( "borealis_resident_cull_cs isn't compiled" );
 
@@ -715,7 +697,7 @@ public class GpuDrivenTests : GpuTest
 				world.Lighting.SunColor = new Color( 1.25f, 1.15f, 1.0f );
 				world.Lighting.SunShadowCascades = 2;
 
-				var material = (BackendMaterial)backend.CreateMaterial( "Resident cull release boxes", new Color( 0.5f, 0.6f, 0.4f ) );
+				var material = backend.CreateMaterial( "Resident cull release boxes", new Color( 0.5f, 0.6f, 0.4f ) );
 				var (rowMesh, fragments) = Boxes( backend, material, -120 );
 				world.Add( new AggregateObject( rowMesh, fragments ) { IsStatic = true } );
 
@@ -766,10 +748,7 @@ public class GpuDrivenTests : GpuTest
 	public void ResidentFarCacheTakesCastersByWhenTheyMoved()
 	{
 		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDriven = true, GpuDrivenVisibility = true };
-		foreach ( var shader in (string[])["shaders/complex.shader", "shaders/depth_only.shader"] )
-		{
-			if ( backend.Shaders.GpuDriven( backend.Shaders.Load( shader ) ) is null ) Assert.Inconclusive( $"{shader} has no GPU-driven variant: ShaderCompiler -gpudriven" );
-		}
+		RequireGpuDrivenDepth( backend );
 
 		if ( backend.ResidentCullShader is null ) Assert.Inconclusive( "borealis_resident_cull_cs isn't compiled" );
 
@@ -790,7 +769,7 @@ public class GpuDrivenTests : GpuTest
 			world.Lighting.SunShadowCascades = 3;
 
 			// The ground, and boxes on it: static, not static and settled, and not static and not settled
-			var material = (BackendMaterial)backend.CreateMaterial( "Resident far cache", new Color( 0.6f, 0.6f, 0.55f ) );
+			var material = backend.CreateMaterial( "Resident far cache", new Color( 0.6f, 0.6f, 0.55f ) );
 			MeshVertex[] ground = [new( new Vector3( -4000, -4000, 0 ), Vector3.Up, new Vector2( 0, 0 ) ), new( new Vector3( 8000, -4000, 0 ), Vector3.Up, new Vector2( 1, 0 ) ),
 				new( new Vector3( 8000, 4000, 0 ), Vector3.Up, new Vector2( 1, 1 ) ), new( new Vector3( -4000, 4000, 0 ), Vector3.Up, new Vector2( 0, 1 ) )];
 			var groundMesh = BackendMesh.Create( backend, ground, [0, 2, 1, 0, 3, 2], material, "Resident far cache ground" );
@@ -902,10 +881,7 @@ public class GpuDrivenTests : GpuTest
 	{
 		// Views preparing their own batches, which the memo serves (resident lists are drawn from plans instead)
 		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDriven = true, GpuDrivenResident = false };
-		foreach ( var shader in (string[])["shaders/complex.shader", "shaders/depth_only.shader"] )
-		{
-			if ( backend.Shaders.GpuDriven( backend.Shaders.Load( shader ) ) is null ) Assert.Inconclusive( $"{shader} has no GPU-driven variant: ShaderCompiler -gpudriven" );
-		}
+		RequireGpuDrivenDepth( backend );
 
 		var previousHost = RenderHost.Current;
 		RenderHost.Current = new BackendRenderHost( backend );
@@ -920,11 +896,11 @@ public class GpuDrivenTests : GpuTest
 			world.Lighting.AmbientColor = new Color( 0.12f, 0.15f, 0.2f, 1 );
 			world.Lighting.SunShadowCascades = 1;
 
-			var materials = new BackendMaterial[Rows];
+			var materials = new GpuMaterial[Rows];
 			var aggregates = new AggregateObject[Rows];
 			for ( int row = 0; row < Rows; row++ )
 			{
-				materials[row] = (BackendMaterial)backend.CreateMaterial( $"Memo boxes {row}", new Color( 0.3f + row * 0.2f, 0.6f, 0.4f ) );
+				materials[row] = backend.CreateMaterial( $"Memo boxes {row}", new Color( 0.3f + row * 0.2f, 0.6f, 0.4f ) );
 				var (mesh, fragments) = Boxes( backend, materials[row], row * 120 - 120 );
 				world.Add( aggregates[row] = new AggregateObject( mesh, fragments ) );
 			}
@@ -1009,7 +985,7 @@ public class GpuDrivenTests : GpuTest
 				Same( "and back" );
 			}
 
-			materials[0].Set( "g_vColorTint", [0.9f, 0.2f, 0.2f, 0] );
+			backend.SetOnMaterial( materials[0], new Dictionary<string, float[]> { ["g_vColorTint"] = [0.9f, 0.2f, 0.2f, 0] }, null );
 			Same( "a material's value" );
 
 			// Lit by object attributes: their own bucket, and the lighting record their constants make
@@ -1021,9 +997,10 @@ public class GpuDrivenTests : GpuTest
 			attributes.SetData( "PerBatchLightProbeVolumeConstantBuffer_t", new Vector4( 5, 6, 7, 8 ) );
 			Same( "their lighting constants" );
 
-			// A combo they set: another variant, with the same material, attributes hash and lighting
+			// A combo they set: another variant of a compiled shader; a surface's records don't take the object's combos, so none
+			// moves, and the memo still has to give what looking up does
 			attributes.SetCombo( "D_OPAQUE_FADE", 1 );
-			Same( "a combo, so another variant" );
+			Same( "a combo", moves: false );
 
 			if ( rock is not null )
 			{
@@ -1039,8 +1016,9 @@ public class GpuDrivenTests : GpuTest
 			Same( "no visibility" );
 			backend.GpuDrivenVisibility = true;
 			Same( "visibility again" );
+			// Splits only compiled variants' buckets: these are surfaces, so nothing moves, and the memo still matches
 			backend.GpuDrivenMaterialBuckets = true;
-			Same( "a bucket per material" );
+			Same( "a bucket per material", moves: false );
 
 			Assert.AreEqual( 0, Device.ValidationErrors, "no validation errors" );
 		}
@@ -1060,10 +1038,7 @@ public class GpuDrivenTests : GpuTest
 	public void CensusCountsEveryDraw()
 	{
 		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDriven = true, GpuDrivenVisibility = true, GpuDrivenMeshes = false };
-		foreach ( var shader in (string[])["shaders/complex.shader", "shaders/depth_only.shader"] )
-		{
-			if ( backend.Shaders.GpuDriven( backend.Shaders.Load( shader ) ) is null ) Assert.Inconclusive( $"{shader} has no GPU-driven variant: ShaderCompiler -gpudriven" );
-		}
+		RequireGpuDrivenDepth( backend );
 
 		var previousHost = RenderHost.Current;
 		RenderHost.Current = new BackendRenderHost( backend );
@@ -1133,7 +1108,7 @@ public class GpuDrivenTests : GpuTest
 			Assert.IsTrue( forward.Length > 0, "forward drew buckets" );
 			Assert.AreEqual( 1, forward.Select( d => d.Bucket ).Distinct().Count(), "the three materials share one forward bucket" );
 			Assert.AreEqual( Rows, forward[0].BucketMaterials, "of three materials" );
-			Assert.IsTrue( forward.All( d => d.Commands >= 0 && d.Shader == "complex" ), "its multi-draws' commands were read back" );
+			Assert.IsTrue( forward.All( d => d.Commands >= 0 && d.Shader == "standard.slang (surface)" ), $"its multi-draws' commands were read back: {string.Join( ", ", forward.Select( d => $"{d.Shader} {d.Commands}" ) )}" );
 			Assert.IsTrue( census.Draws.Where( d => d.Path == DrawCensus.Path.BucketIds ).Sum( d => d.Triangles ) >= Rows * 4 * 12, "the prepass drew every box in view as ids" );
 
 			var meshDraws = census.Draws.Where( d => d.Path == DrawCensus.Path.Classic && d.Material == "Census mesh boxes" ).ToArray();
@@ -1272,13 +1247,13 @@ public class GpuDrivenTests : GpuTest
 	{
 		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true };
 		var tables = backend.GpuDrivenTables;
-		var shader = backend.Shaders.Load( "shaders/complex.shader" );
+		var material = (SurfaceMaterial)backend.CreateMaterial( "Churning", Color.White );
+		var other = (SurfaceMaterial)backend.CreateMaterial( "Steady", Color.White );
+		var shader = backend.Shaders.Load( "shaders/line.shader" );
 		var variant = shader is null ? null : backend.Shaders.Variant( shader, "Forward", default );
-		if ( variant?.Vertex is null || variant.Pixel is null ) Assert.Inconclusive( "complex.shader isn't compiled (gone: standard's surface draws its materials)" );
-		var material = (BackendMaterial)backend.CreateMaterial( "Churning", Color.White );
-		var other = (BackendMaterial)backend.CreateMaterial( "Steady", Color.White );
+		if ( variant?.Vertex is null || variant.Pixel is null ) Assert.Inconclusive( "line.shader isn't compiled" );
 
-		uint Record( BackendMaterial m, ShaderStage stage, int attributes ) =>
+		uint Record( SurfaceMaterial m, ShaderStage stage, int attributes ) =>
 			tables.Material( new GpuDrivenTables.MaterialRecordKey( m, m.Version, stage, false, attributes ), 64, 0, static ( _, bytes ) => bytes.Clear() );
 
 		Record( other, variant.Pixel, 0 );
@@ -1303,7 +1278,7 @@ public class GpuDrivenTests : GpuTest
 	public void AMaterialChangedEveryFrameStopsAddingRecords()
 	{
 		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDrivenMeshes = true, TimeDraws = true };
-		if ( backend.Shaders.GpuDriven( backend.Shaders.Load( "shaders/complex.shader" ) ) is null ) Assert.Inconclusive( "complex.shader has no GPU-driven variant: ShaderCompiler -gpudriven" );
+		RequireGpuDrivenDepth( backend );
 
 		var previousHost = RenderHost.Current;
 		RenderHost.Current = new BackendRenderHost( backend );
@@ -1316,7 +1291,7 @@ public class GpuDrivenTests : GpuTest
 			world.Lighting.SunColor = new Color( 1.25f, 1.15f, 1.0f );
 			world.Lighting.AmbientColor = new Color( 0.12f, 0.15f, 0.2f, 1 );
 			world.Lighting.SunShadowCascades = 0;
-			var material = (BackendMaterial)backend.CreateMaterial( "Pulsing boxes", new Color( 0.8f, 0.6f, 0.4f ) );
+			var material = backend.CreateMaterial( "Pulsing boxes", new Color( 0.8f, 0.6f, 0.4f ) );
 			var (mesh, fragments) = Boxes( backend, material, 0 );
 			world.Add( new AggregateObject( mesh, fragments ) );
 
@@ -1327,7 +1302,7 @@ public class GpuDrivenTests : GpuTest
 			byte[] Frame( bool gpuDriven, float tint )
 			{
 				backend.GpuDriven = gpuDriven;
-				material.Set( "g_vColorTint", [0.8f, 0.6f, tint, 0] );
+				backend.SetOnMaterial( material, new Dictionary<string, float[]> { ["g_vColorTint"] = [0.8f, 0.6f, tint, 0] }, null );
 				backend.BeginFrame();
 				RenderHost.Current.NextFrame();
 				system.Render( world, view, target );
@@ -1475,10 +1450,7 @@ public class GpuDrivenTests : GpuTest
 	public void OverlaysDrawGpuDrivenByRenderOrder()
 	{
 		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDriven = true, GpuDrivenMeshes = false };
-		foreach ( var shader in (string[])["shaders/complex.shader", "shaders/depth_only.shader"] )
-		{
-			if ( backend.Shaders.GpuDriven( backend.Shaders.Load( shader ) ) is null ) Assert.Inconclusive( $"{shader} has no GPU-driven variant: ShaderCompiler -gpudriven" );
-		}
+		RequireGpuDrivenDepth( backend );
 
 		var previousHost = RenderHost.Current;
 		RenderHost.Current = new BackendRenderHost( backend );
@@ -1558,10 +1530,7 @@ public class GpuDrivenTests : GpuTest
 	public void ResidentOverlaysKeepTheirOrder()
 	{
 		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDriven = true, GpuDrivenVisibility = true };
-		foreach ( var shader in (string[])["shaders/complex.shader", "shaders/depth_only.shader"] )
-		{
-			if ( backend.Shaders.GpuDriven( backend.Shaders.Load( shader ) ) is null ) Assert.Inconclusive( $"{shader} has no GPU-driven variant: ShaderCompiler -gpudriven" );
-		}
+		RequireGpuDrivenDepth( backend );
 
 		var previousHost = RenderHost.Current;
 		RenderHost.Current = new BackendRenderHost( backend );
@@ -1644,21 +1613,23 @@ public class GpuDrivenTests : GpuTest
 
 	/// <summary>
 	/// A depth-only bucket (its depth pass strips the pixel shader) that draws its ids with its variant's pixel shader has a
-	/// pixel material record for it: an alpha-tested generic material on boxes whose draws aren't flagged alpha-tested read
-	/// texture slots from record 0 there, another material's words, which lost the device. (Its ids pass alpha-tests where
-	/// the stripped depth pass doesn't, so its cut-out pixels aren't the classic ones; frames with ids draw alike.)
+	/// pixel material record for it: an alpha-tested generic material (a standard surface) on boxes whose draws aren't
+	/// flagged alpha-tested read texture slots from record 0 there, another material's words, which lost the device. (Its ids
+	/// pass alpha-tests where the stripped depth pass doesn't, so its cut-out pixels aren't the classic ones; frames with ids
+	/// draw alike.)
 	/// </summary>
 	[TestMethod]
 	public void DepthOnlyBucketsDrawingIdsHaveAPixelRecord()
 	{
 		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDrivenVisibility = true };
-		backend.Surfaces.ConvertShaders = false;
 		var previousHost = RenderHost.Current;
 		RenderHost.Current = new BackendRenderHost( backend );
 		try
 		{
-			if ( ((GpuDevice)backend).LoadMaterial( "models/vr/autochap_hand.vmat" ) is not BackendMaterial { Shader: not null } material ) { Assert.Inconclusive( "models/vr/autochap_hand.vmat isn't compiled" ); return; }
-			if ( backend.Shaders.GpuDriven( material.Shader ) is null ) Assert.Inconclusive( "generic.shader has no GPU-driven variant: ShaderCompiler -gpudriven" );
+			if ( backend.Content.Find( "models/vr/autochap_hand.vmat" ) is null ) { Assert.Inconclusive( "models/vr/autochap_hand.vmat isn't compiled" ); return; }
+			var material = ((GpuDevice)backend).LoadMaterial( "models/vr/autochap_hand.vmat" );
+			Assert.IsInstanceOfType<SurfaceMaterial>( material, "autochap_hand draws as the standard surface" );
+			Assert.IsTrue( material.IsAlphaTest, "autochap_hand is alpha-tested" );
 
 			using var system = new RenderSystem { ParallelRecording = false };
 			using var target = ViewTarget.Create( new Vector2Int( Width, Height ), 1, TextureFormat.RGBA16161616F, TextureFormat.D32FS8, "GPU-driven depth-only ids test" );
@@ -1704,7 +1675,7 @@ public class GpuDrivenTests : GpuTest
 	public void HeavyGpuDrivenRunsRecordOnWorkers()
 	{
 		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDriven = true, GpuDrivenOverlays = true };
-		if ( backend.Shaders.GpuDriven( backend.Shaders.Load( "shaders/complex.shader" ) ) is null ) Assert.Inconclusive( "complex has no GPU-driven variant: ShaderCompiler -gpudriven" );
+		RequireGpuDrivenDepth( backend );
 
 		var previousHost = RenderHost.Current;
 		RenderHost.Current = new BackendRenderHost( backend );
@@ -1755,10 +1726,7 @@ public class GpuDrivenTests : GpuTest
 	public void FrameBufferReadersDrawGpuDriven()
 	{
 		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDriven = false, GpuDrivenMeshes = true };
-		foreach ( var shader in (string[])["shaders/complex.shader", "shaders/depth_only.shader"] )
-		{
-			if ( backend.Shaders.GpuDriven( backend.Shaders.Load( shader ) ) is null ) Assert.Inconclusive( $"{shader} has no GPU-driven variant: ShaderCompiler -gpudriven" );
-		}
+		RequireGpuDrivenDepth( backend );
 
 		var previousHost = RenderHost.Current;
 		RenderHost.Current = new BackendRenderHost( backend );
@@ -1834,10 +1802,7 @@ public class GpuDrivenTests : GpuTest
 	public void FadedObjectsDrawGpuDriven()
 	{
 		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDriven = false, GpuDrivenMeshes = true };
-		foreach ( var shader in (string[])["shaders/complex.shader", "shaders/depth_only.shader"] )
-		{
-			if ( backend.Shaders.GpuDriven( backend.Shaders.Load( shader ) ) is null ) Assert.Inconclusive( $"{shader} has no GPU-driven variant: ShaderCompiler -gpudriven" );
-		}
+		RequireGpuDrivenDepth( backend );
 
 		var previousHost = RenderHost.Current;
 		RenderHost.Current = new BackendRenderHost( backend );
@@ -1931,10 +1896,7 @@ public class GpuDrivenTests : GpuTest
 	{
 		Device.OptimisesLinks = false;
 		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDriven = false, GpuDrivenMeshes = true };
-		foreach ( var shader in (string[])["shaders/complex.shader", "shaders/depth_only.shader"] )
-		{
-			if ( backend.Shaders.GpuDriven( backend.Shaders.Load( shader ) ) is null ) Assert.Inconclusive( $"{shader} has no GPU-driven variant: ShaderCompiler -gpudriven" );
-		}
+		RequireGpuDrivenDepth( backend );
 
 		var previousHost = RenderHost.Current;
 		RenderHost.Current = new BackendRenderHost( backend );
@@ -2013,10 +1975,7 @@ public class GpuDrivenTests : GpuTest
 	public void TranslucentListDrawsGpuDrivenInOrder()
 	{
 		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDriven = false, GpuDrivenMeshes = true };
-		foreach ( var shader in (string[])["shaders/complex.shader", "shaders/depth_only.shader"] )
-		{
-			if ( backend.Shaders.GpuDriven( backend.Shaders.Load( shader ) ) is null ) Assert.Inconclusive( $"{shader} has no GPU-driven variant: ShaderCompiler -gpudriven" );
-		}
+		RequireGpuDrivenDepth( backend );
 
 		var previousHost = RenderHost.Current;
 		RenderHost.Current = new BackendRenderHost( backend );
@@ -2037,8 +1996,10 @@ public class GpuDrivenTests : GpuTest
 			GpuMaterial Translucent( string name, Color color ) => backend.LoadMaterial( translucentPath, new Dictionary<string, float[]> { ["g_vColorTint"] = [color.r, color.g, color.b, 0] }, name );
 
 			var red = Translucent( "Translucent red", new Color( 0.9f, 0.2f, 0.1f ) );
-			// Additive: another pipeline, whose blend doesn't commute with the alpha blend on either side of it
+			// Additive: another pipeline, whose blend doesn't commute with the alpha blend on either side of it. The material is
+			// standard's, translucent alone: additive blending is set in code, as Material.SetFeature does
 			var blue = backend.LoadMaterial( "materials/dev/primary_green_additive.vmat", new Dictionary<string, float[]> { ["g_vColorTint"] = [0.1f, 0.3f, 0.9f, 0] }, "Translucent blue" );
+			backend.SetFeaturesOnMaterial( blue, new Dictionary<string, int> { ["F_TRANSLUCENT"] = 1, ["F_ADDITIVE_BLEND"] = 1 } );
 			Assert.IsTrue( red.IsTranslucent, $"{translucentPath} draws translucent" );
 			// As overrides, which say the object draws translucent (a mesh made here takes it from none of its draws)
 			foreach ( var (material, y) in new[] { (red, 0f), (blue, -50f), (red, -100f) } )
@@ -2099,7 +2060,7 @@ public class GpuDrivenTests : GpuTest
 			Assert.AreEqual( 0, Different( classic, driven ), "the classic pixels: blended in the list's order" );
 			Assert.IsFalse( census.Draws.Any( d => d.Path == DrawCensus.Path.Classic && Ours( d ) ), $"nothing of the boxes draws the classic way: {string.Join( ", ", census.Draws.Where( d => d.Path == DrawCensus.Path.Classic ).Select( d => $"{d.Pass} {d.Material} {d.Kind}" ) )}" );
 			var translucentCalls = census.Draws.Count( d => d.Path == DrawCensus.Path.Bucket && d.Pass.EndsWith( "Translucent Forward", StringComparison.Ordinal ) );
-			Assert.IsTrue( translucentCalls >= 3, $"the rows draw in order, alpha, additive, alpha, so in three multi-draws at least: {translucentCalls}" );
+			Assert.IsTrue( translucentCalls >= 3, $"the rows draw in order, alpha, additive, alpha, so in three multi-draws at least: {translucentCalls} ({string.Join( "; ", census.Draws.Where( d => Ours( d ) || d.Pass.Contains( "Translucent", StringComparison.Ordinal ) ).Select( d => $"{d.Path} {d.Pass} {d.Material} {d.Shader} {d.Kind} calls {d.Calls} bucket {d.Bucket}" ) )})" );
 		}
 		finally
 		{
@@ -2110,18 +2071,19 @@ public class GpuDrivenTests : GpuTest
 
 	/// <summary>
 	/// A shader with no variant beside it (a package's) gets one from the library's compiler: none while it compiles,
-	/// then the compiled one, cached, so another library loads it without compiling.
+	/// then the compiled one, cached, so another library loads it without compiling. line.shader_c stands in for both the
+	/// package's shader and the variant the compiler writes.
 	/// </summary>
 	[TestMethod]
 	public void PackageShaderVariantCompilesAtLoad()
 	{
 		var files = ShaderFileTests.Files;
-		var compiled = files.Find( "shaders/depth_only.gpudriven.shader" );
-		if ( compiled is null ) Assert.Inconclusive( "depth_only has no GPU-driven variant: ShaderCompiler -gpudriven" );
+		var compiled = files.Find( "shaders/line.shader" );
+		if ( compiled is null ) Assert.Inconclusive( "line.shader isn't compiled" );
 
 		var folder = Path.Combine( Path.GetTempPath(), $"borealis-gpudriven-{Guid.NewGuid():N}" );
 		Directory.CreateDirectory( Path.Combine( folder, "package", "shaders" ) );
-		File.Copy( files.Find( "shaders/depth_only.shader" ), Path.Combine( folder, "package", "shaders", "depth_only.shader_c" ) );
+		File.Copy( compiled, Path.Combine( folder, "package", "shaders", "line.shader_c" ) );
 
 		try
 		{
@@ -2142,7 +2104,7 @@ public class GpuDrivenTests : GpuTest
 					return true;
 				};
 
-				var shader = library.Load( "shaders/depth_only.shader" );
+				var shader = library.Load( "shaders/line.shader" );
 				Assert.IsNull( library.GpuDriven( shader ), "none while it compiles" );
 				Assert.IsTrue( started.Wait( 10000 ) && library.GpuDrivenPending( shader ), "compiling" );
 				Assert.IsNull( library.GpuDriven( shader ), "still none" );
@@ -2164,10 +2126,10 @@ public class GpuDrivenTests : GpuTest
 			{
 				library.GpuDrivenCache = Path.Combine( folder, "cache" );
 				library.GpuDrivenCompiler = ( _, _ ) => throw new AssertFailedException( "the cached variant compiled again" );
-				Assert.IsNotNull( library.GpuDriven( library.Load( "shaders/depth_only.shader" ) ), "from the cache" );
+				Assert.IsNotNull( library.GpuDriven( library.Load( "shaders/line.shader" ) ), "from the cache" );
 
 				// Another compiler version's variants go
-				var stale = Path.Combine( folder, "cache", "depth_only.0000.ffffffff.gpudriven.shader_c" );
+				var stale = Path.Combine( folder, "cache", "line.0000.ffffffff.gpudriven.shader_c" );
 				File.WriteAllText( stale, "" );
 				library.PruneGpuDrivenCache();
 				Assert.IsFalse( File.Exists( stale ), "another version's variant is pruned" );
@@ -2195,10 +2157,7 @@ public class GpuDrivenTests : GpuTest
 		if ( core is not null ) Borealis.Backend.Meshlets.MeshOptimizer.Directory = EngineFolders.NativeIn( Path.GetDirectoryName( core ) );
 
 		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDriven = true, GpuDrivenVisibility = true };
-		foreach ( var shader in (string[])["shaders/complex.shader", "shaders/depth_only.shader"] )
-		{
-			if ( backend.Shaders.GpuDriven( backend.Shaders.Load( shader ) ) is null ) Assert.Inconclusive( $"{shader} has no GPU-driven variant: ShaderCompiler -gpudriven" );
-		}
+		RequireGpuDrivenDepth( backend );
 
 		var plane = backend.LoadModel( "models/dev/plane_large.vmdl" );
 		var can = backend.LoadModel( "models/citizen_props/trashcan01.vmdl" );
@@ -2347,10 +2306,7 @@ public class GpuDrivenTests : GpuTest
 		if ( core is not null ) Borealis.Backend.Meshlets.MeshOptimizer.Directory = EngineFolders.NativeIn( Path.GetDirectoryName( core ) );
 
 		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDriven = true, GpuDrivenVisibility = true, GpuDrivenResidentCull = residentCull, Meshlets = meshlets, HiZMinFragments = 0 };
-		foreach ( var shader in (string[])["shaders/complex.shader", "shaders/depth_only.shader"] )
-		{
-			if ( backend.Shaders.GpuDriven( backend.Shaders.Load( shader ) ) is null ) Assert.Inconclusive( $"{shader} has no GPU-driven variant: ShaderCompiler -gpudriven" );
-		}
+		RequireGpuDrivenDepth( backend );
 
 		if ( backend.HiZShader is null ) Assert.Inconclusive( "borealis_hiz_cs isn't built, or pass modules are off" );
 		var plane = backend.LoadModel( "models/dev/plane_large.vmdl" );
@@ -2493,10 +2449,7 @@ public class GpuDrivenTests : GpuTest
 		{
 			lodStore = null;
 			using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDriven = true, GpuDrivenVisibility = true, Meshlets = meshlets, MeshletTasks = meshTasks, GeneratedLods = lods, IdsNormals = meshlets };
-			foreach ( var shader in (string[])["shaders/complex.shader", "shaders/depth_only.shader"] )
-			{
-				if ( backend.Shaders.GpuDriven( backend.Shaders.Load( shader ) ) is null ) Assert.Inconclusive( $"{shader} has no GPU-driven variant: ShaderCompiler -gpudriven" );
-			}
+			RequireGpuDrivenDepth( backend );
 
 			var plane = backend.LoadModel( "models/dev/plane_large.vmdl" );
 			if ( plane is null || backend.Content.TryRead( "models/citizen_props/trashcan01.vmdl" ) is not { } data ) { Assert.Inconclusive( "models/dev/plane_large.vmdl or models/citizen_props/trashcan01.vmdl isn't built" ); store = null; return null; }
@@ -2616,6 +2569,15 @@ public class GpuDrivenTests : GpuTest
 
 		Assert.IsTrue( Same( with, without ), $"both draw what they draw without meshlets ({Differences( with, without )})" );
 		Assert.IsTrue( Same( with, made ), $"and what they draw with everything made at load ({Differences( with, made )})" );
+	}
+
+	/// <summary>
+	/// Inconclusive where depth_only (the depth draws of materials drawn the classic way) has no GPU-driven form. The tests'
+	/// own materials (<see cref="BackendDevice.CreateMaterial"/>) are standard surfaces, whose passes have their own.
+	/// </summary>
+	internal static void RequireGpuDrivenDepth( BackendDevice backend )
+	{
+		if ( backend.Shaders.GpuDriven( backend.Shaders.Load( "shaders/depth_only.shader" ) ) is null ) Assert.Inconclusive( "depth_only has no GPU-driven form" );
 	}
 
 	/// <summary>

@@ -1,5 +1,6 @@
 using Borealis.Gpu;
 using BorealisGpuSample;
+using Sandbox;
 
 namespace BorealisGpuTests;
 
@@ -83,43 +84,72 @@ public class MaterialObjectTests : GpuTest
 	/// <summary>
 	/// Changing a material's value (as <c>Material.Set</c> does) draws it with the new value on the next frame, without
 	/// anything invalidating it by hand; setting the old value back draws the first frame again. A change of values alone
-	/// keeps the material's objects, with new constants, rather than making them again.
+	/// keeps the material's objects, with new constants, rather than making them again. Material objects are the .shader
+	/// route's: a box of surface_test_rock drawn as its .shader (the sample scene's materials are all surfaces).
 	/// </summary>
 	[TestMethod]
 	public void ChangedMaterialsDrawTheirNewValues()
 	{
 		const int width = 320, height = 200;
-		using var scene = new BorealisScene( Device );
-		scene.Backend.MaterialObjects = true;
-
-		byte[] Frame()
+		using var backend = new Borealis.Backend.BackendDevice( Device ) { MaterialObjects = true };
+		backend.Surfaces.ConvertShaders = false;
+		if ( backend.Shaders.Load( "shaders/surface_test_rock.shader" ) is null ) Assert.Inconclusive( "surface_test_rock isn't compiled" );
+		var previousHost = Borealis.RenderHost.Current;
+		Borealis.RenderHost.Current = new Borealis.Backend.BackendRenderHost( backend );
+		try
 		{
-			Device.BeginFrame();
-			var (texture, layout, color) = scene.Render( width, height, 1.0f );
-			Device.WaitIdle();
-			return Read( texture, layout, color );
+			var material = (Borealis.Backend.BackendMaterial)((Borealis.GpuDevice)backend).CreateMaterial( "Rock", "shaders/surface_test_rock.shader" );
+			float[] tint = [0.8f, 0.6f, 0.4f];
+			material.Set( "g_vTint", tint );
+
+			// A white colour for the tint to show on: a material made in code reads the error texture where none is set
+			using var white = ((Borealis.GpuDevice)backend).CreateTexture( new Borealis.TextureDesc { Width = 1, Height = 1, Depth = 1, Format = Borealis.TextureFormat.RGBA8888, Samples = 1, Mips = 1, Data = new byte[] { 255, 255, 255, 255 } }, "White" );
+			backend.SetOnMaterial( material, null, new Dictionary<string, Borealis.GpuTexture> { ["g_tColor"] = white } );
+
+			using var system = new Borealis.RenderSystem { ParallelRecording = false };
+			using var target = Borealis.ViewTarget.Create( new Vector2Int( width, height ), 1, Borealis.TextureFormat.RGBA16161616F, Borealis.TextureFormat.D32FS8, "Changed material test" );
+			var world = new Borealis.RenderWorld();
+			world.Lighting.SunDirection = new Vector3( 0.5f, 0.35f, -0.8f ).Normal;
+			world.Lighting.SunColor = Color.White;
+			world.Lighting.AmbientColor = new Color( 0.3f, 0.3f, 0.3f, 1 );
+			world.Lighting.SunShadowCascades = 0;
+			world.Add( new Borealis.MeshObject( ObjectAttributeTests.BoxMesh( backend, material ), Transform.Zero ) );
+			var view = new Borealis.RenderView { Name = "Changed material test", FieldOfView = 60, ZNear = 4, ZFar = 4000, ClearColor = Color.Black, Viewport = new Rect( 0, 0, width, height ) };
+			view.Position = new Vector3( -200, 0, 0 );
+			view.Rotation = Rotation.LookAt( Vector3.Forward );
+
+			byte[] Frame()
+			{
+				backend.BeginFrame();
+				Borealis.RenderHost.Current.NextFrame();
+				system.Render( world, view, target );
+				Device.WaitIdle();
+				var (texture, layout) = Borealis.Backend.BackendDevice.Unwrap( target.Color );
+				return Read( texture, layout, target.Color );
+			}
+
+			Frame();
+			var before = Frame();
+			Assert.IsTrue( before.Any( b => b != 0 ), "the rock drew" );
+			Assert.IsTrue( backend.MaterialCache.Materials.Contains( material ), "the rock draws through its material objects" );
+			var objects = backend.MaterialObjectStats.Objects;
+			var made = backend.MaterialCache.Made;
+
+			material.Set( "g_vTint", [0, 1, 0] );
+			var changed = Frame();
+			material.Set( "g_vTint", tint );
+			var restored = Frame();
+
+			Assert.IsTrue( Different( before, changed ) > 0, $"{material.Name} drew with its new tint" );
+			CollectionAssert.AreEqual( before, restored, "setting the old tint back draws the first frame again" );
+			Assert.AreEqual( objects, backend.MaterialObjectStats.Objects, "the changed material's objects were made again, not added to" );
+			Assert.AreEqual( made, backend.MaterialCache.Made, "a change of values made no objects" );
 		}
-
-		// A view's first GPU-driven frame draws without ids or lists, whose objects come with the second, and the resident
-		// cull culls for them from the third
-		Frame();
-		Frame();
-		var before = Frame();
-		var material = scene.Backend.MaterialCache.Materials.FirstOrDefault( m => m.Value( "g_vColorTint" ) is not null );
-		if ( material is null ) Assert.Inconclusive( "the scene's materials are all surfaces (standard has no .shader): no .shader material objects to change" );
-		var tint = material.Value( "g_vColorTint" );
-		var objects = scene.Backend.MaterialObjectStats.Objects;
-		var made = scene.Backend.MaterialCache.Made;
-
-		material.Set( "g_vColorTint", [0, 1, 0, 0] );
-		var changed = Frame();
-		material.Set( "g_vColorTint", tint );
-		var restored = Frame();
-
-		Assert.IsTrue( Different( before, changed ) > 0, $"{material.Name} drew with its new tint" );
-		CollectionAssert.AreEqual( before, restored, "setting the old tint back draws the first frame again" );
-		Assert.AreEqual( objects, scene.Backend.MaterialObjectStats.Objects, "the changed material's objects were made again, not added to" );
-		Assert.AreEqual( made, scene.Backend.MaterialCache.Made, "a change of values made no objects" );
+		finally
+		{
+			Device.WaitIdle();
+			Borealis.RenderHost.Current = previousHost;
+		}
 	}
 
 	/// <summary>
