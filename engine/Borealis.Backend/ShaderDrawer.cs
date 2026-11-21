@@ -486,8 +486,16 @@ public sealed partial class ShaderDrawer : IDisposable
 	public int Fallbacks { get; private set; }
 
 	/// <summary>Free the material objects this drawer made for itself (not those of a device it shares).</summary>
+	/// <summary>
+	/// Destroy the pipelines this drawer made and kept (a material object's are its cache's), once the GPU is past what's
+	/// been submitted with them; and its material objects, if it has its own.
+	/// </summary>
 	public void Dispose()
 	{
+		foreach ( var pipeline in pipelines.Values ) gpu.Destroy( pipeline );
+		pipelines.Clear();
+		foreach ( var pipeline in computePipelines.Values ) gpu.Destroy( pipeline );
+		computePipelines.Clear();
 		if ( ownsCache ) cache?.Dispose();
 		cache = null;
 	}

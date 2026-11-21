@@ -62,6 +62,16 @@ TextureAttribute( LightSim_Opacity_A, g_tColor );
 CreateInputTexture2D( TextureTransmissiveColor, Srgb, 8, "", "_color", "Material,10/60", Default3( 1.0, 1.0, 1.0 ) );
 Texture2D g_tTransmissiveColor < Channel( RGB, Box( TextureTransmissiveColor ), Srgb ); OutputFormat( BC7 ); SrgbRead( true ); >;
 #endif
+// foliage.shader's vertex inputs (its VS_INPUT, every dynamic combo's): what the model compiler lays out the meshes of
+// models using these materials by (the material's VSInputSignature), so they keep the streams they had
+#define VS_INPUT_HAS_TANGENT_BASIS 1
+struct VS_INPUT
+{
+	#include "common/vertexinput.hlsl"
+	#if ( S_FOLIAGE_ANIMATION == 1 )
+		float4 vColor : COLOR0 < Semantic( Color ); >;
+	#endif
+};
 #endif
 
 [Material]

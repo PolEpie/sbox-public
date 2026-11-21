@@ -45,6 +45,13 @@ public abstract class GpuMaterial : IDisposable
 	public virtual bool DepthOnlyPending => false;
 
 	/// <summary>
+	/// Whether its vertex stage places vertices itself from what they hold rather than from their positions (a water
+	/// surface's clipmap cells): levels simplified from its meshes' positions (<see cref="GpuMesh"/>'s generated levels)
+	/// don't keep its shape. Null while that isn't known yet (a surface still compiling).
+	/// </summary>
+	public virtual bool? PlacesVertices => false;
+
+	/// <summary>
 	/// Whether it's lit from a light probe when its object isn't lightmapped.
 	/// </summary>
 	public abstract bool NeedsLightProbe { get; }

@@ -77,6 +77,9 @@ internal sealed partial class SceneBridge
 		if ( !handle.IsValid ) return;
 
 		lent ??= Texture.CreateRenderTarget().WithSize( 4, 4 ).WithFormat( ImageFormat.RGBA8888 ).Create( "Borealis.Gpu lent" );
+
+		// The engine's copy holds it from here, so what the block draws after reads that
+		destination.DrawnByView = false;
 		gpu.Borrow( lent, handle, layout );
 		try
 		{

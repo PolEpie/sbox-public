@@ -138,6 +138,7 @@ public sealed class ModelMesh
 		}
 
 		if ( draws.Count == 0 ) mins = maxs = Vector3.Zero;
+		vertexBuffers = MergeDrawStreams( draws, vertexBuffers );
 		EmptyDraws( draws, vertexBuffers, indexBuffers );
 		indexBuffers = IndexUnindexedDraws( draws, indexBuffers );
 
@@ -167,6 +168,75 @@ public sealed class ModelMesh
 			MorphTexture = string.IsNullOrEmpty( morphTexture ) ? null : morphTexture,
 			Morphs = morphSet,
 		};
+	}
+
+	/// <summary>
+	/// A draw that binds several vertex buffers (a run-time mesh's streams: Hammer keeps a mesh's vertex paint and tint in a
+	/// buffer beside its positions) reads one: its buffers' vertices side by side in a buffer added to the mesh's, each
+	/// buffer's fields after the ones before (a semantic already given is left out), from where the draw binds each. Draws
+	/// that bind the same buffers at the same places share it. A stream stepping per instance is left as it is.
+	/// </summary>
+	internal static MeshVertexBuffer[] MergeDrawStreams( List<MeshDrawCall> draws, MeshVertexBuffer[] vertexBuffers )
+	{
+		List<MeshVertexBuffer> added = null;
+		Dictionary<string, int> merged = null;
+		for ( int i = 0; i < draws.Count; i++ )
+		{
+			var draw = draws[i];
+			if ( draw.VertexBuffers.Count < 2 ) continue;
+
+			var streams = draw.VertexBuffers;
+			var perInstance = false;
+			foreach ( var (buffer, _) in streams )
+			{
+				if ( (uint)buffer >= (uint)vertexBuffers.Length || vertexBuffers[buffer].Stride == 0 ) perInstance = true;
+				else perInstance |= vertexBuffers[buffer].Fields.Any( x => x.PerInstance );
+			}
+			if ( perInstance ) continue;
+
+			var key = string.Join( ";", streams.Select( x => $"{x.Buffer}@{x.Offset}" ) );
+			merged ??= new();
+			added ??= new();
+			if ( !merged.TryGetValue( key, out var index ) )
+			{
+				// Vertices every stream has from where it's bound
+				var count = int.MaxValue;
+				var stride = 0;
+				foreach ( var (buffer, offset) in streams )
+				{
+					var source = vertexBuffers[buffer];
+					count = Math.Min( count, source.Count - offset / source.Stride );
+					stride += source.Stride;
+				}
+				count = Math.Max( count, 0 );
+
+				var fields = new List<VertexField>();
+				var data = new byte[count * stride];
+				var at = 0;
+				foreach ( var (buffer, offset) in streams )
+				{
+					var source = vertexBuffers[buffer];
+					foreach ( var field in source.Fields )
+					{
+						if ( fields.Any( x => x.SemanticIndex == field.SemanticIndex && string.Equals( x.Semantic, field.Semantic, StringComparison.OrdinalIgnoreCase ) ) ) continue;
+						fields.Add( field with { Offset = field.Offset + at, Slot = 0 } );
+					}
+
+					for ( int v = 0; v < count; v++ )
+						source.Data.AsSpan( offset + v * source.Stride, source.Stride ).CopyTo( data.AsSpan( v * stride + at ) );
+					at += source.Stride;
+				}
+
+				index = vertexBuffers.Length + added.Count;
+				added.Add( new MeshVertexBuffer( count, stride, [.. fields], data ) );
+				merged[key] = index;
+			}
+
+			var mergedBuffer = added[index - vertexBuffers.Length];
+			draws[i] = draw with { VertexBuffers = [(index, 0)], CompressedTangentFrame = mergedBuffer.CompressedTangentFrame };
+		}
+
+		return added is null ? vertexBuffers : [.. vertexBuffers, .. added];
 	}
 
 	/// <summary>

@@ -135,6 +135,19 @@ TextureAttribute( LightSim_Opacity_A, g_tColor );
 #include "sbox/standard_material_inputs.slangh"
 CreateInputTexture2D( TextureTransmissiveColor, Srgb, 8, "", "_color", "Transmission", Default3( 1.0, 1.0, 1.0 ) );
 Texture2D g_tTransmissiveColor < Channel( RGB, Box( TextureTransmissiveColor ), Srgb );  OutputFormat( BC7 ); SrgbRead( true ); ActiveIf( S_TRANSMISSIVE_BACKFACE_NDOTL != 0 ); >;
+// complex.shader's vertex inputs (its VS_INPUT, every dynamic combo's): what the model compiler lays out the meshes of
+// models using these materials by (the material's VSInputSignature), so they keep the streams they had
+// generic's vertex paint and the secondary uv set stay where a material sets them, though this surface reads neither
+#undef S_UV2
+#define S_UV2 F_SECONDARY_UV
+#define VS_INPUT_HAS_TANGENT_BASIS 1
+struct VS_INPUT
+{
+	#include "vr_shared_standard_vs_input.fxc"
+	#if ( F_PAINT_VERTEX_COLORS )
+		float4 vColorPaintValues : TEXCOORD5 < Semantic( VertexPaintTintColor ); >;
+	#endif
+};
 #endif
 
 // complex.shader's g_sTrilinearWrap (occlusion, metalness, self-illumination and transmission); the rest of complex's use
@@ -316,9 +329,11 @@ public struct Standard : ICombinerSurface
 			m.AmbientOcclusionDirectSpecular = AmbientOcclusionDirectSpecular;
 		}
 
-		// Metalness: a value, or with the feature the colour's alpha (the metalness texture's green when the alpha is opacity)
+		// Metalness: a value, or with the feature the colour's alpha (the metalness texture's green when the alpha is opacity).
+		// complex's rule Allow1( F_CLOTH_SHADING, F_METALNESS_TEXTURE ) keeps cloth when a material sets both, so then the
+		// colour's alpha isn't metalness (Needlestack's gloves) and the value stands
 		m.Metalness = Metalness;
-		if ( UseMetalnessTexture ) m.Metalness = UseAlphaTest || UseTranslucent ? i.Sample( MetalnessMap, uv, g_StandardTrilinear ).g : color.a;
+		if ( UseMetalnessTexture && ClothShading == 0 ) m.Metalness = UseAlphaTest || UseTranslucent ? i.Sample( MetalnessMap, uv, g_StandardTrilinear ).g : color.a;
 
 		float detailMask = 0;
 		if ( DetailMode != 0 ) detailMask = max( i.Sample( DetailMask, uv ).r, DetailBlendToFull ) * DetailBlendFactor;

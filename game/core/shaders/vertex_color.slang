@@ -34,6 +34,14 @@ BoolAttribute( SupportsMappingDimensions, true );
 TextureAttribute( RepresentativeTexture, g_tColor2 );
 BoolAttribute( renderbackfaces, F_RENDER_BACKFACES ? true : false );
 BoolAttribute( ShadowFastPath, true );
+// vertex_color.shader's vertex inputs (its VS_INPUT, every dynamic combo's): what the model compiler lays out the meshes of
+// models using these materials by (the material's VSInputSignature), so they keep the streams they had
+#define VS_INPUT_HAS_TANGENT_BASIS 1
+struct VS_INPUT
+{
+	#include "vr_shared_standard_vs_input.fxc"
+	float4 vColor : COLOR0 < Semantic( Color ); >;
+};
 #endif
 
 // g_sTrilinearWrap, for occlusion
