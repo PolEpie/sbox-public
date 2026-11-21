@@ -21,7 +21,7 @@ internal sealed class OpaqueLayer : MeshLayer
 	{
 		frame.BindFrame( rc, normals: true );
 
-		// The main frame already cleared the skybox target.
-		if ( start && !frame.IsSkybox ) rc.Clear( frame.Clear, clearDepth: !frame.System.DepthPrepass );
+		// The main frame already cleared the skybox target, and the stage after the prepass cleared it when it draws colour
+		if ( start && !frame.IsSkybox && !frame.ColorBeforeOpaque ) rc.Clear( frame.Clear, clearDepth: !frame.System.DepthPrepass );
 	}
 }

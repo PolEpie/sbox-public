@@ -223,6 +223,7 @@ public sealed partial class CameraComponent : Component, Component.ExecuteInEdit
 		sceneCamera.OnAfterPostProcess = finalizePostProcessHook ??= FinalizePostProcessing;
 		sceneCamera.WantsDepthNormalsHook = WantsDepthNormals;
 		sceneCamera.HasEarlyPostProcessHook = HasEarlyPostProcess;
+		sceneCamera.HasCommandListsHook = HasCommandLists;
 		sceneCamera.ScheduleEarlyPostProcessHook = ScheduleEarlyPostProcess;
 		sceneCamera.RenderEarlyPostProcessHook = RenderEarlyPostProcess;
 	}
@@ -400,6 +401,7 @@ public sealed partial class CameraComponent : Component, Component.ExecuteInEdit
 	Action finalizePostProcessHook;
 	Func<bool> wantsDepthNormalsHook;
 	Func<Stage, PostProcessQueue, bool> hasEarlyPostProcessHook;
+	Func<Stage, bool> hasCommandListsHook;
 	Action<Stage, bool> scheduleEarlyPostProcessHook;
 	Action<Stage, PostProcessQueue> renderEarlyPostProcessHook;
 
@@ -495,6 +497,7 @@ public sealed partial class CameraComponent : Component, Component.ExecuteInEdit
 		camera.OnRenderStageHook = executeCommandListsHook ??= ExecuteCommandLists;
 		camera.WantsDepthNormalsHook = wantsDepthNormalsHook ??= WantsDepthNormals;
 		camera.HasEarlyPostProcessHook = hasEarlyPostProcessHook ??= HasEarlyPostProcess;
+		camera.HasCommandListsHook = hasCommandListsHook ??= HasCommandLists;
 		camera.ScheduleEarlyPostProcessHook = scheduleEarlyPostProcessHook ??= ScheduleEarlyPostProcess;
 		camera.RenderEarlyPostProcessHook = renderEarlyPostProcessHook ??= RenderEarlyPostProcess;
 

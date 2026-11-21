@@ -115,6 +115,7 @@ internal sealed class RenderFrame
 		ContactShadowMask = null;
 		Normals = null;
 		Recorded = default;
+		ColorBeforeOpaque = !System.IsSkyboxSystem && stages is not null && stages.DrawsAt( RenderStage.AfterDepthPrepass );
 
 		// The 3D skybox draws as it is
 		DebugViews = System.IsSkyboxSystem ? DebugViews.None : RenderHost.Current.DebugViews;
@@ -124,6 +125,13 @@ internal sealed class RenderFrame
 	/// Borealis's debug views this frame draws (<see cref="RenderHost.DebugViews"/>).
 	/// </summary>
 	internal DebugViews DebugViews;
+
+	/// <summary>
+	/// The camera's command lists draw at <see cref="RenderStage.AfterDepthPrepass"/>
+	/// (<see cref="IRenderStages.DrawsAt"/>): that stage clears the frame's colour and draws into colour and depth, as
+	/// native's hook does, and the opaque pass keeps what it drew instead of clearing.
+	/// </summary>
+	internal bool ColorBeforeOpaque;
 
 	/// <summary>
 	/// Release per-frame references after submission.
