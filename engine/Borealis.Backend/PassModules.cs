@@ -14,7 +14,7 @@ namespace Borealis.Backend;
 /// that doesn't compile is reported once (<see cref="Error"/>) and its shader draws from its compiled programs, as with
 /// <see cref="BackendDevice.SlangPasses"/> off. See docs/reference/borealis-slang-materials.md ("Pass modules").
 /// </summary>
-public sealed class PassModules : IShaderModules
+public sealed partial class PassModules : IShaderModules
 {
 	readonly BackendDevice device;
 	readonly Dictionary<string, (DateTime Time, long Checked, PassModule Module)> modules = new( StringComparer.OrdinalIgnoreCase );
@@ -65,6 +65,37 @@ public sealed class PassModules : IShaderModules
 	public int PendingAsks => pendingAsks;
 
 	int pendingAsks;
+
+	int unseen;
+
+	/// <summary>
+	/// Mark what's recorded until the scope is disposed as drawn unseen (a loading scene's view behind the loading screen): a
+	/// variant whose stages are still compiling starts them on the compile threads and draws nothing meanwhile, a module-only
+	/// shader's too, rather than waiting for them. Borealis's own passes are still waited for (<see cref="Compile(ShaderFile, ShaderMode, ReadOnlySpan{int}, Func{string, int?}, Func{string, int?}, bool)"/>).
+	/// </summary>
+	public UnseenScope Unseen()
+	{
+		System.Threading.Interlocked.Increment( ref unseen );
+		return new UnseenScope( this );
+	}
+
+	/// <summary>Ends <see cref="Unseen"/>.</summary>
+	public readonly struct UnseenScope( PassModules modules ) : IDisposable
+	{
+		/// <summary>Ends the scope.</summary>
+		public void Dispose() => System.Threading.Interlocked.Decrement( ref modules.unseen );
+	}
+
+	/// <summary>Stages compiling on the compile threads now (started by a draw that didn't wait, or waiting for), for loads and reports.</summary>
+	public int Compiling
+	{
+		get
+		{
+			int count;
+			lock ( stages ) count = running.Values.Count( t => !t.IsCompleted );
+			return count + (prewarming is { IsCompleted: false } ? 1 : 0);
+		}
+	}
 
 	/// <summary>
 	/// Where compiled stages are kept between runs; <c>game/.source2/borealispasses</c> beside the engine's own caches unless
@@ -403,9 +434,9 @@ public sealed class PassModules : IShaderModules
 		try
 		{
 			// Every stage it needs compiles at once, on the compile threads; then each is waited for in turn, or, in the
-			// background, none is: the shader's programs draw until they're done
+			// background, none is: the shader's programs draw until they're done. Drawn unseen, nothing draws meanwhile
 			foreach ( var kind in Kinds ) Stage( kind, out _, start: true );
-			if ( waiting && CompileInBackground && !shader.ModuleOnly && !Borealis( module ) )
+			if ( waiting && !Borealis( module ) && (System.Threading.Volatile.Read( ref unseen ) > 0 || (CompileInBackground && !shader.ModuleOnly)) )
 			{
 				System.Threading.Interlocked.Increment( ref pendingAsks );
 				return ModuleProgram.Pending;
@@ -547,17 +578,21 @@ public sealed class PassModules : IShaderModules
 	static string StageKey( PassModule module, StageKind kind, Dictionary<string, int> values ) =>
 		$"{module.Path}|{module.Text.GetHashCode()}|{kind}|{string.Join( ';', values.OrderBy( v => v.Key, StringComparer.Ordinal ).Select( v => $"{v.Key}={v.Value}" ) )}";
 
-	/// <summary>Start compiling a stage on the compile threads unless it's compiled, failed or compiling; its task.</summary>
-	Task<CompiledPassStage> Start( PassModule module, StageKind kind, Dictionary<string, int> values )
+	/// <summary>
+	/// Start compiling a stage on the compile threads unless it's compiled, failed or compiling; its task. A draw's ask
+	/// (<paramref name="asked"/>) is kept for the next run's <see cref="Prewarm"/>.
+	/// </summary>
+	Task<CompiledPassStage> Start( PassModule module, StageKind kind, Dictionary<string, int> values, bool asked = true, CompilePriority priority = null )
 	{
 		var key = StageKey( module, kind, values );
+		if ( asked ) Remember( key, module, kind, values );
 		lock ( stages )
 		{
 			if ( stages.ContainsKey( key ) || failed.ContainsKey( key ) ) return null;
 			if ( running.TryGetValue( key, out var known ) ) return known;
 		}
 
-		var task = Compiler().CompilePassAsync( module, kind, values );
+		var task = Compiler().CompilePassAsync( module, kind, values, priority );
 		lock ( stages ) return running.TryAdd( key, task ) ? task : running[key];
 	}
 

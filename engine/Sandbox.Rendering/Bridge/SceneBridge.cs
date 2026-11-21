@@ -367,8 +367,17 @@ internal sealed partial class SceneBridge : ISceneRenderer
 		render.PrepareFrame();
 
 		// Once its models are made, its camera's view renders unseen every few frames: the first frame after the load finds
-		// the view's resident lists, child views (water's refraction), pipelines and targets made, and its textures streamed
-		if ( !WarmWhileLoading || gpu.Services.LoadingModels || Application.FrameCount < warmFrame || render.UnseenRenders >= MaxUnseenRenders ) return;
+		// the view's resident lists, child views (water's refraction), pipelines and targets made, and its textures streamed.
+		// Its shaders compile on workers meanwhile (nothing waits for them unseen); it goes on past its cap until they're done,
+		// so one more render makes the pipelines they draw with
+		if ( !WarmWhileLoading || gpu.Services.LoadingModels || Application.FrameCount < warmFrame ) return;
+		if ( render.UnseenRenders >= MaxUnseenRenders )
+		{
+			if ( GameLoading( scene ) && gpu.Services.CompilingShaders ) render.UnseenOwed = true;
+			else if ( render.UnseenOwed ) render.UnseenOwed = false;
+			else return;
+		}
+
 		if ( !WarmTarget( out var size, out var samples ) || ShownCamera( scene ) is not { } camera ) return;
 
 		warmFrame = Application.FrameCount + WarmEveryFrames;
@@ -380,6 +389,7 @@ internal sealed partial class SceneBridge : ISceneRenderer
 		warming = true;
 		try
 		{
+			using var unseen = gpu.Services.Passes.Unseen();
 			camera.AddToRenderList( default, size );
 		}
 		finally

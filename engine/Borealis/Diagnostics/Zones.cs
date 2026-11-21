@@ -52,6 +52,7 @@ internal static class Zones
 	public static readonly Zone ShaderRead = new( "Borealis Shader Read", Color.Green );
 	public static readonly Zone TextureRead = new( "Borealis Texture Read", Color.Green );
 	public static readonly Zone PassModulesRead = new( "Borealis Pass Modules Read", Color.Orange );
+	public static readonly Zone PassModulesPrewarm = new( "Borealis Pass Modules Prewarm", Color.Orange );
 	public static readonly Zone WorldPrepare = new( "Borealis World Prepare", Color.Cyan );
 	public static readonly Zone VisibilityMake = new( "Borealis Visibility Make", Color.Orange );
 	public static readonly Zone WorldLoaded = new( "Borealis World Loaded", Color.Cyan );
