@@ -1594,7 +1594,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 		// A material with features the surface doesn't do stays on its .shader; once the shader is a surface alone (no
 		// .shader_c) there's nothing else to draw it with, so the surface takes it without them
 		var shader = Shaders.Load( file.Shader );
-		if ( (shader is not null && !ConvertedMaterial.Accepts( compiled, file )) || tier.ConvertMaterial?.Invoke( path ) == false ) return null;
+		if ( (shader is not null && !ConvertedMaterial.Accepts( compiled, file, shader )) || tier.ConvertMaterial?.Invoke( path ) == false ) return null;
 		tier.CountConverted( path );
 		var converted = ConvertedMaterial.Create( compiled, WithFeatureRules( file ), path, MaterialTextureFile );
 

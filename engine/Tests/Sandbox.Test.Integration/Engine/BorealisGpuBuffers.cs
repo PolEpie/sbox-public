@@ -62,4 +62,42 @@ public class BorealisGpuBuffersTest
 		Assert.AreEqual( 0, borealis.ValidationErrors );
 		foreach ( var buffer in made ) buffer.Dispose();
 	}
+
+	/// <summary>
+	/// A buffer cleared and then written in part outside a block, as a clutter batch marks every sphere slot free and then
+	/// uploads its tiles: the write is recorded after the fill in the uploads and waits for it, so it reads back over the
+	/// clear. A large buffer, so a fill left to run beside the write would finish after it.
+	/// </summary>
+	[TestMethod]
+	public void WritesAfterAClearOutsideABlockKeepTheirValues()
+	{
+		TestGraphics.Require();
+		using var borealis = BorealisGpuRenderBackend.Create( validation: true );
+
+		var previous = RenderBackend.Default;
+		RenderBackend.SetDefault( borealis );
+		try
+		{
+			for ( int round = 0; round < 8; round++ )
+			{
+				using var buffer = new GpuBuffer<uint>( 1 << 22 );
+				buffer.Clear( 0xBF800000 );
+				buffer.SetData( new uint[] { 1, 2, 3, 4 }, 0 );
+				buffer.SetData( new uint[] { 5, 6 }, 1 << 21 );
+
+				var start = new uint[5];
+				buffer.GetData( start, 0, 5 );
+				CollectionAssert.AreEqual( new uint[] { 1, 2, 3, 4, 0xBF800000 }, start, $"round {round}: the start" );
+				var middle = new uint[2];
+				buffer.GetData( middle, 1 << 21, 2 );
+				CollectionAssert.AreEqual( new uint[] { 5, 6 }, middle, $"round {round}: the middle" );
+			}
+
+			Assert.AreEqual( 0, borealis.ValidationErrors );
+		}
+		finally
+		{
+			RenderBackend.SetDefault( previous );
+		}
+	}
 }

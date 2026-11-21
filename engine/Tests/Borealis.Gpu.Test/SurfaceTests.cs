@@ -2,6 +2,8 @@ using Borealis;
 using Borealis.Backend;
 using Borealis.Gpu;
 using Borealis.Source2;
+using Borealis.Source2.Materials;
+using Borealis.Source2.Shaders;
 using Sandbox;
 using Sandbox.BorealisLab.Surfaces;
 using Sandbox.ShaderCompiler;
@@ -1592,6 +1594,89 @@ public class SurfaceTests : GpuTest
 		var material = (SurfaceMaterial)backend.Surfaces.CreateMaterial( Path.Combine( Core, "shaders", "glass.slang" ), null, new Dictionary<string, float[]>() );
 		Assert.IsTrue( material.IsTranslucent );
 		Assert.IsTrue( material.RenderState is { Blend: SurfaceBlend.Opaque, Translucent: true } );
+	}
+
+	/// <summary>
+	/// A mode a shader leaves to another (<c>Depth( "depth_only.shader" )</c>, as a package shader with only VrForward has)
+	/// draws with the material's features carried over by name, as native's: an alpha-tested material's depth is
+	/// depth_only's alpha-tested variant, whose pixel shader cuts the depth where the colour pass clips (Jumper's plant
+	/// leaves left their quads' depth in the prepass without it); one that doesn't alpha test has no cut.
+	/// </summary>
+	[TestMethod]
+	public void ModeFallbacksTakeTheMaterialsFeatures()
+	{
+		using var backend = new BackendDevice( Device );
+		var library = backend.Shaders;
+		Assert.IsNotNull( library.Load( "shaders/depth_only.shader" ), "no depth_only.shader" );
+
+		var leaves = ShaderFile.FromModule( "leaves",
+			[new ShaderMode { Name = "VrForward", Fallback = "", Settings = [] }, new ShaderMode { Name = "Depth", Fallback = "depth_only.shader", Settings = [] }],
+			[new ShaderCombo { Name = "F_TEXTURE_FILTERING", Min = 0, Max = 4, FeatureIndex = 0, Strings = [] }, new ShaderCombo { Name = "F_ALPHA_TEST", Min = 0, Max = 1, FeatureIndex = 1, Strings = [] }],
+			[] );
+
+		ShaderVariant DepthVariant( int alphaTest )
+		{
+			var until = DateTime.UtcNow + TimeSpan.FromSeconds( 120 );
+			while ( true )
+			{
+				var variant = library.Variant( leaves, "Depth", [0, alphaTest], null, null, false, out var pending );
+				if ( !pending || DateTime.UtcNow > until ) return variant;
+				System.Threading.Thread.Sleep( 100 );
+			}
+		}
+
+		var cut = DepthVariant( 1 );
+		Assert.IsNotNull( cut, "no depth variant" );
+		Assert.IsTrue( cut.Pixel?.Reflection is { Discards: true }, "an alpha-tested material's fallback depth doesn't cut" );
+		Assert.IsFalse( DepthVariant( 0 )?.Pixel?.Reflection is { Discards: true }, "an opaque material's fallback depth cuts" );
+	}
+
+	/// <summary>
+	/// A translucency feature a material's shader declares but never reads doesn't make it blend, as on native: blendable.shader
+	/// had common/features.hlsl's <c>F_ADDITIVE_BLEND</c> and no combo following it, so a blendable material that kept the
+	/// value from another shader (Unicycle Frenzy's start pad trim) was opaque there, and package shaders still declare it so.
+	/// Such a material is opaque and converts to a surface that doesn't read the feature; one whose shader's static combo
+	/// follows the feature (<c>S_ADDITIVE_BLEND</c>) still blends.
+	/// </summary>
+	[TestMethod]
+	public void TranslucencyFeaturesTheShaderDoesntReadDontBlend()
+	{
+		static MaterialFile MaterialOf( string shader, Dictionary<string, int> ints ) => new()
+		{
+			Name = "trim",
+			Shader = shader,
+			Ints = ints,
+			Floats = new Dictionary<string, float>(),
+			Vectors = new Dictionary<string, float[]>(),
+			Textures = new Dictionary<string, string>(),
+			IntAttributes = new Dictionary<string, int>(),
+		};
+
+		// F_MULTIBLEND picks code; F_ADDITIVE_BLEND only where the shader has S_ADDITIVE_BLEND
+		static ShaderFile Described( bool readsAdditive )
+		{
+			ShaderCombo[] features = [new() { Name = "F_MULTIBLEND", Min = 0, Max = 3, FeatureIndex = 0, Strings = [] }, new() { Name = "F_ADDITIVE_BLEND", Min = 0, Max = 1, FeatureIndex = 1, Strings = [] }];
+			var statics = new List<ShaderCombo> { new() { Name = "S_MULTIBLEND", Min = 0, Max = 3, FeatureIndex = 0, Strings = [] } };
+			if ( readsAdditive ) statics.Add( new() { Name = "S_ADDITIVE_BLEND", Min = 0, Max = 1, FeatureIndex = 1, Strings = [] } );
+			return ShaderFile.FromModule( readsAdditive ? "reads" : "declares", [new ShaderMode { Name = "Forward", Fallback = "", Settings = [] }], features,
+				[(ShaderProgramType.Vertex, [], []), (ShaderProgramType.Pixel, [.. statics], [])] );
+		}
+
+		var declares = Described( false );
+		var reads = Described( true );
+		Assert.IsTrue( declares.FeatureIndex( "F_ADDITIVE_BLEND" ) >= 0 );
+		Assert.IsFalse( declares.FeatureSelectsCode( declares.FeatureIndex( "F_ADDITIVE_BLEND" ) ) );
+		Assert.IsTrue( declares.FeatureSelectsCode( declares.FeatureIndex( "F_MULTIBLEND" ) ) );
+		Assert.IsTrue( reads.FeatureSelectsCode( reads.FeatureIndex( "F_ADDITIVE_BLEND" ) ) );
+
+		var trim = MaterialOf( "shaders/blendable.shader", new() { ["F_MULTIBLEND"] = 1, ["F_ADDITIVE_BLEND"] = 1 } );
+		using var trimMaterial = new BackendMaterial( "trim", declares, trim, null );
+		Assert.IsFalse( trimMaterial.IsTranslucent, "a material blends by a feature its shader doesn't read" );
+		var surface = Compiler().CompileSurface( Path.Combine( Core, "shaders", "blendable.slang" ) );
+		Assert.IsTrue( ConvertedMaterial.Accepts( surface, trim, declares ), "blendable.slang doesn't take the material" );
+
+		using var additive = new BackendMaterial( "additive", reads, trim, null );
+		Assert.IsTrue( additive.IsTranslucent, "a material whose shader reads F_ADDITIVE_BLEND is opaque" );
 	}
 
 	/// <summary>

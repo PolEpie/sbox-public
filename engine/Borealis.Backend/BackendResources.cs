@@ -947,11 +947,16 @@ internal sealed class BackendMaterial : GpuMaterial, IStreamDependent
 
 	bool Feature( string name ) => Shader?.FeatureIndex( name ) is int index && index >= 0 && Features[index] != 0;
 
+	/// <summary>A feature that's set and selects code in its shader (<see cref="ShaderFile.FeatureSelectsCode"/>).</summary>
+	bool FeatureInUse( string name ) => Feature( name ) && Shader.FeatureSelectsCode( Shader.FeatureIndex( name ) );
+
 	public override string Name { get; }
 	/// <summary>
 	/// Whether it blends: its translucency features, or the <c>translucent</c> attribute its shader exports, as native reads a
 	/// material's (a shader that defines <c>S_TRANSLUCENT</c> itself, as Rubble's glass does, exports it from sbox_pixel.fxc
-	/// with no feature). Worked out once per load: draws ask for every draw.
+	/// with no feature). A translucency feature its shader only declares and never reads (blendable.shader's
+	/// <c>F_ADDITIVE_BLEND</c>, from common/features.hlsl) doesn't count: a value left in the material by another shader
+	/// draws nothing differently on native. Worked out once per load: draws ask for every draw.
 	/// </summary>
 	public override bool IsTranslucent
 	{
@@ -961,7 +966,7 @@ internal sealed class BackendMaterial : GpuMaterial, IStreamDependent
 			var known = Volatile.Read( ref translucent );
 			if ( (known & 3) == 0 || (int)(known >> 2) != loads )
 			{
-				known = ((long)loads << 2) | (Feature( "F_TRANSLUCENT" ) || Feature( "F_ADDITIVE_BLEND" ) || Attribute( "translucent", false ) ? 2L : 1L);
+				known = ((long)loads << 2) | (FeatureInUse( "F_TRANSLUCENT" ) || FeatureInUse( "F_ADDITIVE_BLEND" ) || Attribute( "translucent", false ) ? 2L : 1L);
 				Volatile.Write( ref translucent, known );
 			}
 
