@@ -76,6 +76,55 @@ public class FrameLogTests
 		Assert.AreEqual( 3, commands.Where( c => c.Op == GpuOp.Draw && c.In( "Opaque Forward" ) ).Sum( c => c.Count ), "forward draws every box itself" );
 	}
 
+	/// <summary>A camera with command lists after the prepass (GAMMA's mirror glass), or without; it keeps the stage's targets.</summary>
+	sealed class CommandListStages( bool draws ) : IRenderStages
+	{
+		public GpuTexture Color, Depth;
+
+		public void Render( RenderStage stage, in StageTarget target )
+		{
+			if ( stage != RenderStage.AfterDepthPrepass ) return;
+			(Color, Depth) = (target.Color, target.Depth);
+		}
+
+		public bool DrawsAt( RenderStage stage ) => draws && stage == RenderStage.AfterDepthPrepass;
+	}
+
+	/// <summary>
+	/// A camera's command lists after the prepass draw into the frame's colour and depth, as native's hook does: the frame
+	/// clears colour before that stage and the opaque pass keeps what it drew. Without them the stage has depth alone and
+	/// the opaque pass clears colour. Either way colour is cleared once.
+	/// </summary>
+	[TestMethod]
+	public void CommandListsAfterThePrepassDrawIntoColour()
+	{
+		using var material = new HeadlessMaterial( "box", "complex" );
+		var world = Boxes( material, 3 );
+		using var target = ViewTarget.Create( new Vector2Int( 640, 480 ) );
+		using var system = new RenderSystem();
+
+		foreach ( var draws in new[] { true, false } )
+		{
+			var stages = new CommandListStages( draws );
+			var commands = Render( system, world, target, stages ).Commands.ToList();
+			var clears = commands.Where( c => c.Op == GpuOp.Clear && c.Texture == target.Color ).ToList();
+			var forward = commands.First( c => c.IsDraw && c.In( "Opaque Forward" ) );
+
+			Assert.AreEqual( 1, clears.Count, $"colour cleared once (command lists {draws})" );
+			Assert.IsTrue( commands.IndexOf( clears[0] ) < commands.IndexOf( forward ), "before the opaque pass draws" );
+			Assert.AreSame( target.Depth, stages.Depth, "the stage draws against the prepass's depth" );
+			if ( draws )
+			{
+				Assert.AreSame( target.Color, stages.Color, "command lists after the prepass draw into colour" );
+				Assert.IsFalse( clears[0].In( "Opaque Forward" ), "cleared before the stage, not by the opaque pass" );
+			}
+			else
+			{
+				Assert.IsNull( stages.Color, "without command lists the stage has depth alone" );
+			}
+		}
+	}
+
 	/// <summary>
 	/// The view set (<c>g_viewSet</c>) is written once a frame, once everything it's filled from is set and before the
 	/// light culling reads it: shaders built against it see the frame's lights, decals, clusters, sun, fog and shadows.
