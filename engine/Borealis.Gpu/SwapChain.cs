@@ -267,6 +267,7 @@ public sealed unsafe class SwapChain : IDisposable
 	/// </summary>
 	public void Resize( int width, int height )
 	{
+		FinishPresent();
 		device.WaitIdle();
 		Release();
 		Create( width, height );
@@ -292,6 +293,9 @@ public sealed unsafe class SwapChain : IDisposable
 	{
 		image = default;
 		if ( Current.IsValid ) throw new InvalidOperationException( "The last acquired image wasn't presented" );
+
+		// The swap chain is the present thread's until the last present is queued
+		FinishPresent();
 
 		for ( int attempt = 0; attempt < 2; attempt++ )
 		{
@@ -341,6 +345,93 @@ public sealed unsafe class SwapChain : IDisposable
 			device.Submit( list, default, this );
 		}
 
+		if ( PresentOnThread )
+		{
+			PresentLater( imageIndex );
+			Current = default;
+			return;
+		}
+
+		PresentNow( imageIndex );
+		Current = default;
+	}
+
+	/// <summary>
+	/// Queue the presents on a thread of their own (<see cref="Present"/> hands the image over and returns): the present
+	/// call's own cost leaves the thread driving frames. The next <see cref="Acquire"/>, a resize and disposing wait for the
+	/// last present to be queued, and an error it met (a lost device) is thrown there.
+	/// </summary>
+	public bool PresentOnThread { get; set; }
+
+	System.Threading.Thread presentThread;
+	readonly object presentGate = new();
+	int presentWaiting = -1;
+	bool presentStopping;
+	Exception presentError;
+
+	void PresentLater( uint index )
+	{
+		lock ( presentGate )
+		{
+			while ( presentWaiting >= 0 ) System.Threading.Monitor.Wait( presentGate );
+			presentWaiting = (int)index;
+			System.Threading.Monitor.PulseAll( presentGate );
+		}
+
+		if ( presentThread is null )
+		{
+			presentThread = new System.Threading.Thread( PresentLoop ) { IsBackground = true, Name = "Borealis.Gpu present", Priority = System.Threading.ThreadPriority.AboveNormal };
+			presentThread.Start();
+		}
+	}
+
+	void PresentLoop()
+	{
+		while ( true )
+		{
+			int index;
+			lock ( presentGate )
+			{
+				while ( presentWaiting < 0 && !presentStopping ) System.Threading.Monitor.Wait( presentGate );
+				if ( presentWaiting < 0 ) return;
+				index = presentWaiting;
+			}
+
+			try
+			{
+				PresentNow( (uint)index );
+			}
+			catch ( Exception e )
+			{
+				presentError = e;
+			}
+
+			lock ( presentGate )
+			{
+				presentWaiting = -1;
+				System.Threading.Monitor.PulseAll( presentGate );
+			}
+		}
+	}
+
+	/// <summary>Wait until the last present handed to the present thread is queued; throw what it met.</summary>
+	void FinishPresent()
+	{
+		if ( presentThread is null ) return;
+		lock ( presentGate )
+		{
+			while ( presentWaiting >= 0 ) System.Threading.Monitor.Wait( presentGate );
+		}
+
+		if ( presentError is { } error )
+		{
+			presentError = null;
+			System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw( error );
+		}
+	}
+
+	void PresentNow( uint imageIndex )
+	{
 		var semaphore = presentSemaphores[imageIndex];
 		var chain = swapchain;
 		var index = imageIndex;
@@ -359,7 +450,6 @@ public sealed unsafe class SwapChain : IDisposable
 		lock ( queue.SubmitLock ) result = vk.vkQueuePresentKHR( queue.Handle, &present );
 
 		device.RememberEvent( "presented image, result*16+image:", (int)result * 16 + index );
-		Current = default;
 		if ( result is VkResult.ErrorOutOfDate or VkResult.Suboptimal ) outOfDate = true;
 		else device.Check( result, "vkQueuePresentKHR" );
 	}
@@ -392,6 +482,20 @@ public sealed unsafe class SwapChain : IDisposable
 	{
 		if ( disposed ) return;
 		disposed = true;
+
+		// The present thread stops once its last present is queued; what it met no longer matters
+		if ( presentThread is not null )
+		{
+			lock ( presentGate )
+			{
+				while ( presentWaiting >= 0 ) System.Threading.Monitor.Wait( presentGate );
+				presentStopping = true;
+				System.Threading.Monitor.PulseAll( presentGate );
+			}
+
+			presentThread.Join();
+			presentThread = null;
+		}
 
 		device.WaitIdle();
 		Release();
