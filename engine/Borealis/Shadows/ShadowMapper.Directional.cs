@@ -140,6 +140,21 @@ internal partial class ShadowMapper
 	static CascadeCache LastCascades;
 	static readonly ShadowMap[] LastCascadeMaps = new ShadowMap[4];
 
+	/// <summary>
+	/// Let go of the last cascade set once its frame has passed: it's reused only within its frame, and it keeps the mapper
+	/// that drew it (its render system, and that system's world's objects) and the sun. With nothing rendering, a closed
+	/// game's world stayed behind it.
+	/// </summary>
+	internal static void ForgetStaleCascades()
+	{
+		// Cached far cascades keep their maps, but not the mapper that last drew one, which matters only within its frame
+		ForgetStaleFarDrawers();
+
+		if ( LastCascades.Mapper is null || LastCascades.Frame == FrameCount ) return;
+		LastCascades = default;
+		Array.Clear( LastCascadeMaps );
+	}
+
 	// Near Far frustum corners in clip space
 	private static readonly Vector4[] Corners =
 	[
