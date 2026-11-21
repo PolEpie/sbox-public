@@ -43,6 +43,31 @@ internal sealed class BridgeCustomObject : CustomObject
 	}
 
 	/// <summary>
+	/// A run of mirrored custom objects in one layer, drawn in one lent block on Borealis.Gpu (<see cref="BorealisGpuCustomDraw.DrawRun"/>)
+	/// rather than a block each: in colour and depth layers alike. Overlay layers keep each for the camera's output.
+	/// </summary>
+	internal override void RenderRun( GpuContext context, ViewPass view, MeshLayer layer, ReadOnlySpan<CustomDraw> run )
+	{
+		var overlay = !view.IsShadow && (layer.Runs & (MeshRuns.OverlayWithDepth | MeshRuns.OverlayWithoutDepth)) != 0;
+		if ( run.Length == 1 || overlay )
+		{
+			base.RenderRun( context, view, layer, run );
+			return;
+		}
+
+		var layerType = (SceneLayerType)layer.LayerType;
+		if ( layer.Depth || view.IsShadow )
+		{
+			var shadow = layer.LayerType == MeshLayerType.Shadow;
+			BorealisGpuCustomDraw.DrawRun( context, run, layerType, view.View, layer.ShaderMode, shadow ? view.DepthBias : 0, shadow ? view.SlopeScaledDepthBias : 0, CameraAttributes( view ) );
+			return;
+		}
+
+		if ( layerType is not (SceneLayerType.Opaque or SceneLayerType.Translucent) ) return;
+		BorealisGpuCustomDraw.DrawRun( context, run, layerType, view.View, cameraAttributes: CameraAttributes( view ), lightingWorld: view.World, subWorlds: view.View.SubWorlds );
+	}
+
+	/// <summary>
 	/// The attributes of the camera <paramref name="view"/> draws for (<c>SceneCamera.Attributes</c>, with what
 	/// <c>Scene.RenderAttributes</c> set): a shadow view's are its main view's, as the meshes in its shadow maps read them.
 	/// </summary>

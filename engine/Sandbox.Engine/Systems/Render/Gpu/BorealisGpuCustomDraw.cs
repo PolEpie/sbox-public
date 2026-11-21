@@ -93,6 +93,55 @@ internal static class BorealisGpuCustomDraw
 		return true;
 	}
 
+	// The run DrawRun is drawing, which the one delegate handed to the frame reads, so a run allocates no closure
+	static readonly List<CustomDraw> run = new();
+	static GpuContext runContext;
+	static Action drawRun;
+	static RenderAttributes runAttributes;
+
+	/// <summary>
+	/// <see cref="Draw"/> for a run of mirrored custom objects that follow one another in a layer (<see cref="CustomObject.RenderRun"/>):
+	/// one lent block for them all. Each draws with its own transform slot, its target and viewport bound again, and what it
+	/// sets on the graphics attributes kept its own, over the block's (the view constants, the camera's attributes), as
+	/// a block of its own would leave it.
+	/// </summary>
+	public static void DrawRun( GpuContext context, ReadOnlySpan<CustomDraw> draws, SceneLayerType layerType, RenderView camera, StringToken shaderMode = default, int depthBias = 0, float slopeScaledDepthBias = 0, RenderAttributes cameraAttributes = null, RenderWorld lightingWorld = null, ulong subWorlds = 0 )
+	{
+		run.Clear();
+		foreach ( var draw in draws ) run.Add( draw );
+		runContext = context;
+		try
+		{
+			// The first object's slot: the frame takes its instances when the block starts, as for an object alone
+			context.BindInstances( 1, draws[0].FirstInstance );
+			Draw( context, layerType, camera, drawRun ??= DrawEachInRun, shaderMode, depthBias, slopeScaledDepthBias, cameraAttributes, lightingWorld, subWorlds );
+		}
+		finally
+		{
+			run.Clear();
+			runContext = null;
+		}
+	}
+
+	static void DrawEachInRun()
+	{
+		var backend = (BorealisGpuRenderBackend)RenderBackend.Default;
+		var context = (BackendContext)runContext;
+		runAttributes ??= RenderAttributes.CreateManaged();
+		foreach ( var (custom, firstInstance) in run )
+		{
+			if ( custom is not Sandbox.Rendering.BridgeCustomObject { Source: { } source } || !source.IsValid() ) continue;
+			context.BindInstances( 1, firstInstance );
+			var (transforms, ids, offset) = context.LentInstances;
+			backend.LendInstances( transforms, ids, offset );
+
+			runAttributes.Clear();
+			using var scope = new Graphics.AttributeScope( runAttributes );
+			view.Bind();
+			source.RenderInternal();
+		}
+	}
+
 	/// <summary>
 	/// A dynamic object's vertices (<see cref="SceneDynamicObject.ManagedVertices"/>) with its material and attributes, in the
 	/// block being recorded, as native's <c>CDynamicSceneObjectDesc</c> draws them with its transform slot bound.
