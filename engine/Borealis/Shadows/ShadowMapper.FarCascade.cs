@@ -414,6 +414,14 @@ internal partial class ShadowMapper
 		}
 	}
 
+	static void ForgetStaleFarDrawers()
+	{
+		foreach ( var far in FarCascades )
+		{
+			if ( far.DrawnFrame != FrameCount ) far.DrawnBy = null;
+		}
+	}
+
 	static void ResetFarCascades()
 	{
 		foreach ( var far in FarCascades )

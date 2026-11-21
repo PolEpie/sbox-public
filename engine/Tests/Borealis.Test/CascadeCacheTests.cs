@@ -53,6 +53,34 @@ public class CascadeCacheTests
 		return box;
 	}
 
+	static object LastCascadesMapper()
+	{
+		var flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public;
+		var last = typeof( ShadowMapper ).GetField( "LastCascades", flags ).GetValue( null );
+		return last.GetType().GetField( "Mapper", flags ).GetValue( last );
+	}
+
+	/// <summary>
+	/// The last cascade set is reused only within its frame: once that has passed it's let go of, with the mapper (and the
+	/// render system and world) that drew it. A closed game's world stayed behind it at the menu, where nothing renders.
+	/// </summary>
+	[TestMethod]
+	public void StaleCascadesAreLetGo()
+	{
+		var world = SunWorld();
+		Box( world, new Vector3( 300, 0, 0 ), isStatic: true );
+		using var system = new RenderSystem();
+		CollectAndPrepare( system, world, LookingDownX() );
+		Assert.IsNotNull( LastCascadesMapper(), "the frame's cascades are kept for other views in it" );
+
+		ShadowMapper.ForgetStaleCascades();
+		Assert.IsNotNull( LastCascadesMapper(), "kept within their frame" );
+
+		RenderHost.Current.NextFrame();
+		ShadowMapper.ForgetStaleCascades();
+		Assert.IsNull( LastCascadesMapper(), "let go once it has passed" );
+	}
+
 	/// <summary>
 	/// A cascade culls casters narrower than one of its texels, wherever they are: not by how big they are on the camera's
 	/// screen.

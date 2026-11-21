@@ -619,6 +619,14 @@ public class DeviceTests : GpuTest
 		var folder = Path.Combine( Path.GetTempPath(), $"borealis-pipelines-{Guid.NewGuid():N}" );
 		try
 		{
+			// A save on a device of its own first pays for the process's one-time setup (JIT, statics), so the save measured
+			// below costs what every save does
+			using ( var warm = Device.Create( new DeviceOptions { Presentation = false, PipelineCacheFolder = Path.Combine( folder, "warm" ), PipelinePartManifest = false } ) )
+			{
+				using ( new SampleScene( warm, Format.RGBA8Unorm ) ) { }
+				warm.SavePipelineCache();
+			}
+
 			using var device = Device.Create( new DeviceOptions { Presentation = false, PipelineCacheFolder = folder, PipelinePartManifest = false } );
 			using ( new SampleScene( device, Format.RGBA8Unorm ) ) { }
 
