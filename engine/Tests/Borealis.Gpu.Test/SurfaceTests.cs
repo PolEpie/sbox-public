@@ -1888,9 +1888,10 @@ public class SurfaceTests : GpuTest
 
 	/// <summary>
 	/// A translucency feature a material's shader declares but never reads doesn't make it blend, as on native: blendable.shader
-	/// has common/features.hlsl's <c>F_ADDITIVE_BLEND</c> and no combo follows it, so a blendable material that kept the value
-	/// from another shader (Unicycle Frenzy's start pad trim) is opaque and converts to blendable.slang; complex's own
-	/// translucency features still blend.
+	/// had common/features.hlsl's <c>F_ADDITIVE_BLEND</c> and no combo following it, so a blendable material that kept the
+	/// value from another shader (Unicycle Frenzy's start pad trim) was opaque there, and package shaders still declare it so.
+	/// Such a material is opaque and converts to a surface that doesn't read the feature; one whose shader's static combo
+	/// follows the feature (<c>S_ADDITIVE_BLEND</c>) still blends.
 	/// </summary>
 	[TestMethod]
 	public void TranslucencyFeaturesTheShaderDoesntReadDontBlend()
@@ -1906,22 +1907,31 @@ public class SurfaceTests : GpuTest
 			IntAttributes = new Dictionary<string, int>(),
 		};
 
-		var blendable = ShaderFile.Read( ShaderFileTests.Files.Read( "shaders/blendable.shader" ), "blendable" );
-		var complex = ShaderFile.Read( ShaderFileTests.Files.Read( "shaders/complex.shader" ), "complex" );
-		Assert.IsTrue( blendable.FeatureIndex( "F_ADDITIVE_BLEND" ) >= 0, "blendable.shader declares F_ADDITIVE_BLEND" );
-		Assert.IsFalse( blendable.FeatureSelectsCode( blendable.FeatureIndex( "F_ADDITIVE_BLEND" ) ) );
-		Assert.IsTrue( blendable.FeatureSelectsCode( blendable.FeatureIndex( "F_MULTIBLEND" ) ) );
-		Assert.IsTrue( complex.FeatureSelectsCode( complex.FeatureIndex( "F_TRANSLUCENT" ) ) );
+		// F_MULTIBLEND picks code; F_ADDITIVE_BLEND only where the shader has S_ADDITIVE_BLEND
+		static ShaderFile Described( bool readsAdditive )
+		{
+			ShaderCombo[] features = [new() { Name = "F_MULTIBLEND", Min = 0, Max = 3, FeatureIndex = 0, Strings = [] }, new() { Name = "F_ADDITIVE_BLEND", Min = 0, Max = 1, FeatureIndex = 1, Strings = [] }];
+			var statics = new List<ShaderCombo> { new() { Name = "S_MULTIBLEND", Min = 0, Max = 3, FeatureIndex = 0, Strings = [] } };
+			if ( readsAdditive ) statics.Add( new() { Name = "S_ADDITIVE_BLEND", Min = 0, Max = 1, FeatureIndex = 1, Strings = [] } );
+			return ShaderFile.FromModule( readsAdditive ? "reads" : "declares", [new ShaderMode { Name = "Forward", Fallback = "", Settings = [] }], features,
+				[(ShaderProgramType.Vertex, [], []), (ShaderProgramType.Pixel, [.. statics], [])] );
+		}
+
+		var declares = Described( false );
+		var reads = Described( true );
+		Assert.IsTrue( declares.FeatureIndex( "F_ADDITIVE_BLEND" ) >= 0 );
+		Assert.IsFalse( declares.FeatureSelectsCode( declares.FeatureIndex( "F_ADDITIVE_BLEND" ) ) );
+		Assert.IsTrue( declares.FeatureSelectsCode( declares.FeatureIndex( "F_MULTIBLEND" ) ) );
+		Assert.IsTrue( reads.FeatureSelectsCode( reads.FeatureIndex( "F_ADDITIVE_BLEND" ) ) );
 
 		var trim = MaterialOf( "shaders/blendable.shader", new() { ["F_MULTIBLEND"] = 1, ["F_ADDITIVE_BLEND"] = 1 } );
-		using var trimMaterial = new BackendMaterial( "trim", blendable, trim, null );
-		Assert.IsFalse( trimMaterial.IsTranslucent, "a blendable material blends" );
+		using var trimMaterial = new BackendMaterial( "trim", declares, trim, null );
+		Assert.IsFalse( trimMaterial.IsTranslucent, "a material blends by a feature its shader doesn't read" );
 		var surface = Compiler().CompileSurface( Path.Combine( Core, "shaders", "blendable.slang" ) );
-		Assert.IsTrue( ConvertedMaterial.Accepts( surface, trim, blendable ), "blendable.slang doesn't take the material" );
+		Assert.IsTrue( ConvertedMaterial.Accepts( surface, trim, declares ), "blendable.slang doesn't take the material" );
 
-		var glass = MaterialOf( "shaders/complex.shader", new() { ["F_TRANSLUCENT"] = 1, ["F_ADDITIVE_BLEND"] = 1 } );
-		using var glassMaterial = new BackendMaterial( "glass", complex, glass, null );
-		Assert.IsTrue( glassMaterial.IsTranslucent, "a translucent complex material is opaque" );
+		using var additive = new BackendMaterial( "additive", reads, trim, null );
+		Assert.IsTrue( additive.IsTranslucent, "a material whose shader reads F_ADDITIVE_BLEND is opaque" );
 	}
 
 	/// <summary>
