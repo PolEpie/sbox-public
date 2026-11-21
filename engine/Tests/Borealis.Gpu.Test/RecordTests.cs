@@ -87,14 +87,14 @@ public class RecordTests
 
 	/// <summary>
 	/// The lighting record is two constant buffers' bytes as vfx packs them (GpuDrivenTables.Lighting copies them, the native
-	/// GPU-driven wrapper reads them at their packoffsets): its fields are where complex.shader's reflection puts their members,
-	/// the probe volume's buffer after the baked lighting's.
+	/// GPU-driven wrapper reads them at their packoffsets): its fields are where a lit shader's reflection (surface_test_rock's)
+	/// puts their members, the probe volume's buffer after the baked lighting's.
 	/// </summary>
 	[TestMethod]
 	public void LightingRecordIsItsConstantBuffers()
 	{
-		var path = Path.Combine( Shaders, "complex.shader_c" );
-		if ( !File.Exists( path ) ) Assert.Inconclusive( "complex.shader isn't compiled" );
+		var path = Path.Combine( Shaders, "surface_test_rock.shader_c" );
+		if ( !File.Exists( path ) ) Assert.Inconclusive( "surface_test_rock.shader isn't compiled" );
 		var shader = Borealis.Source2.Shaders.ShaderFile.Load( path );
 		var buffers = shader.Programs.Where( p => p is not null ).SelectMany( p => p.ConstantBuffers ).ToArray();
 		var record = Compiler().ReflectRecords().Record( "LightingRecord" );
@@ -113,7 +113,7 @@ public class RecordTests
 			var buffer = buffers.FirstOrDefault( b => b.Name == name && b.Members is { Length: > 0 } );
 			if ( buffer is null )
 			{
-				problems.Add( $"complex.shader has no {name}" );
+				problems.Add( $"surface_test_rock.shader has no {name}" );
 				continue;
 			}
 

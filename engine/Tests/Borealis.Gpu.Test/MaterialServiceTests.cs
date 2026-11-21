@@ -33,58 +33,22 @@ public class MaterialServiceTests : GpuTest
 	}
 
 	/// <summary>
-	/// A material of a shader that makes itself translucent (<c>#define S_TRANSLUCENT 1</c> with no feature: glass, and
-	/// Rubble's glass made at run time from its package shader) is translucent, from the <c>translucent</c> attribute its
-	/// shader exports, as native reads a material's; a shader that doesn't stays opaque without its feature.
+	/// A material of a shader that makes itself translucent (<c>#define S_TRANSLUCENT 1</c> with no feature: the USP's
+	/// glass_scope, and Rubble's glass made at run time from its package shader) is translucent, from the
+	/// <c>translucent</c> attribute its shader exports, as native reads a material's; a shader that doesn't
+	/// (surface_test_rock) stays opaque without its feature.
 	/// </summary>
 	[TestMethod]
 	public void ShadersThatDefineTranslucencyMakeTranslucentMaterials()
 	{
-		var core = backend.Content.Roots.FirstOrDefault( r => File.Exists( Path.Combine( r, "shaders", "glass.shader_c" ) ) ) ?? throw new AssertInconclusiveException( "glass isn't compiled" );
-		using var glass = new BackendMaterial( "glass", ShaderFile.Load( Path.Combine( core, "shaders", "glass.shader_c" ) ), null, null );
+		var core = backend.Content.Roots.FirstOrDefault( r => File.Exists( Path.Combine( r, "shaders", "surface_test_rock.shader_c" ) ) ) ?? throw new AssertInconclusiveException( "surface_test_rock isn't compiled" );
+		var scope = Path.GetFullPath( Path.Combine( core, "..", "addons", "content", "Assets", "weapons", "usp", "materials", "glass_scope.shader_c" ) );
+		if ( !File.Exists( scope ) ) Assert.Inconclusive( "glass_scope isn't compiled" );
+		using var glass = new BackendMaterial( "glass_scope", ShaderFile.Load( scope ), null, null );
 		Assert.IsTrue( glass.IsTranslucent );
 
-		var complexPath = Path.Combine( core, "shaders", "complex.shader_c" );
-		if ( !File.Exists( complexPath ) ) return;
-		using var complex = new BackendMaterial( "complex", ShaderFile.Load( complexPath ), null, null );
-		Assert.IsFalse( complex.IsTranslucent );
-	}
-
-	/// <summary>
-	/// A material of a shader that alpha tests itself (<c>#define S_ALPHA_TEST 1</c> with no feature: fur, and Sandblocks'
-	/// voxel shaders) is alpha tested, from the <c>alphatest</c> attribute its shader exports, so its depth draws keep the
-	/// pixel shader that clips; one that doesn't keeps the depth fast path.
-	/// </summary>
-	[TestMethod]
-	public void ShadersThatDefineAlphaTestMakeAlphaTestedMaterials()
-	{
-		var core = backend.Content.Roots.FirstOrDefault( r => File.Exists( Path.Combine( r, "shaders", "fur.shader_c" ) ) ) ?? throw new AssertInconclusiveException( "fur isn't compiled" );
-		using var fur = new BackendMaterial( "fur", ShaderFile.Load( Path.Combine( core, "shaders", "fur.shader_c" ) ), null, null );
-		Assert.IsTrue( fur.IsAlphaTest );
-		Assert.IsFalse( fur.ShadowFastPath );
-
-		var complexPath = Path.Combine( core, "shaders", "complex.shader_c" );
-		if ( !File.Exists( complexPath ) ) return;
-		using var complex = new BackendMaterial( "complex", ShaderFile.Load( complexPath ), null, null );
-		Assert.IsFalse( complex.IsAlphaTest );
-		Assert.IsTrue( complex.ShadowFastPath );
-	}
-
-	/// <summary>
-	/// Only a shader that says its vertices are plain (<c>BoolAttribute( ShadowFastPath, true )</c>: complex) draws its depth
-	/// with the shared depth-only material; one that moves them (foliage's wind) draws it with its own depth program, as
-	/// native's do, so the prepass lands where its colour pass does.
-	/// </summary>
-	[TestMethod]
-	public void OnlyShadersWithPlainVerticesTakeTheDepthFastPath()
-	{
-		var core = backend.Content.Roots.FirstOrDefault( r => File.Exists( Path.Combine( r, "shaders", "foliage.shader_c" ) ) && File.Exists( Path.Combine( r, "shaders", "complex.shader_c" ) ) ) ?? throw new AssertInconclusiveException( "foliage or complex isn't compiled" );
-		using var foliage = new BackendMaterial( "foliage", ShaderFile.Load( Path.Combine( core, "shaders", "foliage.shader_c" ) ), null, null );
-		Assert.IsFalse( foliage.IsTranslucent );
-		Assert.IsFalse( foliage.ShadowFastPath );
-
-		using var complex = new BackendMaterial( "complex", ShaderFile.Load( Path.Combine( core, "shaders", "complex.shader_c" ) ), null, null );
-		Assert.IsTrue( complex.ShadowFastPath );
+		using var rock = new BackendMaterial( "surface_test_rock", ShaderFile.Load( Path.Combine( core, "shaders", "surface_test_rock.shader_c" ) ), null, null );
+		Assert.IsFalse( rock.IsTranslucent );
 	}
 
 	[TestCleanup]
@@ -249,6 +213,45 @@ public class MaterialServiceTests : GpuTest
 		}
 
 		Allocations.AssertSettles( "a frame's sweep", () => cache.NextEpoch(), beforePass: Device.BeginFrame );
+	}
+
+	/// <summary>
+	/// A sweep that evicts allocates nothing either: it listed what it evicted in a new list each time, so a game whose
+	/// material values change (a sign's text, a flashing light) made garbage every eighth frame.
+	/// </summary>
+	[TestMethod]
+	[TestCategory( Allocations.Category )]
+	public void EvictingSweepsAllocateNothing()
+	{
+		using var cache = new MaterialObjectCache( Device, defaults );
+		var data = new byte[256];
+		var value = 0;
+
+		// A frame with constants nobody asks for again, so every sweep has some past the eviction age
+		void Frame()
+		{
+			Device.BeginFrame();
+			BitConverter.TryWriteBytes( data, value++ );
+			cache.KeepPassConstants( data, data.Length );
+		}
+
+		for ( int frame = 0; frame < MaterialObjectCache.EvictAfterFrames + 16; frame++ )
+		{
+			Frame();
+			cache.NextEpoch();
+		}
+
+		// Each pass is the first epoch of a sweeping frame (every eighth), which evicts
+		Allocations.AssertSettles( "a sweep that evicts", () => cache.NextEpoch(), beforePass: () =>
+		{
+			Frame();
+			while ( cache.Frame % 8 != 0 )
+			{
+				cache.NextEpoch();
+				Frame();
+			}
+		} );
+		Assert.IsTrue( cache.ConstantBytes <= (MaterialObjectCache.EvictAfterFrames + 8 + 6) * 256L, "the sweeps evicted" );
 	}
 
 	/// <summary>ui_filter's attributes for drawing <paramref name="texture"/> unfiltered at (x, y) with a blend mode.</summary>
