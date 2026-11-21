@@ -50,13 +50,12 @@ public partial class SceneObject
 	}
 
 	/// <summary>
-	/// A scene model's bounds worked out from the pose its animation instance published: kept here from now on, and given to
-	/// the twin, which render-mesh traces and Source 2's views read.
+	/// A scene model's bounds worked out from the pose its animation instance published: kept here from now on. The twin is a
+	/// plain object in its model's bind pose and keeps that mesh's bounds, which render-mesh traces of it read.
 	/// </summary>
 	private protected void SetPoseBounds( in BBox bounds )
 	{
 		_boundsKind = BoundsKind.Fixed;
-		native.SetBounds( bounds );
 		SetKeptBounds( bounds );
 	}
 
