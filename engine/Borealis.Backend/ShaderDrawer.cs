@@ -177,6 +177,16 @@ public sealed class ShaderAttributes
 		}
 	}
 
+	/// <summary>
+	/// Add <paramref name="other"/>'s values and combos, replacing any of the same name, sharing its values: for a set lowered
+	/// once and copied under several draws' (the engine's block attributes), which must not change while the copies are used.
+	/// </summary>
+	internal void CopyFrom( ShaderAttributes other )
+	{
+		foreach ( var id in other.set ) Put( id, other.slots[id] );
+		foreach ( var (name, value) in other.combos ) combos[name] = value;
+	}
+
 	/// <summary>Add <paramref name="other"/>'s values and combos, replacing any of the same name.</summary>
 	public void Merge( ShaderAttributes other )
 	{
