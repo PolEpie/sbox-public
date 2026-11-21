@@ -31,6 +31,8 @@ public sealed partial class NavMesh
 
 		// Tiles whose generated links are compared with the components next, and those whose components came from a bake
 		public readonly HashSet<(int X, int Y)> LinkTiles = new(), BakedLinkTiles = new();
+		// Completed local changes that can invalidate a ladder's landings or clearance.
+		public readonly HashSet<(int X, int Y)> LadderTiles = new();
 	}
 
 	// The mesh in use, and the one being built aside. Tile calls go to the second while there is one.
@@ -166,6 +168,7 @@ public sealed partial class NavMesh
 			for ( int y = tiles.Top; y <= tiles.Bottom; y++ )
 			{
 				work.Mesh.RemoveTile( x, y );
+				work.LadderTiles.Add( (x, y) );
 				work.FirstPass.Remove( (x, y) );
 				work.Worlds.Remove( (x, y) );
 				if ( work.BakedLinkTiles.Remove( (x, y) ) ) work.LinkTiles.Add( (x, y) );
@@ -263,6 +266,7 @@ public sealed partial class NavMesh
 			}
 		}
 
+		UpdateLadderLinks( world );
 		ReadLinkEnds();
 		TrimIdleBuilders();
 	}
@@ -287,6 +291,7 @@ public sealed partial class NavMesh
 				// The tile goes, or it would be built forever
 				Log.Warning( build.Task.Exception, $"Navmesh: Exception while generating tile {build.Job.X},{build.Job.Y}" );
 				work.Mesh.RemoveTile( build.Job.X, build.Job.Y );
+				work.LadderTiles.Add( (build.Job.X, build.Job.Y) );
 				failedBuilds++;
 			}
 			jobs[done++] = build.Job;
@@ -298,6 +303,8 @@ public sealed partial class NavMesh
 		for ( int i = 0; i < done; i++ )
 		{
 			var job = jobs[i];
+			// Cached jobs with unchanged areas and seam-only jobs do not change ladder landings.
+			if ( job.Status is TileJobStatus.Built or TileJobStatus.Failed ) work.LadderTiles.Add( (job.X, job.Y) );
 			// A job that came back asking for geometry built nothing, and its tile gets another
 			if ( job.Status != TileJobStatus.NeedsGeometry ) work.FirstPass.Remove( (job.X, job.Y) );
 			if ( job.Status == TileJobStatus.Failed ) Log.Warning( $"Navmesh: tile {job.X},{job.Y} was not built: {job.Error}" );
