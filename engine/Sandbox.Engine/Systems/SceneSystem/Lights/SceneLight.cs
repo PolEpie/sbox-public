@@ -21,6 +21,7 @@ public partial class SceneLight : SceneObject
 	internal void SetModulatorRange( uint offset, uint count )
 	{
 		ref var d = ref Change();
+		if ( d.LightModulatorOffset == offset && d.LightModulatorCount == count ) return;
 		d.LightModulatorOffset = offset;
 		d.LightModulatorCount = count;
 		if ( WritesNative ) lightNative.SetLightModulatorRange( offset, count );
