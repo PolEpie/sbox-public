@@ -87,6 +87,15 @@ Texture2D g_tRmaD < Channel( R, Box( TextureMetalnessD ), Linear ); Channel( G, 
 #endif
 #endif
 #endif
+// blendable.shader's vertex inputs (its VS_INPUT, every dynamic combo's): what the model compiler lays out the meshes of
+// models using these materials by (the material's VSInputSignature), so they keep the streams they had
+#define VS_INPUT_HAS_TANGENT_BASIS 1
+struct VS_INPUT
+{
+	float4 vColorBlendValues : TEXCOORD4 < Semantic( VertexPaintBlendParams ); >;
+	float4 vColorPaintValues : TEXCOORD5 < Semantic( VertexPaintTintColor ); >;
+	#include "common/vertexinput.hlsl"
+};
 #endif
 
 // blendable.shader samples with g_sDefault, which has no state of its own: native's default, anisotropic and wrapped

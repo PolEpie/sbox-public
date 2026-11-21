@@ -69,6 +69,14 @@ OutputFormat( DXT5 );
 SrgbRead( false );
 >;
 #endif
+// fur.shader's vertex inputs (its VS_INPUT, every dynamic combo's): what the model compiler lays out the meshes of
+// models using these materials by (the material's VSInputSignature), so they keep the streams they had
+#define VS_INPUT_HAS_TANGENT_BASIS 1
+struct VS_INPUT
+{
+	#include "common/vertexinput.hlsl"
+	float4 vColor : COLOR0 < Semantic( Color ); >;
+};
 #endif
 
 // common_samplers.fxc's g_sBilinearWrap, for the wind's noise

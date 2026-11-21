@@ -153,6 +153,13 @@ BoolAttribute( alphatest, true );
 BoolAttribute( transmissive, true );
 BoolAttribute( DoNotCastShadows, F_DO_NOT_CAST_SHADOWS ? true : false );
 BoolAttribute( ShadowFastPath, true );
+// skin.shader's vertex inputs (its VS_INPUT, every dynamic combo's): what the model compiler lays out the meshes of
+// models using these materials by (the material's VSInputSignature), so they keep the streams they had
+#define VS_INPUT_HAS_TANGENT_BASIS 1
+struct VS_INPUT
+{
+	#include "vr_common_vs_input.fxc"
+};
 #endif
 
 // skin.shader's g_sTrilinearWrap (the combined masks) and g_sTrilinearClamp (the tint lookup and face occlusion); the
