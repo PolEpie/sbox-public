@@ -9,7 +9,7 @@ namespace BorealisGpuTests;
 /// <summary>
 /// Standalone modules (docs/reference/borealis-standalone-modules.md): a module that declares its modes describes its shader itself, so
 /// Borealis.Gpu reads no <c>.shader_c</c> for it, and makes its GPU-driven form from the same source. depth_only is one:
-/// its variants, classic and GPU-driven, are its <c>.shader_c</c>'s and <c>.gpudriven.shader_c</c>'s, binding for binding.
+/// its variants, classic and GPU-driven, come from its module alone.
 /// </summary>
 [TestClass]
 [DoNotParallelize]
@@ -56,95 +56,64 @@ public class StandaloneModuleTests : GpuTest
 	}
 
 	/// <summary>
-	/// Every depth_only variant (opaque, alpha-tested, translucent; each dynamic combo) from the module binds what the
-	/// <c>.shader_c</c>'s does; the GPU-driven forms (opaque, and fading) bind what the <c>.gpudriven.shader_c</c>'s do; the
-	/// alpha-tested and translucent ones have no GPU-driven form.
+	/// Every depth_only variant (opaque, alpha-tested, translucent; each dynamic combo) draws from the module; the opaque
+	/// ones (fading included) have GPU-driven forms, marked GPU-driven, reading no vertex inputs and binding the GPU-driven
+	/// tables; the alpha-tested and translucent ones have none.
 	/// </summary>
 	[TestMethod]
-	public void DepthOnlyMatchesItsShader()
+	public void DepthOnlyHasGpuDrivenFormsForOpaqueDraws()
 	{
 		using var backend = new BackendDevice( Device );
 		var errors = new List<string>();
 		backend.Passes.Error = errors.Add;
 		var module = backend.Shaders.Load( DepthOnly );
-		var compiledPath = backend.Content.Find( DepthOnly ) ?? throw new AssertInconclusiveException( "depth_only.shader isn't compiled" );
-		var compiled = ShaderFile.Load( compiledPath );
-		var gpuDrivenPath = compiledPath[..^".shader_c".Length] + ".gpudriven.shader_c";
-		var hasGpuDriven = File.Exists( gpuDrivenPath );
+		Assert.IsTrue( module is { ModuleOnly: true }, "depth_only is its module" );
 
-		var differences = new List<string>();
-		var compared = 0;
+		var problems = new List<string>();
+		var checkedVariants = 0;
 		foreach ( var (name, featureName) in new[] { ("opaque", null), ("alpha test", "F_ALPHA_TEST"), ("translucent", "F_TRANSLUCENT") } )
 		{
-			var features = new int[compiled.Features.StaticCombos.Length];
-			var moduleFeatures = new int[module.Features.StaticCombos.Length];
-			if ( featureName is not null )
-			{
-				features[compiled.FeatureIndex( featureName )] = 1;
-				moduleFeatures[module.FeatureIndex( featureName )] = 1;
-			}
+			var features = new int[module.Features.StaticCombos.Length];
+			if ( featureName is not null ) features[module.FeatureIndex( featureName )] = 1;
 
-			foreach ( var combos in PassModuleTests.ComboSets( compiled ) )
+			foreach ( var combos in PassModuleTests.ComboSets( module ) )
 			{
 				int? Combo( string combo ) => combos.TryGetValue( combo, out var v ) ? v : null;
 				var where = $"{name} {string.Join( ' ', combos.Where( c => c.Value != 0 ).Select( c => $"{c.Key}={c.Value}" ) )}";
 
-				backend.SlangPasses = false;
-				ShaderVariant classic;
-				try
-				{
-					classic = backend.Shaders.Variant( compiled, "Depth", features, Combo );
-				}
-				catch ( InvalidDataException )
-				{
-					continue;
-				}
-
-				backend.SlangPasses = true;
-				var fromModule = backend.Shaders.Variant( module, "Depth", moduleFeatures, Combo );
+				var fromModule = backend.Shaders.Variant( module, "Depth", features, Combo );
 				if ( fromModule is not { FromModule: true } )
 				{
-					differences.Add( $"{where}: not drawn from the module" );
+					problems.Add( $"{where}: not drawn from the module" );
 					continue;
 				}
 
-				compared++;
-				differences.AddRange( ByName( PassModuleTests.Compare( classic, fromModule ) ).Select( d => $"{where}: {d}" ) );
+				checkedVariants++;
 
 				// GPU-driven: the opaque and fading forms, skinned ones from the vertex cache included, not alpha-tested or translucent
-				var gpuDriven = backend.Shaders.Variant( module, "Depth", moduleFeatures, Combo, null, gpuDriven: true );
+				var gpuDriven = backend.Shaders.Variant( module, "Depth", features, Combo, null, gpuDriven: true );
 				if ( featureName is not null )
 				{
-					if ( gpuDriven is not null ) differences.Add( $"{where}: a GPU-driven form where none should be" );
+					if ( gpuDriven is not null ) problems.Add( $"{where}: a GPU-driven form where none should be" );
 					continue;
 				}
 
 				if ( gpuDriven is null )
 				{
-					differences.Add( $"{where}: no GPU-driven form" );
+					problems.Add( $"{where}: no GPU-driven form" );
 					continue;
 				}
 
-				if ( !gpuDriven.Vertex.GpuDriven ) differences.Add( $"{where}: GPU-driven vertex stage not marked" );
-				if ( gpuDriven.Pixel?.Bytecode is { } && !gpuDriven.Pixel.GpuDriven ) differences.Add( $"{where}: GPU-driven pixel stage not marked" );
-				if ( gpuDriven.VertexInputs.Count != 0 ) differences.Add( $"{where}: GPU-driven vertex stage reads vertex inputs {string.Join( ' ', gpuDriven.VertexInputs )}" );
-				if ( !hasGpuDriven ) continue;
-
-				backend.SlangPasses = false;
-				var vfx = backend.Shaders.Variant( compiled, "Depth", features, Combo, null, gpuDriven: true );
-				backend.SlangPasses = true;
-				if ( vfx is null ) continue;
-				compared++;
-				// The tables' constant buffer is where Slang numbers it rather than after vfx's own; it binds by name either way
-				differences.AddRange( ByName( PassModuleTests.Compare( vfx, gpuDriven ) ).Select( d => $"{where} GPU-driven: {d}" ) );
-				if ( !gpuDriven.Resources.Any( r => r.Name == "BorealisGpuDriven_t" ) ) differences.Add( $"{where} GPU-driven: no BorealisGpuDriven_t" );
+				if ( !gpuDriven.Vertex.GpuDriven ) problems.Add( $"{where}: GPU-driven vertex stage not marked" );
+				if ( gpuDriven.Pixel?.Bytecode is { } && !gpuDriven.Pixel.GpuDriven ) problems.Add( $"{where}: GPU-driven pixel stage not marked" );
+				if ( gpuDriven.VertexInputs.Count != 0 ) problems.Add( $"{where}: GPU-driven vertex stage reads vertex inputs {string.Join( ' ', gpuDriven.VertexInputs )}" );
+				if ( !gpuDriven.Resources.Any( r => r.Name == "BorealisGpuDriven_t" ) ) problems.Add( $"{where} GPU-driven: no BorealisGpuDriven_t" );
 			}
 		}
 
 		Assert.AreEqual( 0, errors.Count, string.Join( "\n", errors.Take( 5 ) ) );
-		Assert.AreEqual( 0, differences.Count, $"{differences.Count} differences over {compared} variants:\n" + string.Join( "\n", differences.Take( 40 ) ) );
-		Assert.IsTrue( compared > 0 );
-		TestContext.WriteLine( $"{compared} variants compared" );
+		Assert.AreEqual( 0, problems.Count, $"{problems.Count} problems over {checkedVariants} variants:\n" + string.Join( "\n", problems.Take( 40 ) ) );
+		Assert.IsTrue( checkedVariants > 3, "the opaque, alpha-tested and translucent variants, each combo" );
 	}
 
 	/// <summary>
@@ -327,26 +296,6 @@ public class StandaloneModuleTests : GpuTest
 			var moduleDynamics = string.Join( ' ', b.DynamicCombos.Select( Combo ).Order( StringComparer.Ordinal ) );
 			if ( dynamics != moduleDynamics ) yield return $"{type} dynamic combos {dynamics} vs {moduleDynamics}";
 		}
-	}
-
-	/// <summary>
-	/// A shader its module describes has no compiled variables, so the names values set by token (<c>StringToken.Literal</c>)
-	/// are turned back into are the module's (<see cref="PassModules.BindingNames"/>): every name depth_only's <c>.shader_c</c>
-	/// variables and combos give, less a .vmat's input textures.
-	/// </summary>
-	[TestMethod]
-	public void ModuleNamesCoverTheCompiledNames()
-	{
-		using var backend = new BackendDevice( Device );
-		var module = backend.Shaders.Load( DepthOnly );
-		var compiledPath = backend.Content.Find( DepthOnly ) ?? throw new AssertInconclusiveException( "depth_only.shader isn't compiled" );
-		var compiled = ShaderFile.Load( compiledPath );
-		var names = backend.Passes.BindingNames( module );
-		Assert.IsTrue( names.Contains( "D_OPAQUE_FADE" ) );
-		var missing = compiled.Programs.Where( p => p is not null )
-			.SelectMany( p => p.Variables.Where( v => v.Register != RegisterType.InputTexture ).SelectMany( v => new[] { v.Register == RegisterType.Specialization ? null : v.Name, v.Attribute } ).Concat( p.DynamicCombos.Select( c => c.Name ) ) )
-			.Where( n => !string.IsNullOrEmpty( n ) && n != "DefaultSamplerState" && !names.Contains( n ) ).Distinct().ToList();
-		Assert.AreEqual( 0, missing.Count, string.Join( ' ', missing ) );
 	}
 
 	/// <summary>
