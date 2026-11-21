@@ -193,8 +193,15 @@ internal sealed class BorealisGpuWindow : IDisposable
 		backend.BeforeAcquire( swapChain );
 		if ( !swapChain.Acquire( out _ ) ) return false;
 
-		Draw( backend, target, background, clear, draw, swapChain );
-		swapChain.Present();
+		try
+		{
+			Draw( backend, target, background, clear, draw, swapChain );
+		}
+		finally
+		{
+			// The acquired image has to be presented whatever the drawing did, or no later frame can acquire
+			swapChain.Present();
+		}
 		return true;
 	}
 
