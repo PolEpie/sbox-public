@@ -343,7 +343,7 @@ internal sealed partial class FrameRecorder : IDisposable
 			if ( record.Planned >= 0 && record.Planned < layerCount && layers[record.Planned].Layer == record.Layer )
 			{
 				ref var planned = ref layers[record.Planned];
-				if ( planned.Layer.IsShared )
+				if ( planned.Layer.IsSharedIn( planned.Frame ) )
 				{
 					layer.Views = planned.WorkTo - planned.WorkFrom;
 					for ( int w = planned.WorkFrom; w < planned.WorkTo; w++ )

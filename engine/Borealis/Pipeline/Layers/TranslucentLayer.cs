@@ -1,7 +1,7 @@
 namespace Borealis;
 
 /// <summary>
-/// Back-to-front alpha-tinted geometry on the main thread (<c>Translucent Forward</c>).
+/// Back-to-front alpha-tinted geometry (<c>Translucent Forward</c>), on the main thread when it reads the frame buffer.
 /// The main world enables fading; the 3D skybox does not. Materials control blending and depth writes.
 /// </summary>
 internal sealed class TranslucentLayer : MeshLayer
@@ -23,7 +23,8 @@ internal sealed class TranslucentLayer : MeshLayer
 		TakesToolsPass = true;
 	}
 
-	public override bool IsShared => false;
+	// Frame buffer readers share one copy of the frame, made at the layer's first reader: one context records them all
+	public override bool IsSharedIn( RenderFrame frame ) => !frame.ReadsFrameBuffer( Runs & MeshRenderFeature.FrameBufferCopyingLists );
 
 	/// <summary>
 	/// Bind the frame with alpha tint and optional fading.
