@@ -1456,8 +1456,10 @@ internal sealed partial class MeshRenderFeature : RenderFeature
 			// then the next one's before-work (CRenderBatchList::DrawCurrentPrimitives, FlushAfterRenderCallback)
 			if ( !depth && !view.IsShadow && run.Callbacks != open )
 			{
+				if ( open is { Counts: true } ) context.EndCount();
 				SwitchCallbacks( context, view, layer, open, run.Callbacks, ref vertexAnimation );
 				open = run.Callbacks;
+				if ( open is { Counts: true } ) context.BeginCount( open );
 			}
 
 			// Bind the custom transform, draw, then restore frame targets.
@@ -1569,6 +1571,7 @@ internal sealed partial class MeshRenderFeature : RenderFeature
 			stats.Triangles += (long)(draw.IndexCount / 3) * run.Count;
 		}
 
+		if ( open is { Counts: true } ) context.EndCount();
 		if ( open is not null ) SwitchCallbacks( context, view, layer, open, null, ref vertexAnimation );
 
 		if ( vertexAnimation != 0 ) context.SetCombo( CsVertexAnimation, 0 );

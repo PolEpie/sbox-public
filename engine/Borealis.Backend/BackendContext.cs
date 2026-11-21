@@ -642,12 +642,47 @@ internal sealed partial class BackendContext : GpuContext
 
 	void CloseScope( bool flushClears = true )
 	{
+		// A count ends with its scope: whatever the object draws after that isn't in it, so it can't say hidden
+		if ( counting >= 0 )
+		{
+			countingFor.CountSum++;
+			EndCount();
+		}
+
 		if ( flushClears ) FlushClears();
 		if ( recording is { Rendering: true } r )
 		{
 			r.List.EndRendering();
 			r.Rendering = false;
 		}
+	}
+
+	// The occlusion query counting an object's draws (BeginCount), or -1
+	int counting = -1;
+	DrawCallbacks countingFor;
+
+	internal override void BeginCount( DrawCallbacks counted )
+	{
+		if ( recording is null || !boundValid || (bound.Color is null && bound.Depth is null) ) return;
+
+		var query = device.TakeCount( counted );
+		if ( query < 0 ) return;
+
+		// Queries are reset outside rendering
+		CloseScope();
+		recording.List.ResetQueries( device.Counts, query, 1 );
+		if ( !EnsureScope() ) return;
+		recording.List.BeginQuery( device.Counts, query );
+		counting = query;
+		countingFor = counted;
+	}
+
+	internal override void EndCount()
+	{
+		if ( counting < 0 ) return;
+		recording.List.EndQuery( device.Counts, counting );
+		counting = -1;
+		countingFor = null;
 	}
 
 	/// <summary>

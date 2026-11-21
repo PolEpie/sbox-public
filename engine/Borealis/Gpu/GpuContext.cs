@@ -131,6 +131,15 @@ internal abstract class GpuContext : IDisposable
 	/// <summary>Invalidate target, parameter and material caches after external drawing.</summary>
 	internal abstract void Invalidate();
 
+	/// <summary>
+	/// Count the samples drawn from here to <see cref="EndCount"/> for <paramref name="counted"/> (an occlusion query), given
+	/// to <see cref="DrawCallbacks.Counted"/> a few frames later. Nothing while its last frame's counts are still out.
+	/// </summary>
+	internal virtual void BeginCount( DrawCallbacks counted ) { }
+
+	/// <summary>Stop the count <see cref="BeginCount"/> started, if one is running.</summary>
+	internal virtual void EndCount() { }
+
 	/// <summary>Bind the view constants and cache their key.</summary>
 	public abstract void SetViewConstants( in ViewConstants constants, ViewConstantsKey? key );
 

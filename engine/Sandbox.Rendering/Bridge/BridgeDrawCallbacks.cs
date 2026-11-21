@@ -24,6 +24,13 @@ internal sealed class BridgeDrawCallbacks : DrawCallbacks
 		RenderOnGpu( context, layerType, view.View, after );
 	}
 
+	internal override bool Counts => Source.IsValid() && Source.CountsSamples;
+
+	internal override void Counted( ulong samples )
+	{
+		if ( Source.IsValid() ) Source.Counted( samples );
+	}
+
 	// The context a command list ran for; callbacks run on the main thread
 	static GpuContext running;
 	Action runBefore, runAfter;
