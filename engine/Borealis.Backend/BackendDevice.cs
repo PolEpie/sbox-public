@@ -2003,7 +2003,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 			}
 
 			// A GPU-driven pixel shader reading its bucket's one material (borealis_gpu_driven.h's specialization constant)
-			if ( materialPerDraw && info.FragmentShader.IsValid ) info.FragmentConstants = [.. info.FragmentConstants ?? [], new SpecializationConstant( GpuDrivenMaterialPerDrawConstant, 1 )];
+			if ( materialPerDraw && info.FragmentShader.IsValid ) info.FragmentConstants = [.. info.FragmentConstants ?? [], new SpecializationConstant( variant.Pixel?.MaterialPerDrawId ?? ShaderStage.GpuDrivenMaterialPerDrawId, 1 )];
 
 			if ( tools != ToolsPass.None ) ToolsViewStage.Apply( Shaders, ref info, tools, ToolsViews.ShaderColor( variant.Shader?.Name ) );
 
@@ -2111,7 +2111,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	/// <c>kForwardNormalsOutput</c> in sbox/forward_normals.slangh: a pixel stage that has it writes the opaque pass's normals
 	/// and roughness at target 1 while it's set.
 	/// </summary>
-	internal const uint NormalsOutputId = 121;
+	internal const uint NormalsOutputId = ShaderStage.ReservedSpecializationFirstId + 2;
 
 	/// <summary>
 	/// Add the opaque pass's normals target (<see cref="NormalsFormat"/>) after a pipeline's colour targets: written with
@@ -2135,8 +2135,6 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	/// </summary>
 	static bool WritesNormals( ShaderVariant variant ) => variant.Pixel?.Reflection?.SpecializationIds?.Contains( NormalsOutputId ) == true;
 
-	/// <summary><c>BOREALIS_GPU_DRIVEN_MATERIAL_PER_DRAW_ID</c>: set, a GPU-driven pixel shader reads <c>g_nBorealisPixelMaterial</c>.</summary>
-	const uint GpuDrivenMaterialPerDrawConstant = 120;
 
 	/// <summary>A compute pipeline for a compute shader's variant (with <paramref name="sets"/> for its layout's), made once.</summary>
 	internal PipelineHandle ComputePipeline( ShaderVariant variant, BindingLayoutHandle[] sets = null )

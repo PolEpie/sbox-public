@@ -6,7 +6,8 @@
 #ifndef SBOX_FORWARD_NORMALS_SLANGH
 #define SBOX_FORWARD_NORMALS_SLANGH
 
-[vk::constant_id( 121 )] const bool kForwardNormalsOutput = false;
+// In the renderer's reserved ids (0x10000 and up, vfx_shader_params.h), above any SpecializedConstant()'s
+[vk::constant_id( 65538 )] const bool kForwardNormalsOutput = false;
 
 /// The world-space normal octahedrally encoded in red and green, roughness in blue, alpha 1 where a surface wrote it
 /// (RGB10A2), packed into one word as the target stores it: it's taken before lighting and held across it, where every
