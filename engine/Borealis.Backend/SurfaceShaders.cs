@@ -1487,15 +1487,34 @@ internal sealed class SurfaceFeatures( ulong key, SpecializationConstant[] const
 /// <summary>
 /// Every surface material's record, in one storage buffer the shaders read at a per-draw offset
 /// (<c>g_SurfaceMaterials</c>, <c>sbox/material.slang</c>). A record is written when its material is first drawn and again,
-/// at a new offset, when it changes; the buffer only grows, so frames in flight keep reading what they bound. This is
-/// the one place that knows where records live: gpudriven's material table (binding 63) replaces it when it lands.
+/// at a new offset, when it changes; within a buffer records are only appended, so frames in flight keep reading what they
+/// bound. When the buffer is over half full and most of it holds records no draw has used for <see cref="IdleFrames"/>
+/// frames (a closed map's materials, a changing material's old records), <see cref="BeginFrame"/> starts a buffer sized for the rest, which are written again as they next draw,
+/// and lets the old one go. This is the one place that knows where records live: gpudriven's material table (binding 63)
+/// replaces it when it lands.
 /// </summary>
 internal sealed class SurfaceRecords( Device gpu ) : IDisposable
 {
-	readonly Dictionary<SurfaceMaterial, (int Version, uint Offset)> written = new( ReferenceEqualityComparer.Instance );
-	readonly List<BufferHandle> retired = new();
+	sealed class Written
+	{
+		public int Version;
+		public uint Offset;
+		public int Bytes;
+		public long Frame;
+	}
+
+	readonly Dictionary<SurfaceMaterial, Written> written = new( ReferenceEqualityComparer.Instance );
+	readonly List<(BufferHandle Buffer, long Frame)> retired = new();
 	BufferHandle buffer;
-	long size, used;
+	long size, used, frame;
+
+	/// <summary>Frames a record goes undrawn before it counts as unused.</summary>
+	internal const int IdleFrames = 600;
+
+	/// <summary>Frames a buffer the records moved out of is kept: draws recorded into it before then may not be submitted yet.</summary>
+	internal const int RetireFrames = 3;
+
+	const long MinimumSize = 64 * 1024;
 
 	/// <summary>The buffer, valid once a record is written.</summary>
 	public BufferHandle Buffer
@@ -1520,6 +1539,7 @@ internal sealed class SurfaceRecords( Device gpu ) : IDisposable
 			var version = material.Version;
 			if ( written.TryGetValue( material, out var known ) && known.Version == version )
 			{
+				known.Frame = frame;
 				holder = buffer;
 				return known.Offset;
 			}
@@ -1533,7 +1553,11 @@ internal sealed class SurfaceRecords( Device gpu ) : IDisposable
 			material.WriteRecord( record, static ( texture, srgb ) => texture.ViewIndex( srgb, TextureViewDimension.Default ) );
 			record.CopyTo( gpu.Map( buffer )[(int)offset..] );
 			used += bytes;
-			written[material] = (version, offset);
+			known ??= written[material] = new Written();
+			known.Version = version;
+			known.Offset = offset;
+			known.Bytes = bytes;
+			known.Frame = frame;
 			holder = buffer;
 			return offset;
 		}
@@ -1541,15 +1565,15 @@ internal sealed class SurfaceRecords( Device gpu ) : IDisposable
 
 	void Grow( long needed )
 	{
-		var next = Math.Max( 64 * 1024, size * 2 );
+		var next = Math.Max( MinimumSize, size * 2 );
 		while ( next < needed ) next *= 2;
 		var grown = gpu.CreateBuffer( new BufferInfo { Size = next, Usage = BufferUsage.Storage, Memory = MemoryLocation.Upload, Name = "Borealis surface material records" } );
 		if ( buffer.IsValid )
 		{
-			// The old buffer is kept until the records are disposed: draws recorded earlier this frame bound it, and a
-			// destroy is only deferred past what's been submitted. It only doubles a few times, so this is at most its size.
+			// The old buffer is kept a few frames: draws recorded earlier this frame bound it, and a destroy is only deferred
+			// past what's been submitted
 			gpu.Map( buffer )[..(int)used].CopyTo( gpu.Map( grown ) );
-			retired.Add( buffer );
+			retired.Add( (buffer, frame) );
 		}
 
 		buffer = grown;
@@ -1557,16 +1581,84 @@ internal sealed class SurfaceRecords( Device gpu ) : IDisposable
 		Grows++;
 	}
 
+	/// <summary>
+	/// The start of a device frame, before anything records: buffers the records moved out of <see cref="RetireFrames"/>
+	/// frames ago go, and when under a quarter of the buffer holds records drawn in the last <see cref="IdleFrames"/>
+	/// frames and it's over half full, the records start again in a buffer twice the size of those (the rest are forgotten,
+	/// and the materials with them).
+	/// </summary>
+	public void BeginFrame()
+	{
+		lock ( written )
+		{
+			frame++;
+			for ( int i = retired.Count - 1; i >= 0; i-- )
+			{
+				if ( frame - retired[i].Frame < RetireFrames ) continue;
+				gpu.Destroy( retired[i].Buffer );
+				retired.RemoveAt( i );
+			}
+
+			// Only once it's over half full: a material whose record changes every frame appends one every frame, and starting
+			// again then stands in for growing rather than coming round every check
+			if ( !buffer.IsValid || frame % 60 != 0 || used * 2 <= size ) return;
+
+			long live = 0;
+			foreach ( var record in written.Values )
+				if ( frame - record.Frame < IdleFrames ) live += record.Bytes;
+			if ( live * 4 >= used ) return;
+
+			written.Clear();
+			retired.Add( (buffer, frame) );
+			buffer = default;
+			size = 0;
+			used = 0;
+			Grow( live * 2 );
+			Restarts++;
+		}
+	}
+
 	/// <summary>Times the records moved into a bigger buffer, for tests.</summary>
 	internal int Grows { get; private set; }
+
+	/// <summary>Times the records started again in a smaller buffer, for tests.</summary>
+	internal int Restarts { get; private set; }
+
+	/// <summary>The current buffer's size and the bytes written in it, for tests.</summary>
+	internal (long Size, long Used) Use
+	{
+		get
+		{
+			lock ( written ) return (size, used);
+		}
+	}
+
+	/// <summary>Buffers the records moved out of, still waiting to go, for tests.</summary>
+	internal int Retired
+	{
+		get
+		{
+			lock ( written ) return retired.Count;
+		}
+	}
+
+	/// <summary>Materials with a record, for tests.</summary>
+	internal int Materials
+	{
+		get
+		{
+			lock ( written ) return written.Count;
+		}
+	}
 
 	public void Dispose()
 	{
 		lock ( written )
 		{
 			if ( buffer.IsValid ) gpu.Destroy( buffer );
-			foreach ( var old in retired ) gpu.Destroy( old );
+			foreach ( var old in retired ) gpu.Destroy( old.Buffer );
 			retired.Clear();
+			written.Clear();
 			buffer = default;
 		}
 	}

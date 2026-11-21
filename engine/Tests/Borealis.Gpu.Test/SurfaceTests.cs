@@ -1889,6 +1889,50 @@ public class SurfaceTests : GpuTest
 	}
 
 	/// <summary>
+	/// A closed map's materials' records go: once most of the records buffer holds records no draw has used for a while, the
+	/// records start again in a buffer sized for those still drawn, the materials behind the rest are let go, and the
+	/// buffers they moved out of are destroyed. Before, the buffer and every one it grew out of stayed, a map's worth more
+	/// each session.
+	/// </summary>
+	[TestMethod]
+	public void UnusedSurfaceRecordsGo()
+	{
+		using var records = new SurfaceRecords( Device );
+		using var kept = new Rock();
+		var map = new List<Rock>();
+		try
+		{
+			for ( int i = 0; i < 12000; i++ )
+			{
+				var rock = new Rock { Tint = new Vector3( i / 12000f, 0.5f, 0.5f ) };
+				map.Add( rock );
+				records.Offset( rock );
+			}
+
+			records.Offset( kept );
+			var grown = records.Use.Size;
+			Assert.IsTrue( grown >= 256 * 1024, $"{grown} bytes" );
+			Assert.IsTrue( records.Retired > 0 );
+
+			for ( int frame = 0; frame < SurfaceRecords.IdleFrames + 120; frame++ )
+			{
+				records.BeginFrame();
+				records.Offset( kept );
+			}
+
+			Assert.AreEqual( 1, records.Restarts );
+			Assert.AreEqual( 1, records.Materials, "only the material still drawn has a record" );
+			Assert.AreEqual( 64 * 1024, records.Use.Size );
+			Assert.AreEqual( 0, records.Retired, "the old buffers are destroyed" );
+			Assert.AreEqual( 0u, records.Offset( kept ), "the kept material's record was written again at the start" );
+		}
+		finally
+		{
+			foreach ( var rock in map ) rock.Dispose();
+		}
+	}
+
+	/// <summary>
 	/// A draw whose material's record grows the records buffer binds the grown buffer, though earlier draws of the same pass
 	/// state bound the old one. Bound as the pass state first resolved it, the draws after the growth read past the old
 	/// buffer's end (a GPU page fault where it ended its memory block, a wrong material otherwise).
