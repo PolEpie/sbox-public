@@ -350,7 +350,7 @@ public sealed class ShaderDrawer : IDisposable
 	// Variants by their combos' values packed (ShaderAttributes.ComboBits) and the material's features array, built with no
 	// strings: what most draws find theirs by
 	readonly Dictionary<(ShaderFile Shader, string Mode, int[] Features, ulong Combos, ulong More, ulong Specialization), ShaderVariant> packedVariants = new();
-	readonly Dictionary<(ShaderVariant Variant, Format Color, Format Depth, int Samples, VertexStreamLayout Layout, PrimitiveTopology Topology, bool Ids, ToolsPass Tools), PipelineHandle> pipelines = new();
+	readonly Dictionary<(ShaderVariant Variant, Format Color, Format Depth, int Samples, VertexStreamLayout Layout, PrimitiveTopology Topology, bool Ids, ToolsPass Tools, bool Redrawn), PipelineHandle> pipelines = new();
 
 	// The attribute ids a shader's specialization constants come from (ToolsVisMode, ShadowFilterQuality...), whose values
 	// pick its variant as its combos' do
@@ -674,15 +674,16 @@ public sealed class ShaderDrawer : IDisposable
 		var ids = ReadsInstanceIds( variant );
 		if ( Objects( variant ) )
 		{
-			var key = new MaterialObjectCache.Key( null, variant, LayoutKey( layout, ids ), color, depth, samples, false, false, topology, Tools: color == Format.Unknown ? ToolsPass.None : ToolsPass );
-			var materialObject = cache.Get( key, immediate: true, (Drawer: this, Variant: variant, Color: color, Depth: depth, Samples: samples, Layout: layout, Topology: topology, Ids: ids),
-				static ( s, materialLayout ) => s.Drawer.Pipeline( s.Variant, s.Color, s.Depth, s.Samples, s.Layout, s.Topology, materialLayout.Sets, s.Ids ) );
+			var redrawn = RedrawnEveryFrame.Active;
+			var key = new MaterialObjectCache.Key( null, variant, LayoutKey( layout, ids ), color, depth, samples, false, false, topology, Tools: color == Format.Unknown ? ToolsPass.None : ToolsPass, Redrawn: redrawn );
+			var materialObject = cache.Get( key, immediate: true, (Drawer: this, Variant: variant, Color: color, Depth: depth, Samples: samples, Layout: layout, Topology: topology, Ids: ids, Redrawn: redrawn),
+				static ( s, materialLayout ) => s.Drawer.Pipeline( s.Variant, s.Color, s.Depth, s.Samples, s.Layout, s.Topology, materialLayout.Sets, s.Ids, s.Redrawn ) );
 			SetViewport( list, viewport );
 			BindObject( list, materialObject, attributes, viewport );
 		}
 		else
 		{
-			list.SetPipeline( Pipeline( variant, color, depth, samples, layout, topology, null, ids ) );
+			list.SetPipeline( Pipeline( variant, color, depth, samples, layout, topology, null, ids, RedrawnEveryFrame.Active ) );
 			SetViewport( list, viewport );
 			Bind( list, variant, attributes, viewport );
 		}
@@ -804,11 +805,15 @@ public sealed class ShaderDrawer : IDisposable
 		list.SetScissor( (int)viewport.X, (int)viewport.Y, (int)MathF.Ceiling( viewport.Z ), (int)MathF.Ceiling( viewport.W ) );
 	}
 
-	/// <summary>A graphics pipeline for the reflection path (cached here) or for a material object's sets (the object keeps it).</summary>
-	PipelineHandle Pipeline( ShaderVariant variant, Format color, Format depth, int samples, VertexStreamLayout layout, PrimitiveTopology topology, BindingLayoutHandle[] sets, bool ids = false )
+	/// <summary>
+	/// A graphics pipeline for the reflection path (cached here) or for a material object's sets (the object keeps it). For
+	/// draws <paramref name="redrawn"/> every frame (<see cref="RedrawnEveryFrame"/>) one not made yet is made on the device's
+	/// workers and its draws skipped meanwhile; those are kept apart from the ones other draws wait for.
+	/// </summary>
+	PipelineHandle Pipeline( ShaderVariant variant, Format color, Format depth, int samples, VertexStreamLayout layout, PrimitiveTopology topology, BindingLayoutHandle[] sets, bool ids = false, bool redrawn = false )
 	{
 		var tools = color == Format.Unknown ? ToolsPass.None : ToolsPass;
-		var key = (variant, color, depth, samples, layout, topology, ids, tools);
+		var key = (variant, color, depth, samples, layout, topology, ids, tools, redrawn);
 		if ( sets is null && pipelines.TryGetValue( key, out var pipeline ) ) return pipeline;
 
 		// Inputs the stream lacks (or every input, with no stream) read the default stream. No colour format draws into
@@ -853,6 +858,7 @@ public sealed class ShaderDrawer : IDisposable
 		info.Topology = topology;
 		if ( sets is not null ) info.Sets = sets;
 		if ( tools != ToolsPass.None ) ToolsViewStage.Apply( shaders, ref info, tools, ToolsViews.ShaderColor( variant.Shader?.Name ) );
+		info.SkipUntilReady = redrawn;
 		using ( Zones.PipelineCreate.Start() ) pipeline = gpu.CreateGraphicsPipeline( info );
 		if ( sets is null ) pipelines[key] = pipeline;
 		return pipeline;

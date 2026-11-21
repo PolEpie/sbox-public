@@ -1478,7 +1478,9 @@ internal sealed partial class MeshRenderFeature : RenderFeature
 				if ( tools == ToolsPass.Wireframe ) context.ToolsPass = ToolsPass.None;
 
 				context.BindInstances( 1, run.FirstInstance );
-				using ( Zones.CustomObject.Start() ) custom.Render( context, view, layer );
+				using ( Zones.CustomObject.Start() )
+				using ( RedrawnEveryFrame.Begin() )
+					custom.Render( context, view, layer );
 				context.ToolsPass = tools;
 				context.SetCombo( CsVertexAnimation, 0 );
 				context.RestoreBound();
