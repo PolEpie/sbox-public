@@ -198,8 +198,8 @@ public class BackendTests : GpuTest
 		Assert.IsNotNull( water.Shader.Mode( "Forward" ), "the error shader draws in every layer" );
 		Assert.AreEqual( "materials/test/missing_shader_for_test.vmat", water.Name );
 
-		var complex = Load( "materials/test/complex_for_test.vmat", "shaders/complex.shader" );
-		StringAssert.Contains( complex.Shader?.Name ?? "", "complex", "a shader that loads is kept" );
+		var rock = Load( "materials/test/rock_for_test.vmat", "shaders/surface_test_rock.shader" );
+		StringAssert.Contains( rock.Shader?.Name ?? "", "surface_test_rock", "a shader that loads is kept" );
 	}
 
 	/// <summary>
