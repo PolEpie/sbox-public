@@ -172,14 +172,15 @@ internal sealed partial class FrameRecorder
 				AddDrawSegments( planned.Frame, planned.WorkFrom, planned.WorkTo, maxSegments );
 			}
 		}
-		else if ( !separate && segmentCount > 0 && segments[segmentCount - 1] is { Kind: SegmentKind.Layers, Async: false } last
-			&& last.Frame == planned.Frame && last.Index + last.Count == index )
-		{
-			segments[segmentCount - 1].Count++;
-		}
 		else
 		{
-			AddSegment( SegmentKind.Layers, planned.Frame, index, true );
+			// A layer that records on workers doesn't share a segment with one that can't; serial frames record all of them alike
+			var onMain = !Parallel || !planned.Layer.RecordsOffMainThread;
+			if ( !separate && segmentCount > 0 && segments[segmentCount - 1] is { Kind: SegmentKind.Layers, Async: false } last
+				&& last.Frame == planned.Frame && last.Index + last.Count == index && last.OnMainThread == onMain )
+				segments[segmentCount - 1].Count++;
+			else
+				AddSegment( SegmentKind.Layers, planned.Frame, index, onMain );
 		}
 	}
 }

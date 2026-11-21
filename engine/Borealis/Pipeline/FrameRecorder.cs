@@ -29,7 +29,7 @@ internal sealed partial class FrameRecorder : IDisposable
 	{
 		/// <summary>Drawing: <see cref="Segment.Count"/> of the <see cref="work"/> from <see cref="Segment.Index"/>.</summary>
 		Draw,
-		/// <summary>Consecutive main-thread layers from one frame.</summary>
+		/// <summary>Consecutive layers from one frame that record on the same kind of thread.</summary>
 		Layers,
 	}
 

@@ -2,7 +2,7 @@ namespace Borealis;
 
 /// <summary>
 /// A frame step, equivalent to native's <c>ISceneLayer</c>. Ordered in <c>RenderSystem.Layers.cs</c>.
-/// Mesh layers can record in parallel; other layers record on the main thread. Empty layers are skipped.
+/// Mesh layers can record in parallel; other layers record on the main thread unless <see cref="RecordsOffMainThread"/>. Empty layers are skipped.
 /// </summary>
 internal abstract class RenderLayer
 {
@@ -55,6 +55,13 @@ internal abstract class RenderLayer
 	public virtual bool SupportsAsyncCompute => false;
 
 	/// <summary>
+	/// Whether <see cref="Record"/> may run on a worker beside the main thread's segments: it runs no engine callback or
+	/// custom object, and reads only what <see cref="BeforeSegments"/> made, the frame's setup left and its own context.
+	/// A segment only joins layers that agree.
+	/// </summary>
+	public virtual bool RecordsOffMainThread => false;
+
+	/// <summary>
 	/// A compute layer's graphics preparation: what it reads made readable by compute, what it writes cleared.
 	/// Recorded on the main thread into a graphics context submitted before the batch. Only external inputs may be
 	/// transitioned here; inputs made by earlier compute layers are made readable by those layers when recorded.
@@ -83,8 +90,8 @@ internal abstract class RenderLayer
 	public virtual void BeforeSegments( RenderFrame frame, GpuContext frameContext ) { }
 
 	/// <summary>
-	/// Record on the main thread with the frame's view constants. Bind targets with <see cref="RenderFrame.BeginPass"/>;
-	/// pass combos are reset afterward.
+	/// Record with the frame's view constants, on the main thread unless <see cref="RecordsOffMainThread"/>. Bind targets with
+	/// <see cref="RenderFrame.BeginPass"/>; pass combos are reset afterward.
 	/// </summary>
 	public virtual void Record( RenderFrame frame, GpuContext rc, ref RenderStats stats ) { }
 
