@@ -256,7 +256,7 @@ public sealed partial class WaterBody : Component, Component.ExecuteInEditor
 		if ( below )
 			normal = -normal;
 
-		if ( MaterialOpacity( ActiveMaterial, below ) >= 1 )
+		if ( !Refraction || MaterialOpacity( ActiveMaterial, below ) >= 1 )
 			return key;
 
 		key.Camera = viewer;
