@@ -597,6 +597,20 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	public bool HiZOcclusion { get; set; } = HasSwitch( "-hiz-occlusion" );
 
 	/// <summary>
+	/// Normals from the visibility ids (docs/reference/borealis-gpu-driven.md, "Normals from the ids"): the ids target gets
+	/// a second word, each sample's instance record, a view's ids hold its whole prepass, and a resolve after the depth chain
+	/// finds each pixel's triangle and writes its normal for ambient occlusion. Off by default; <c>-ids-normals</c> turns it
+	/// on. Set before the first frame: the ids targets and pipelines are made for it.
+	/// </summary>
+	public bool IdsNormals { get; set; } = HasSwitch( "-ids-normals" );
+
+	/// <summary>Views resolved into normals from their ids, and asked for but left to depth, for reports and the tests.</summary>
+	public int IdsNormalsResolved, IdsNormalsSkipped;
+
+	/// <summary>The ids target's format: the vertex bit + 1, and with <see cref="IdsNormals"/> the instance record.</summary>
+	internal Format IdsFormat => IdsNormals ? Format.RG32Uint : Format.R32Uint;
+
+	/// <summary>
 	/// Fragments under which a prepass call draws in one phase with <see cref="HiZOcclusion"/>: a Hi-Z build and a second ids
 	/// pass cost more than a call this small (the 3D skybox's) can save.
 	/// </summary>
@@ -621,7 +635,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 				if ( !meshletStoreTried )
 				{
 					if ( HasSwitch( "-no-cooked-meshlets" ) ) Borealis.Backend.Meshlets.MeshletStore.UseCooked = false;
-					meshletStore = Borealis.Backend.Meshlets.MeshOptimizer.Available ? new Borealis.Backend.Meshlets.MeshletStore( Gpu, Borealis.Backend.Meshlets.MeshletConfig.Parse( SwitchValue( "-meshlets" ) ), MeshletThreads, MeshletCacheFolder() ) { LocalData = MeshletTasks && Gpu.Capabilities.MeshShaders } : null;
+					meshletStore = Borealis.Backend.Meshlets.MeshOptimizer.Available ? new Borealis.Backend.Meshlets.MeshletStore( Gpu, Borealis.Backend.Meshlets.MeshletConfig.Parse( SwitchValue( "-meshlets" ) ), MeshletThreads, MeshletCacheFolder() ) { LocalData = MeshletTasks && Gpu.Capabilities.MeshShaders, CornerData = IdsNormals } : null;
 					if ( meshletStore is not null ) gpuDrivenTables.Meshlets = meshletStore;
 					Volatile.Write( ref meshletStoreTried, true );
 				}
@@ -1577,15 +1591,18 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	{
 		var tier = Surfaces;
 		if ( tier.ConversionFor( file.Shader ) is not { } surface || tier.Layout( surface ) is not { } compiled ) return null;
-		if ( !ConvertedMaterial.Accepts( compiled, file ) || tier.ConvertMaterial?.Invoke( path ) == false ) return null;
+		// A material with features the surface doesn't do stays on its .shader; once the shader is a surface alone (no
+		// .shader_c) there's nothing else to draw it with, so the surface takes it without them
+		var shader = Shaders.Load( file.Shader );
+		if ( (shader is not null && !ConvertedMaterial.Accepts( compiled, file )) || tier.ConvertMaterial?.Invoke( path ) == false ) return null;
 		tier.CountConverted( path );
 		var converted = ConvertedMaterial.Create( compiled, WithFeatureRules( file ), path, MaterialTextureFile );
 
-		// The .shader material, for draws the surface can't make
-		converted.SetFallback( fallback );
+		// The .shader material, for draws the surface can't make; none for a surface alone
+		if ( shader is not null ) converted.SetFallback( fallback );
 
 		// Its scene attributes (overlay, NoZPrepass, ...) are the .shader material's: that material without textures
-		converted.SetAttributes( () => new BackendMaterial( path, Shaders.Load( file.Shader ), file, null ) );
+		converted.SetAttributes( () => new BackendMaterial( path, shader, file, null ) );
 		return converted;
 	}
 
@@ -1628,18 +1645,45 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 		return Classic();
 	}
 
-	/// <summary>A material that's a shader with its defaults.</summary>
+	/// <summary>
+	/// A material that's a shader with its defaults: the surface standing in for it, with its defaults, when the shader
+	/// is a surface alone (no compiled <c>.shader_c</c>: <c>shaders/terrain_preview.shader</c>).
+	/// </summary>
 	public override GpuMaterial MaterialFromShader( string shaderPath )
 	{
 		lock ( sharedMaterials )
 		{
 			if ( sharedMaterials.TryGetValue( shaderPath, out var material ) ) return material;
-			return sharedMaterials[shaderPath] = Track( new BackendMaterial( shaderPath, Shaders.Load( shaderPath ), null, null ) );
+			var shader = Shaders.Load( shaderPath );
+#pragma warning disable CA2000 // Kept: the shared materials own it
+			if ( shader is null && Surfaces.HasConversions && Converted( shaderPath, EmptyMaterial( shaderPath ), () => null ) is { } converted ) return sharedMaterials[shaderPath] = converted;
+#pragma warning restore CA2000
+			return sharedMaterials[shaderPath] = Track( new BackendMaterial( shaderPath, shader, null, null ) );
 		}
 	}
 
+	/// <summary>A material file of a shader that sets nothing: the shader's (the surface's) defaults.</summary>
+	static MaterialFile EmptyMaterial( string shader ) => new()
+	{
+		Name = shader,
+		Shader = shader,
+		Ints = new Dictionary<string, int>(),
+		Floats = new Dictionary<string, float>(),
+		Vectors = new Dictionary<string, float[]>(),
+		Textures = new Dictionary<string, string>(),
+		IntAttributes = new Dictionary<string, int>(),
+	};
+
 	/// <inheritdoc/>
-	public override GpuMaterial CreateMaterial( string name, string shaderPath ) => Track( new BackendMaterial( name, Shaders.Load( shaderPath ), null, null ) );
+	public override GpuMaterial CreateMaterial( string name, string shaderPath )
+	{
+		// A shader that's a surface alone (standard, and complex standing for it) has no compiled file: the surface with its defaults
+		var shader = Shaders.Load( shaderPath );
+#pragma warning disable CA2000 // Returned: the caller owns it
+		if ( shader is null && Surfaces.HasConversions && Converted( name, EmptyMaterial( shaderPath ), () => null ) is { } converted ) return converted;
+#pragma warning restore CA2000
+		return Track( new BackendMaterial( name, shader, null, null ) );
+	}
 
 	/// <summary>A material of <paramref name="shader"/>'s defaults, values set on it later: one made in code from a shader.</summary>
 	public GpuMaterial CreateMaterial( string name, ShaderFile shader ) => Track( new BackendMaterial( name, shader, null, null ) );
@@ -1653,6 +1697,17 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	public GpuMaterial CreateRawMaterial( string name, string shaderPath )
 	{
 		var shader = Shaders.Load( shaderPath );
+
+		// A shader that's a surface alone (standard, complex for it; skin, glass): the surface with its defaults, every texture
+		// the error texture until code sets one, as its .shader's material had (no texture of theirs names a default)
+#pragma warning disable CA2000 // Returned: the caller owns it
+		if ( shader is null && Surfaces.HasConversions && Converted( name, EmptyMaterial( shaderPath ), () => null ) is { } converted )
+		{
+			converted.FillUnsetTextures( ErrorTexture );
+			return converted;
+		}
+#pragma warning restore CA2000
+
 		return Track( new BackendMaterial( name, shader, null, RawMaterialTextures( shader ) ) );
 	}
 
@@ -1708,22 +1763,48 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 
 	/// <summary>
 	/// A lit material of one colour, for meshes made with <see cref="BackendMesh.Create"/>:
-	/// <c>materials/default/white.vmat</c> (complex.shader, white, flat normal) tinted with <paramref name="albedo"/>.
+	/// <c>materials/default/white.vmat</c> (standard, white, flat normal) tinted with <paramref name="albedo"/>, or the
+	/// standard surface with that tint where it isn't built.
 	/// </summary>
 	public GpuMaterial CreateMaterial( string name, Color albedo )
 	{
 		var values = new Dictionary<string, float[]>( StringComparer.OrdinalIgnoreCase ) { ["g_vColorTint"] = [albedo.r, albedo.g, albedo.b, 0] };
-		return Content.Find( "materials/default/white.vmat" ) is null
-			? Track( new BackendMaterial( name, Shaders.Load( "shaders/complex.shader" ), null, null, values ) )
-			: Material( "materials/default/white.vmat", values, name );
+		if ( Content.Find( "materials/default/white.vmat" ) is not null ) return LoadMaterial( "materials/default/white.vmat", values, name );
+#pragma warning disable CA2000 // Returned: the caller owns it
+		if ( Surfaces.HasConversions && Converted( name, WithValues( EmptyMaterial( "shaders/standard.shader" ), values ), () => null ) is { } converted ) return converted;
+#pragma warning restore CA2000
+		return Track( new BackendMaterial( name, Shaders.Load( "shaders/standard.shader" ), null, null, values ) );
 	}
 
 	/// <summary>
 	/// A compiled material with <paramref name="values"/> (shader variables by name) over its own. One that isn't built, or
-	/// whose shader isn't, draws as the error material.
+	/// whose shader isn't, draws as the error material. A material of a shader that's a surface alone (no compiled file to
+	/// draw it with: standard, skin) is the surface with the values.
 	/// </summary>
 	public GpuMaterial LoadMaterial( string path, IReadOnlyDictionary<string, float[]> values, string name = null )
-		=> Material( path, values is null ? null : new( values, StringComparer.OrdinalIgnoreCase ), name );
+	{
+		var own = values is null ? null : new Dictionary<string, float[]>( values, StringComparer.OrdinalIgnoreCase );
+#pragma warning disable CA2000 // Returned: the caller owns it
+		if ( Surfaces.HasConversions && Content.TryRead( path ) is { } data && ReadMaterial( data ) is { } file && Shaders.Load( file.Shader ) is null
+			&& Converted( name ?? path, WithValues( file, own ), () => null ) is { } converted ) return converted;
+#pragma warning restore CA2000
+		return Material( path, own, name );
+	}
+
+	/// <summary><paramref name="file"/> with <paramref name="values"/> (shader variables by name) over its own.</summary>
+	static MaterialFile WithValues( MaterialFile file, Dictionary<string, float[]> values )
+	{
+		if ( values is not { Count: > 0 } ) return file;
+		var floats = new Dictionary<string, float>( file.Floats, StringComparer.OrdinalIgnoreCase );
+		var vectors = new Dictionary<string, float[]>( file.Vectors, StringComparer.OrdinalIgnoreCase );
+		foreach ( var (variable, value) in values )
+		{
+			if ( floats.ContainsKey( variable ) && value.Length > 0 ) floats[variable] = value[0];
+			else vectors[variable] = value;
+		}
+
+		return new MaterialFile { Name = file.Name, Shader = file.Shader, Ints = file.Ints, Floats = floats, Vectors = vectors, Textures = file.Textures, IntAttributes = file.IntAttributes, ShaderVersion = file.ShaderVersion };
+	}
 
 	/// <summary>
 	/// A compiled material with <paramref name="values"/> and <paramref name="textures"/> (shader variables by name, such as
@@ -1732,8 +1813,9 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	/// </summary>
 	public GpuMaterial LoadMaterial( string path, IReadOnlyDictionary<string, float[]> values, IReadOnlyDictionary<string, GpuTexture> textures, string name = null )
 	{
-		var material = Material( path, values is null ? null : new( values, StringComparer.OrdinalIgnoreCase ), name );
-		SetOn( material, null, textures );
+		// A material of a shader that's a surface alone is the surface with them
+		var material = LoadMaterial( path, values, name );
+		SetOnMaterial( material, null, textures );
 		return material;
 	}
 
@@ -1745,6 +1827,14 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	public void SetOnMaterial( GpuMaterial material, IReadOnlyDictionary<string, float[]> values, IReadOnlyDictionary<string, GpuTexture> textures )
 	{
 		if ( material is BackendMaterial own ) SetOn( own, values, textures );
+		else if ( material is ConvertedMaterial surface )
+		{
+			foreach ( var (variable, value) in values ?? new Dictionary<string, float[]>() ) surface.Set( variable, value );
+			foreach ( var (variable, texture) in textures ?? new Dictionary<string, GpuTexture>() )
+			{
+				if ( texture is not null ) surface.Set( variable, texture );
+			}
+		}
 	}
 
 	/// <summary>
@@ -1756,6 +1846,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	public void SetFeaturesOnMaterial( GpuMaterial material, IReadOnlyDictionary<string, int> features )
 	{
 		if ( material is BackendMaterial own ) own.SetFeatures( features );
+		else if ( material is ConvertedMaterial surface ) surface.SetFeatures( features );
 	}
 
 	static void SetOn( BackendMaterial material, IReadOnlyDictionary<string, float[]> values, IReadOnlyDictionary<string, GpuTexture> textures )
@@ -1791,13 +1882,14 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	/// <summary>
 	/// <paramref name="file"/> with its shader, or the error material's file and shader when its shader won't load (no
 	/// compiled file, as S&amp;Business's bucket water names a shader its package doesn't ship, or one that can't be read here),
-	/// as native's material system draws such a material with the error shader. One that names no shader, or the error
-	/// material itself, stays as it is.
+	/// as native's material system draws such a material with the error shader. One that names no shader, the error
+	/// material itself, or one of a core shader that's a surface alone (standard, skin: here only with surfaces switched off,
+	/// for comparisons) stays as it is.
 	/// </summary>
 	MaterialFile WithShader( string path, MaterialFile file, out ShaderFile shader )
 	{
 		shader = Shaders.Load( file.Shader );
-		if ( shader is not null || string.IsNullOrEmpty( file.Shader ) || MissingMaterial( path ) is not { } error ) return file;
+		if ( shader is not null || string.IsNullOrEmpty( file.Shader ) || SurfaceShaders.IsCoreSurface( file.Shader ) || MissingMaterial( path ) is not { } error ) return file;
 		if ( Shaders.Load( error.Shader ) is not { } errorShader ) return file;
 		shader = errorShader;
 		return error;
@@ -1879,7 +1971,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 				: [new( layout.Stride ), new( 4, VertexStepRate.Instance ), new( 0 )];
 			// The visibility-driven forward pass's id prepass: target 0 takes the authored output (its alpha drives alpha to
 			// coverage) and goes nowhere, target 1 the ids (a GPU-driven pixel shader's id output)
-			Format[] colors = ids ? [Format.R8Unorm, Format.R32Uint] : color == Format.Unknown ? [] : [color];
+			Format[] colors = ids ? [Format.R8Unorm, IdsFormat] : color == Format.Unknown ? [] : [color];
 			var name = $"{variant}{(depthOnly ? " depth" : ids ? " ids" : "")}";
 			var depthBias = depthOnly || color == Format.Unknown || ids;
 
@@ -2076,6 +2168,9 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	/// (<see cref="NormalsFormat"/>); every other pipeline drawn there leaves it as it is.
 	/// </summary>
 	internal override bool WritesForwardNormals => true;
+
+	/// <inheritdoc/>
+	internal override bool ResolvesIdsNormals => IdsNormals && GpuDriven && GpuDrivenVisibility && IdsNormalsShader is not null;
 
 	/// <summary>The opaque pass's normals target (<see cref="ScreenSpaceReflectionsLayer.NormalsFormat"/>).</summary>
 	internal const Format NormalsFormat = Format.RGB10A2Unorm;
@@ -2276,6 +2371,34 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	bool hizShaderLoaded;
 
 	/// <summary>
+	/// <c>borealis_ids_normals_cs</c>, which finds each pixel's triangle from the ids (<see cref="IdsNormals"/>), when its
+	/// pass module draws: null with <see cref="SlangPasses"/> off or the module missing, and ambient occlusion rebuilds its
+	/// normals from depth.
+	/// </summary>
+	internal ShaderFile IdsNormalsShader
+	{
+		get
+		{
+			if ( !SlangPasses ) return null;
+			if ( Volatile.Read( ref idsNormalsShaderLoaded ) ) return idsNormalsShader;
+			lock ( visibilityViews )
+			{
+				if ( !idsNormalsShaderLoaded )
+				{
+					var shader = Shaders.Load( "shaders/borealis_ids_normals_cs.shader" );
+					idsNormalsShader = shader is not null && Passes.ModuleOf( shader ) is not null ? shader : null;
+					Volatile.Write( ref idsNormalsShaderLoaded, true );
+				}
+
+				return idsNormalsShader;
+			}
+		}
+	}
+
+	ShaderFile idsNormalsShader;
+	bool idsNormalsShaderLoaded;
+
+	/// <summary>
 	/// Whether prepass meshlets are culled and drawn with task and mesh shaders (<c>borealis_meshlet_ids</c>) where the
 	/// device has them, in place of the compute pass, its index copies and indexed draws. Off by default: it costs more GPU
 	/// time than the compute pass on the Steam Deck and on the PC (docs/reference/borealis-gpu-driven.md, "Meshlets");
@@ -2386,7 +2509,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 		~VisibilityView() => Retire?.Enqueue( this );
 
 		/// <summary>Every buffer it made.</summary>
-		public IEnumerable<BufferHandle> Buffers() => [Mask, Stamps, .. Compacted, PrepassCompacted, PrepassCompacted16, MeshletStamps, MeshletJobs, .. HiZVisible, HiZ];
+		public IEnumerable<BufferHandle> Buffers() => [Mask, Stamps, .. Compacted, PrepassCompacted, PrepassCompacted16, MeshletStamps, MeshletJobs, .. HiZVisible, HiZ, IdsCalls];
 
 		public TextureHandle Ids, Scratch;
 		public int Width, Height, Samples;
@@ -2461,6 +2584,15 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 		public uint HiZBuiltFrame;
 		public object HiZBuiltBy;
 
+		/// <summary>
+		/// With <see cref="IdsNormals"/>: the calls that drew ids into <see cref="Ids"/> this frame, <see cref="IdsCallBytes"/>
+		/// each (the frame chunk's bindless slot, the region's first instance record and how many, and where its fragment
+		/// words are as <c>g_nBorealisVertexBases</c> names them), so an id's instance record finds its vertex base; up to
+		/// <see cref="MaxIdsCalls"/>, cleared with the mask, the rest zeros. <see cref="IdsCallCount"/> counts this frame's.
+		/// </summary>
+		public BufferHandle IdsCalls;
+		public int IdsCallCount;
+
 		/// <summary>Every texture it made.</summary>
 		public IEnumerable<TextureHandle> Textures() => [Ids, Scratch];
 
@@ -2469,6 +2601,12 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 		/// this frame takes its triangles' range from it on the GPU, so calls recorded on different workers reserve nothing.
 		/// </summary>
 		public const uint CompactedCursorIndices = 4;
+
+		/// <summary>Calls a view's ids table holds (<see cref="IdsCalls"/>): a call past them leaves its pixels to depth.</summary>
+		public const int MaxIdsCalls = 16;
+
+		/// <summary>Bytes of a call in <see cref="IdsCalls"/>.</summary>
+		public const int IdsCallBytes = 16;
 	}
 
 	/// <summary>A view's visibility resources if it has any yet.</summary>
@@ -2736,6 +2874,8 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 		(state.HiZBuiltFrame, state.HiZBuiltBy) = (0, null);
 		state.Compacted.AsSpan().Clear();
 		state.Ids = state.Scratch = default;
+		state.IdsCalls = default;
+		state.IdsCallCount = 0;
 		state.MeshletStampsAttribute = null;
 		state.Width = state.Height = state.Samples = 0;
 		state.CompactedCapacity = state.PrepassCapacity = 0;
@@ -2799,6 +2939,12 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 				visibilityBuffers.Add( state.Stamps );
 			}
 
+			if ( IdsNormals && !state.IdsCalls.IsValid )
+			{
+				state.IdsCalls = VisibilityIdsCalls();
+				visibilityBuffers.Add( state.IdsCalls );
+			}
+
 			// Room for every sample's triangle: made with the view, and made again when its target grows past it
 			var compacted = CompactedIndicesFor( depth );
 			if ( !state.Compacted[0].IsValid || compacted > state.CompactedCapacity )
@@ -2827,6 +2973,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 				visibilityTextures.Add( state.Scratch );
 				visibilityTextures.Add( state.Ids );
 				(state.Width, state.Height, state.Samples) = (depth.Width, depth.Height, depth.Samples);
+				ClearIdsMadeAfterClear( state );
 			}
 
 			state.Ready = true;
@@ -2848,6 +2995,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 			var buffers = new BufferHandle[3];
 			for ( int i = 0; i < buffers.Length; i++ ) buffers[i] = VisibilityCompacted( compacted );
 			var (scratch, ids) = VisibilityTargets( depth );
+			var idsCalls = IdsNormals ? VisibilityIdsCalls() : default;
 
 			VisibilityView state;
 			lock ( visibilityViews )
@@ -2857,9 +3005,16 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 				{
 					// Made meanwhile where it was asked
 					foreach ( var buffer in (BufferHandle[])[mask, stamps, .. buffers] ) Gpu.Destroy( buffer );
+					if ( idsCalls.IsValid ) Gpu.Destroy( idsCalls );
 					Gpu.Destroy( scratch );
 					Gpu.Destroy( ids );
 					return;
+				}
+
+				if ( idsCalls.IsValid )
+				{
+					state.IdsCalls = idsCalls;
+					visibilityBuffers.Add( idsCalls );
 				}
 
 				(state.Mask, state.Stamps) = (mask, stamps);
@@ -2893,6 +3048,23 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 
 	BufferHandle VisibilityStamps() => Gpu.CreateBuffer( new BufferInfo { Size = GpuDrivenTables.MaxVisibilityFragments * 4L, Usage = BufferUsage.Storage | BufferUsage.CopyDestination, Name = "Borealis visibility stamps" } );
 
+	BufferHandle VisibilityIdsCalls() => Gpu.CreateBuffer( new BufferInfo { Size = VisibilityView.MaxIdsCalls * VisibilityView.IdsCallBytes, Usage = BufferUsage.Storage | BufferUsage.CopyDestination, Name = "Borealis visibility ids calls" } );
+
+	/// <summary>
+	/// With <see cref="IdsNormals"/>, a view's ids target made after this frame cleared the view's (its depth target changed
+	/// size): cleared and left readable as that clear leaves it, in a list of its own submitted now, since this frame's calls
+	/// load it. Under the visibility lock.
+	/// </summary>
+	void ClearIdsMadeAfterClear( VisibilityView state )
+	{
+		if ( !IdsNormals || state.ClearedFrame != GpuDrivenFrame || !state.Ids.IsValid ) return;
+		var list = Gpu.BeginCommandList( QueueType.Graphics, "Borealis visibility ids made mid-frame" );
+		list.Barrier( Borealis.Gpu.TextureBarrier.Transition( state.Ids, ImageLayout.Undefined, ImageLayout.CopyDestination, PipelineStage.AllCommands, MemoryAccess.None, PipelineStage.Transfer, MemoryAccess.TransferWrite ) );
+		list.ClearTexture( state.Ids );
+		list.Barrier( Borealis.Gpu.TextureBarrier.Transition( state.Ids, ImageLayout.CopyDestination, ImageLayout.ShaderRead, PipelineStage.Transfer, MemoryAccess.TransferWrite, PipelineStage.AllCommands, MemoryAccess.MemoryRead ) );
+		Gpu.Submit( list );
+	}
+
 	BufferHandle VisibilityCompacted( int indices ) => Gpu.CreateBuffer( new BufferInfo { Size = indices * 4L, Usage = BufferUsage.Index | BufferUsage.Storage | BufferUsage.CopyDestination, Name = "Borealis visibility triangles" } );
 
 	// Target 0 of the id prepass (the authored output, which only its alpha to coverage is wanted from) and the ids
@@ -2908,8 +3080,8 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 			Mips = 1,
 			Samples = depth.Samples,
 			Dimension = TextureDimension.Texture2D,
-			Format = Format.R32Uint,
-			Usage = TextureUsage.ColorTarget | TextureUsage.Sampled | (Figure is not null ? TextureUsage.CopySource : 0),
+			Format = IdsFormat,
+			Usage = TextureUsage.ColorTarget | TextureUsage.Sampled | (IdsNormals ? TextureUsage.CopyDestination : 0) | (Figure is not null ? TextureUsage.CopySource : 0),
 			Name = "Borealis visibility ids",
 		} );
 		return (scratch, ids);

@@ -110,6 +110,12 @@ public class DepthPassTests : GpuTest
 	[TestMethod]
 	public void DepthOnlyDrawsReadPositionsOnly()
 	{
+		// The model's materials are standard's, a surface alone now (complex stands for it): no .shader route to draw it with
+		using ( var probe = new BackendDevice( Device ) )
+		{
+			if ( probe.Shaders.Load( "shaders/complex.shader" ) is null ) Assert.Inconclusive( "complex.shader is gone: the model has no .shader route's prepass" );
+		}
+
 		byte[] Frame( bool positions, out bool positionLayout, out long copied )
 		{
 			using var backend = new BackendDevice( Device ) { PositionStreams = positions, GpuDriven = false };

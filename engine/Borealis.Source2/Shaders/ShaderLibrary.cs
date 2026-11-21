@@ -186,17 +186,21 @@ public sealed class ShaderLibrary : IDisposable
 		return (null, false);
 	}
 
-	/// <summary>Whether no root has <paramref name="shader"/>'s source and one has a Slang file in its place.</summary>
+	/// <summary>
+	/// Whether no root has <paramref name="shader"/>'s source and one has a Slang file in its place, or in the place of the
+	/// shader it stands for (<see cref="ShaderAliases"/>: complex's is standard's).
+	/// </summary>
 	bool Leftover( string shader )
 	{
 		var relative = shader.Replace( '\\', '/' ).TrimStart( '/' );
 		if ( relative.EndsWith( ".shader_c", StringComparison.OrdinalIgnoreCase ) ) relative = relative[..^2];
 		if ( !relative.EndsWith( ".shader", StringComparison.OrdinalIgnoreCase ) ) return false;
-		var slang = relative[..^".shader".Length] + ".slang";
+		var standsFor = ShaderAliases.Resolve( relative );
+		var slang = standsFor[..^".shader".Length] + ".slang";
 		var module = false;
 		foreach ( var root in Files.Roots )
 		{
-			if ( File.Exists( Path.Combine( root, relative ) ) ) return false;
+			if ( File.Exists( Path.Combine( root, relative ) ) || File.Exists( Path.Combine( root, standsFor ) ) ) return false;
 			module |= File.Exists( Path.Combine( root, slang ) ) || File.Exists( Path.Combine( root, slang + "_c" ) );
 		}
 
@@ -377,7 +381,7 @@ public sealed class ShaderLibrary : IDisposable
 	/// The GPU-driven variant's form: what vfx_vulkan's rewrite (<c>src/vfx/vfx_vulkan/borealis_gpu_driven.cpp</c>) makes
 	/// of a shader. Raise it with any change there, so variants compiled at load and cached are compiled again.
 	/// </summary>
-	public const int GpuDrivenVersion = 4;
+	public const int GpuDrivenVersion = 5;
 
 	readonly Dictionary<ShaderFile, ShaderFile> gpuDriven = new( ReferenceEqualityComparer.Instance );
 
