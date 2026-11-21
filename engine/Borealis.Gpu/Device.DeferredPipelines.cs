@@ -550,12 +550,13 @@ public sealed unsafe partial class Device
 			}
 			else
 			{
-				pipeline = MakeGraphics( info, PipelineParts.All, library: false, layout, null, 0, 0 );
+				pipeline = MakeGraphics( info, PipelineParts.All, library: false, layout, null, 0, shaderStatistics ? CaptureStatistics : 0 );
 			}
 		}
 
 		CountPipeline( started );
 		SetName( VkObjectType.Pipeline, pipeline, info.Name );
+		if ( shaderStatistics ) KeepStatistics( pipeline, info.Name );
 
 		bool alive;
 		lock ( partLock )
