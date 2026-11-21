@@ -23,7 +23,34 @@ import sbox.surface;
 // texture inputs, the textures made from them, its parameters and attributes, read with the material's features. Materials
 // naming complex, simple or generic compile and open as standard's (ShaderAliases)
 #if MATERIAL_INPUTS
-// The material editor's FEATURES lines: complex.shader's, less the features this surface doesn't do (above)
+// The FEATURES lines, read with MATERIAL_SHADER (FeatureRules.ShaderDefine) the material's shader's place in Packing's list.
+#if MATERIAL_SHADER == 2
+// generic.shader's, for materials an older engine compiled for it: Borealis applies their rules before this surface takes
+// such a material's values, as native did generic's
+Feature( F_SPECULAR, 0..1, "Specular" );
+Feature( F_UNLIT, 0..1, "Lighting" );
+FeatureRule( Allow1( F_UNLIT, F_SPECULAR ), "Specular and Unlit are not compatible" );
+Feature( F_ALPHA_TEST, 0..1, "Translucent" );
+Feature( F_TRANSLUCENT, 0..1, "Translucent" );
+Feature( F_ADDITIVE_BLEND, 0..1, "Translucent" );
+FeatureRule( Allow1( F_TRANSLUCENT, F_ALPHA_TEST ), "Translucent and Alpha Test are not compatible" );
+FeatureRule( Requires1( F_ADDITIVE_BLEND, F_TRANSLUCENT ), "Requires translucency" );
+Feature( F_RENDER_BACKFACES, 0..1, "Rendering" );
+Feature( F_SELF_ILLUM, 0..1, "Self Illum" );
+FeatureRule( Allow1( F_SELF_ILLUM, F_UNLIT ), "Self Illum and Unlit are not compatible" );
+Feature( F_TINT_MASK, 0..1, "Per-Instance Tint Mask" );
+FeatureRule( Allow1( F_UNLIT, F_TINT_MASK ), "Tint Mask and Unlit are not compatible" );
+Feature( F_PAINT_VERTEX_COLORS, 0..1, "Vertex Paint" );
+#elif MATERIAL_SHADER == 1
+// simple.shader's: no rules of their own
+#include "vr_common_features.fxc"
+Feature( F_METALNESS_TEXTURE, 0..1, "PBR" );
+Feature( F_AMBIENT_OCCLUSION_TEXTURE, 0..1, "PBR" );
+#else
+// complex.shader's, which the material editor shows and materials compile and draw with (materials naming complex or
+// standard): every rule complex declared, in its order, but not the Feature lines of what this surface doesn't do (above).
+// Rules naming those still apply to a material's values (a material setting cloth has no metalness texture, one setting
+// parallax occlusion isn't alpha-tested or translucent, as complex compiled and drew them); the editor isn't shown them
 #include "vr_common_features.fxc"
 Feature( F_ALPHA_TEST, 0..1, "Translucent" );
 Feature( F_TRANSLUCENT, 0..1, "Translucent" );
@@ -32,20 +59,62 @@ FeatureRule( Allow1( F_ALPHA_TEST, F_TRANSLUCENT ), "Translucent and Alpha Test 
 FeatureRule( Requires1( F_ADDITIVE_BLEND, F_TRANSLUCENT ), "Requires translucency" );
 FeatureRule( Allow1( F_TRANSLUCENT, F_DO_NOT_CAST_SHADOWS ), "Translucent and Do Not Cast Shadows are not compatible" );
 Feature( F_TINT_MASK, 0..1, "Color" );
+FeatureRule( Allow1( F_ANISOTROPIC_GLOSS, F_ADDITIVE_BLEND ), "Anisotropic Gloss and Additive Blend are incompatible" );
+FeatureRule( Allow1( F_RETRO_REFLECTIVE, F_ANISOTROPIC_GLOSS ), "Retro Reflective and Anisotropic Gloss are not compatible" );
+FeatureRule( Allow1( F_RETRO_REFLECTIVE, F_ALPHA_TEST ), "Retro Reflective and Alpha Test are not compatible" );
+FeatureRule( Allow1( F_RETRO_REFLECTIVE, F_TRANSLUCENT ), "Retro Reflective and Translucent are not compatible" );
+FeatureRule( Allow1( F_RETRO_REFLECTIVE, F_TINT_MASK ), "Retro Reflective and Tint Mask are not compatible" );
+FeatureRule( Allow1( F_RETRO_REFLECTIVE, F_ADDITIVE_BLEND ), "Retro Reflective and Additive Blend are incompatible" );
 Feature( F_SCALE_NORMAL_MAP, 0..1, "Normal" );
 FeatureRule( Allow1( F_SCALE_NORMAL_MAP, F_ALPHA_TEST ), "Scale normals and Alpha Test are not compatible" );
 FeatureRule( Allow1( F_SCALE_NORMAL_MAP, F_TRANSLUCENT ), "Scale normals and Translucent are not compatible" );
+FeatureRule( Allow1( F_SCALE_NORMAL_MAP, F_ANISOTROPIC_GLOSS ), "Scale normals and Anisotropic Gloss are not compatible" );
+FeatureRule( Allow1( F_RETRO_REFLECTIVE, F_SCALE_NORMAL_MAP ), "Retro Reflective and Scale normals are not compatible" );
 FeatureRule( Allow1( F_SCALE_NORMAL_MAP, F_ADDITIVE_BLEND ), "Scale Normal Map and Additive Blend are incompatible" );
+FeatureRule( Allow1( F_ENABLE_NORMAL_SELF_SHADOW, F_ADDITIVE_BLEND ), "Enable Normal Self Shadow and Additive Blend are incompatible" );
+FeatureRule( Allow1( F_USE_BENT_NORMALS, F_TRANSLUCENT ), "Bent Normals and Alpha Test are not compatible" );
+FeatureRule( Allow1( F_USE_BENT_NORMALS, F_TINT_MASK ), "Bent Normals and Tint Mask are not compatible" );
+FeatureRule( Allow1( F_USE_BENT_NORMALS, F_RETRO_REFLECTIVE ), "Bent Normals and Retro Reflective are not compatible" );
+FeatureRule( Allow1( F_USE_BENT_NORMALS, F_ADDITIVE_BLEND ), "Use Bent Normals and Additive Blend are incompatible" );
+FeatureRule( Allow1( F_USE_BENT_NORMALS, F_SCALE_NORMAL_MAP ), "Use Bent Normals and Scaled Normal Maps are Incompatible" );
 Feature( F_SELF_ILLUM, 0..1, "PBR" );
+FeatureRule( Allow1( F_SELF_ILLUM, F_RETRO_REFLECTIVE ), "Self Illum and Retro Reflective are not compatible" );
 Feature( F_DETAIL_TEXTURE, 0..4( 0="None", 1="Mod2X", 2="Overlay", 3="Normals", 4="Overlay and Normals" ), "Detail Texture" );
 FeatureRule( Allow1( F_DETAIL_TEXTURE, F_SELF_ILLUM ), "Detail Texture and Self Illum are not compatible" );
+FeatureRule( Allow1( F_DETAIL_TEXTURE, F_ANISOTROPIC_GLOSS ), "Detail Texture and Anisotropic Gloss are not compatible" );
+FeatureRule( Allow1( F_DETAIL_TEXTURE, F_RETRO_REFLECTIVE ), "Detail Texture and Retro Reflective are not compatible" );
 FeatureRule( Allow1( F_DETAIL_TEXTURE, F_ADDITIVE_BLEND ), "Detail Texture and Additive Blend are not compatible" );
 Feature( F_METALNESS_TEXTURE, 0..1, "PBR" );
 FeatureRule( Allow1( F_METALNESS_TEXTURE, F_ADDITIVE_BLEND ), "Metalness Texture and Additive Blend are not compatible" );
+FeatureRule( Allow1( F_SECONDARY_UV, F_RETRO_REFLECTIVE ), "Secondary UV and Retro Reflective are not compatible" );
+FeatureRule( Allow1( F_SECONDARY_UV, F_ENABLE_NORMAL_SELF_SHADOW ), "Secondary UV and Normal Self Shadow are not compatible" );
+FeatureRule( Allow1( F_SECONDARY_UV, F_USE_BENT_NORMALS ), "Secondary UV and Use Bent Normals are not compatible" );
+FeatureRule( Allow1( F_SECONDARY_UV, F_SCALE_NORMAL_MAP ), "Secondary UV and Scale normals are not compatible" );
+FeatureRule( Allow1( F_DIFFUSE_WRAP, F_RETRO_REFLECTIVE ), "Diffuse wrap and Retro Reflective are not compatible" );
+FeatureRule( Allow1( F_DIFFUSE_WRAP, F_SCALE_NORMAL_MAP ), "Diffuse wrap and Scale Normal Map are not compatible" );
+FeatureRule( Allow1( F_DIFFUSE_WRAP, F_DETAIL_TEXTURE ), "Diffuse wrap and Detail Texture are not compatible" );
+FeatureRule( Allow1( F_DIFFUSE_WRAP, F_ADDITIVE_BLEND ), "Diffuse wrap and Additive Blend are not compatible" );
 Feature( F_TRANSMISSIVE_BACKFACE_NDOTL, 0..1, "PBR" );
+FeatureRule( Allow1( F_TRANSMISSIVE_BACKFACE_NDOTL, F_DIFFUSE_WRAP ), "Transmissive Backface Ndotl and Unlit are not compatible" );
+FeatureRule( Allow1( F_TRANSMISSIVE_BACKFACE_NDOTL, F_RETRO_REFLECTIVE ), "Transmissive Backface Ndotl and Retro Reflective are not compatible" );
 FeatureRule( Allow1( F_TRANSMISSIVE_BACKFACE_NDOTL, F_SCALE_NORMAL_MAP ), "Transmissive Backface Ndotl and Scale Normal Map are not compatible" );
 FeatureRule( Allow1( F_TRANSMISSIVE_BACKFACE_NDOTL, F_DETAIL_TEXTURE ), "Transmissive Backface Ndotl and Detail Texture are not compatible" );
 FeatureRule( Allow1( F_TRANSMISSIVE_BACKFACE_NDOTL, F_ADDITIVE_BLEND ), "Transmissive Backface Ndotl and Additive Blend are not compatible" );
+FeatureRule( Allow1( F_CLOTH_SHADING, F_ANISOTROPIC_GLOSS ), "Cloth Shading and Anisotropic Gloss are not compatible" );
+FeatureRule( Allow1( F_CLOTH_SHADING, F_RETRO_REFLECTIVE ), "Cloth Shading and Retro Reflective are not compatible" );
+FeatureRule( Allow1( F_CLOTH_SHADING, F_METALNESS_TEXTURE ), "Cloth Shading and Metalness Texture are not compatible" );
+FeatureRule( Allow1( F_CLOTH_SHADING, F_SCALE_NORMAL_MAP ), "Cloth Shading and Scale Normal Map are not compatible" );
+FeatureRule( Allow1( F_CLOTH_SHADING, F_DIFFUSE_WRAP ), "Cloth Shading and Diffuse Wrap are not compatible" );
+FeatureRule( Allow1( F_PARALLAX_OCCLUSION, F_TRANSLUCENT ), "Parallax Occlusion and Translucent are not compatible" );
+FeatureRule( Allow1( F_PARALLAX_OCCLUSION, F_ALPHA_TEST ), "Parallax Occlusion and Alpha Test are not compatible" );
+FeatureRule( Allow1( F_PARALLAX_OCCLUSION, F_CLOTH_SHADING ), "Parallax Occlusion and Cloth Shading are not compatible" );
+FeatureRule( Allow1( F_PARALLAX_OCCLUSION, F_USE_BENT_NORMALS ), "Parallax Occlusion and Bent Normals are not compatible" );
+FeatureRule( Allow1( F_PARALLAX_OCCLUSION, F_DIFFUSE_WRAP ), "Parallax Occlusion and Diffuse Wrap are not compatible" );
+FeatureRule( Allow1( F_PARALLAX_OCCLUSION, F_ADDITIVE_BLEND ), "Parallax Occlusion and Additive Blend are not compatible" );
+FeatureRule( Allow1( F_PARALLAX_OCCLUSION, F_DETAIL_TEXTURE ), "Parallax Occlusion and Detail Texture are not compatible" );
+FeatureRule( Allow1( F_PARALLAX_OCCLUSION, F_METALNESS_TEXTURE ), "Parallax Occlusion and Metalness Texture are not compatible" );
+FeatureRule( Allow1( F_PARALLAX_OCCLUSION, F_RETRO_REFLECTIVE ), "Parallax Occlusion and Retro Reflective are not compatible" );
+#endif
 // The material's parameters as the material editor shows them, with the feature states that use them
 float2 g_vTexCoordScale < Default2( 1, 1 ); Range2( 0, 0, 100, 100 ); UiGroup( "Texture Coordinates,80/10" ); >;
 float2 g_vTexCoordOffset < Default2( 0, 0 ); Range2( -1, -1, 1, 1 ); UiGroup( "Texture Coordinates/20" ); >;
