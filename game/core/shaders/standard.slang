@@ -23,7 +23,7 @@ import sbox.surface;
 // texture inputs, the textures made from them, its parameters and attributes, read with the material's features. Materials
 // naming complex, simple or generic compile and open as standard's (ShaderAliases)
 #if MATERIAL_INPUTS
-// The FEATURES lines, read with MATERIAL_SHADER (FeatureRules.ShaderDefine) the material's shader's place in Packing's list.
+// The material editor's FEATURES lines, read with MATERIAL_SHADER (FeatureRules.ShaderDefine) the material's shader's place in Packing's list.
 #if MATERIAL_SHADER == 2
 // generic.shader's, for materials an older engine compiled for it: Borealis applies their rules before this surface takes
 // such a material's values, as native did generic's

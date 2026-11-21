@@ -2,6 +2,7 @@ using Borealis.Source2.Materials;
 using Borealis.Source2.Shaders;
 using Sandbox.ShaderCompiler;
 using System.IO;
+using System.Linq;
 
 namespace Borealis.Backend;
 
