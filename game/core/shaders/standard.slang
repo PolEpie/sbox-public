@@ -135,6 +135,19 @@ TextureAttribute( LightSim_Opacity_A, g_tColor );
 #include "sbox/standard_material_inputs.slangh"
 CreateInputTexture2D( TextureTransmissiveColor, Srgb, 8, "", "_color", "Transmission", Default3( 1.0, 1.0, 1.0 ) );
 Texture2D g_tTransmissiveColor < Channel( RGB, Box( TextureTransmissiveColor ), Srgb );  OutputFormat( BC7 ); SrgbRead( true ); ActiveIf( S_TRANSMISSIVE_BACKFACE_NDOTL != 0 ); >;
+// complex.shader's vertex inputs (its VS_INPUT, every dynamic combo's): what the model compiler lays out the meshes of
+// models using these materials by (the material's VSInputSignature), so they keep the streams they had
+// generic's vertex paint and the secondary uv set stay where a material sets them, though this surface reads neither
+#undef S_UV2
+#define S_UV2 F_SECONDARY_UV
+#define VS_INPUT_HAS_TANGENT_BASIS 1
+struct VS_INPUT
+{
+	#include "vr_shared_standard_vs_input.fxc"
+	#if ( F_PAINT_VERTEX_COLORS )
+		float4 vColorPaintValues : TEXCOORD5 < Semantic( VertexPaintTintColor ); >;
+	#endif
+};
 #endif
 
 // complex.shader's g_sTrilinearWrap (occlusion, metalness, self-illumination and transmission); the rest of complex's use

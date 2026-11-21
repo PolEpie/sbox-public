@@ -224,4 +224,63 @@ public class MaterialCompileTests
 		Assert.IsTrue( names.Contains( "sbox/lighting.slangh" ), string.Join( ", ", names ) );
 		foreach ( var old in SlangHeaders.Replaced.Keys ) Assert.IsFalse( names.Contains( old ), old );
 	}
+
+	// complex.shader's vertex inputs as the native material compiler wrote them into a material's edit data
+	// (VSInputSignature of materials/dev/primary_white.vmat_c, compiled by an engine that still had complex.shader)
+	const string ComplexSignature = "<!-- kv3 encoding:text:version{e21c7f3c-8a33-41c5-9977-a76d3a32aa0d} format:generic:version{7412167c-06e9-4698-aff2-e63eb59037e7} -->\n{\n\tm_elems = \n\t[\n"
+		+ "\t\t{\n\t\t\tm_pName = \"nBoneIndex\"\n\t\t\tm_pSemantic = \"BlendIndices\"\n\t\t\tm_pD3DSemanticName = \"BLENDINDICES\"\n\t\t\tm_nD3DSemanticIndex = 0\n\t\t},\n"
+		+ "\t\t{\n\t\t\tm_pName = \"vBlendWeight\"\n\t\t\tm_pSemantic = \"BlendWeight\"\n\t\t\tm_pD3DSemanticName = \"BLENDWEIGHT\"\n\t\t\tm_nD3DSemanticIndex = 0\n\t\t},\n"
+		+ "\t\t{\n\t\t\tm_pName = \"vNormalOs\"\n\t\t\tm_pSemantic = \"OptionallyCompressedTangentFrame\"\n\t\t\tm_pD3DSemanticName = \"NORMAL\"\n\t\t\tm_nD3DSemanticIndex = 0\n\t\t},\n"
+		+ "\t\t{\n\t\t\tm_pName = \"vPositionOs\"\n\t\t\tm_pSemantic = \"PosXyz\"\n\t\t\tm_pD3DSemanticName = \"POSITION\"\n\t\t\tm_nD3DSemanticIndex = 0\n\t\t},\n"
+		+ "\t\t{\n\t\t\tm_pName = \"vTangentUOs_flTangentVSign\"\n\t\t\tm_pSemantic = \"TangentU_SignV\"\n\t\t\tm_pD3DSemanticName = \"TANGENT\"\n\t\t\tm_nD3DSemanticIndex = 0\n\t\t},\n"
+		+ "\t\t{\n\t\t\tm_pName = \"vTexCoord\"\n\t\t\tm_pSemantic = \"LowPrecisionUv\"\n\t\t\tm_pD3DSemanticName = \"TEXCOORD\"\n\t\t\tm_nD3DSemanticIndex = 0\n\t\t},\n"
+		+ "\t\t{\n\t\t\tm_pName = \"vLightmapUV\"\n\t\t\tm_pSemantic = \"LightmapUV\"\n\t\t\tm_pD3DSemanticName = \"TEXCOORD\"\n\t\t\tm_nD3DSemanticIndex = 3\n\t\t},\n"
+		+ "\t\t{\n\t\t\tm_pName = \"nInstanceTransformID\"\n\t\t\tm_pSemantic = \"InstanceTransformUv\"\n\t\t\tm_pD3DSemanticName = \"TEXCOORD\"\n\t\t\tm_nD3DSemanticIndex = 13\n\t\t},\n"
+		+ "\t\t{\n\t\t\tm_pName = \"nVertexIndex\"\n\t\t\tm_pSemantic = \"MorphIndex\"\n\t\t\tm_pD3DSemanticName = \"TEXCOORD\"\n\t\t\tm_nD3DSemanticIndex = 14\n\t\t},\n"
+		+ "\t\t{\n\t\t\tm_pName = \"nVertexCacheIndex\"\n\t\t\tm_pSemantic = \"MorphIndex\"\n\t\t\tm_pD3DSemanticName = \"TEXCOORD\"\n\t\t\tm_nD3DSemanticIndex = 15\n\t\t},\n"
+		+ "\t]\n}";
+
+	static string Inputs( MaterialInputs inputs ) => string.Join( " ", inputs.VertexInputs.Select( i => $"{i.Name}:{i.Semantic}:{i.D3DSemanticName}{i.D3DSemanticIndex}" ) );
+
+	/// <summary>
+	/// A standard material (complex, simple and generic are its aliases) gives the vertex inputs complex.shader did, written as
+	/// the native compiler wrote them, byte for byte: the packed tangent frame, the tangent, the skinning streams (bone index
+	/// and weights, the animated vertex cache's indices), the lightmap uv and the instance. The model compiler lays meshes
+	/// out by these; without them models of these materials lost everything but position. The secondary uv set and generic's
+	/// vertex paint come with the features that added them to the .shader's.
+	/// </summary>
+	[TestMethod]
+	public void StandardMaterialsGiveComplexsVertexInputs()
+	{
+		var module = Module( "standard" );
+		var plain = VmatSource.Parse( "Layer0 { shader \"shaders/complex.shader\" TextureColor \"materials/default/default_color.tga\" }" );
+		var compiled = MaterialCompile.Compile( plain, "materials/x.vmat", "shaders/standard.shader", MaterialInputs.Read( module, plain.Features ), _ => false );
+		Assert.AreEqual( ComplexSignature, compiled.VertexSignature );
+
+		var uv2 = MaterialInputs.Read( module, new Dictionary<string, int> { ["F_SECONDARY_UV"] = 1 } );
+		StringAssert.Contains( Inputs( uv2 ), "vTexCoord:LowPrecisionUv:TEXCOORD0 vTexCoord2:LowPrecisionUv1:TEXCOORD1 vLightmapUV" );
+		var paint = MaterialInputs.Read( module, new Dictionary<string, int> { ["F_PAINT_VERTEX_COLORS"] = 1 } );
+		StringAssert.Contains( Inputs( paint ), "vLightmapUV:LightmapUV:TEXCOORD3 vColorPaintValues:VertexPaintTintColor:TEXCOORD5 nInstanceTransformID" );
+	}
+
+	/// <summary>
+	/// Every surface standing in for a deleted .shader gives that .shader's vertex inputs (as an engine with it compiled them
+	/// into the materials named), from the VS_INPUT in its MATERIAL_INPUTS block; a standalone module, its vertex stage's.
+	/// </summary>
+	[TestMethod]
+	[DataRow( "skin", "", "nBoneIndex:BlendIndices:BLENDINDICES0 vBlendWeight:BlendWeight:BLENDWEIGHT0 vNormalOs:OptionallyCompressedTangentFrame:NORMAL0 vPositionOs:PosXyz:POSITION0 vTangentUOs_flTangentVSign:TangentU_SignV:TANGENT0 vTexCoord:LowPrecisionUv:TEXCOORD0 nInstanceTransformID:InstanceTransformUv:TEXCOORD13 nVertexIndex:MorphIndex:TEXCOORD14 nVertexCacheIndex:MorphIndex:TEXCOORD15" )]
+	[DataRow( "skin", "F_USE_PER_VERTEX_CURVATURE", "nBoneIndex:BlendIndices:BLENDINDICES0 vBlendWeight:BlendWeight:BLENDWEIGHT0 vNormalOs:OptionallyCompressedTangentFrame:NORMAL0 vPositionOs:PosXyz:POSITION0 vTangentUOs_flTangentVSign:TangentU_SignV:TANGENT0 vTexCoord:LowPrecisionUv:TEXCOORD0 flSSSCurvature:Curvature:TEXCOORD2 nInstanceTransformID:InstanceTransformUv:TEXCOORD13 nVertexIndex:MorphIndex:TEXCOORD14 nVertexCacheIndex:MorphIndex:TEXCOORD15" )]
+	[DataRow( "blendable", "", "nBoneIndex:BlendIndices:BLENDINDICES0 vBlendWeight:BlendWeight:BLENDWEIGHT0 vNormalOs:OptionallyCompressedTangentFrame:NORMAL0 vPositionOs:PosXyz:POSITION0 vTangentUOs_flTangentVSign:TangentU_SignV:TANGENT0 vTexCoord:LowPrecisionUv:TEXCOORD0 vTexCoord2:LowPrecisionUv1:TEXCOORD1 vLightmapUV:LightmapUV:TEXCOORD3 vColorBlendValues:VertexPaintBlendParams:TEXCOORD4 vColorPaintValues:VertexPaintTintColor:TEXCOORD5 nInstanceTransformID:InstanceTransformUv:TEXCOORD13 nVertexIndex:MorphIndex:TEXCOORD14 nVertexCacheIndex:MorphIndex:TEXCOORD15" )]
+	[DataRow( "fur", "", "nBoneIndex:BlendIndices:BLENDINDICES0 vBlendWeight:BlendWeight:BLENDWEIGHT0 vColor:Color:COLOR0 vNormalOs:OptionallyCompressedTangentFrame:NORMAL0 vPositionOs:PosXyz:POSITION0 vTangentUOs_flTangentVSign:TangentU_SignV:TANGENT0 vTexCoord:LowPrecisionUv:TEXCOORD0 vTexCoord2:LowPrecisionUv1:TEXCOORD1 vLightmapUV:LightmapUV:TEXCOORD3 nInstanceTransformID:InstanceTransformUv:TEXCOORD13 nVertexIndex:MorphIndex:TEXCOORD14 nVertexCacheIndex:MorphIndex:TEXCOORD15" )]
+	[DataRow( "vertex_color", "", "nBoneIndex:BlendIndices:BLENDINDICES0 vBlendWeight:BlendWeight:BLENDWEIGHT0 vColor:Color:COLOR0 vNormalOs:OptionallyCompressedTangentFrame:NORMAL0 vPositionOs:PosXyz:POSITION0 vTangentUOs_flTangentVSign:TangentU_SignV:TANGENT0 vTexCoord:LowPrecisionUv:TEXCOORD0 vLightmapUV:LightmapUV:TEXCOORD3 nInstanceTransformID:InstanceTransformUv:TEXCOORD13 nVertexIndex:MorphIndex:TEXCOORD14 nVertexCacheIndex:MorphIndex:TEXCOORD15" )]
+	[DataRow( "glass", "", "nBoneIndex:BlendIndices:BLENDINDICES0 vBlendWeight:BlendWeight:BLENDWEIGHT0 vNormalOs:OptionallyCompressedTangentFrame:NORMAL0 vPositionOs:PosXyz:POSITION0 vTangentUOs_flTangentVSign:TangentU_SignV:TANGENT0 vTexCoord:LowPrecisionUv:TEXCOORD0 vTexCoord2:LowPrecisionUv1:TEXCOORD1 vLightmapUV:LightmapUV:TEXCOORD3 nInstanceTransformID:InstanceTransformUv:TEXCOORD13 nVertexIndex:MorphIndex:TEXCOORD14 nVertexCacheIndex:MorphIndex:TEXCOORD15" )]
+	[DataRow( "water_simple", "", "nBoneIndex:BlendIndices:BLENDINDICES0 vBlendWeight:BlendWeight:BLENDWEIGHT0 vNormalOs:OptionallyCompressedTangentFrame:NORMAL0 vPositionOs:PosXyz:POSITION0 vTangentUOs_flTangentVSign:TangentU_SignV:TANGENT0 vTexCoord:LowPrecisionUv:TEXCOORD0 vTexCoord2:LowPrecisionUv1:TEXCOORD1 vLightmapUV:LightmapUV:TEXCOORD3 nInstanceTransformID:InstanceTransformUv:TEXCOORD13 nVertexIndex:MorphIndex:TEXCOORD14 nVertexCacheIndex:MorphIndex:TEXCOORD15" )]
+	[DataRow( "tools_solid", "", "vColor:Color:COLOR0 vNormalOs:OptionallyCompressedTangentFrame:NORMAL0 vPositionOs:PosXyz:POSITION0 nInstanceTransformID:InstanceTransformUv:TEXCOORD13" )]
+	[DataRow( "terrain", "", "PositionAndLod:PosXyz:POSITION0 InstanceID:InstanceTransformUv:SV_InstanceID0" )]
+	public void SurfacesGiveTheirShadersVertexInputs( string shader, string feature, string expected )
+	{
+		var features = new Dictionary<string, int>();
+		if ( feature.Length > 0 ) features[feature] = 1;
+		Assert.AreEqual( expected, Inputs( MaterialInputs.Read( Module( shader ), features ) ) );
+	}
 }

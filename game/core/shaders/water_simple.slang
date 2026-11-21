@@ -22,6 +22,13 @@ BoolAttribute( NeedsLightProbe, true );
 BoolAttribute( CanBatchWithDynamicShaderConstants, true );
 // End of the material editor's lines
 #include "common/utils/Material.CommonInputs.hlsl"
+// water_simple.shader's vertex inputs (its VS_INPUT, every dynamic combo's): what the model compiler lays out the meshes of
+// models using these materials by (the material's VSInputSignature), so they keep the streams they had
+#define VS_INPUT_HAS_TANGENT_BASIS 1
+struct VS_INPUT
+{
+	#include "common/vertexinput.hlsl"
+};
 #endif
 
 Texture2D g_RefractionTexture < Attribute("RefractionTexture");   SrgbRead( true ); Filter(MIN_MAG_MIP_LINEAR);    AddressU( CLAMP );     AddressV( CLAMP ); >;

@@ -16,6 +16,13 @@ import sbox.surface;
 #define S_SPECULAR 1
 #define S_SPECULAR_CUBE_MAP 1
 #include "vr_common_ps_code.fxc"
+// citizen_eye.shader's vertex inputs (its VS_INPUT, every dynamic combo's): what the model compiler lays out the meshes of
+// models using these materials by (the material's VSInputSignature), so they keep the streams they had
+#define VS_INPUT_HAS_TANGENT_BASIS 1
+struct VS_INPUT
+{
+	#include "vr_shared_standard_vs_input.fxc"
+};
 #endif
 
 static const float EyePi = 3.14159265358979323846;
