@@ -29,6 +29,21 @@ public sealed partial class MaterialInputs
 	/// </summary>
 	public sealed record Parameter( string Name, string Type, string Annotations );
 
+	/// <summary>
+	/// One input of the vertex shader the material draws with (<c>float3 vPositionOs : POSITION &lt; Semantic( PosXyz ); &gt;</c>):
+	/// its name, vertex semantic and HLSL semantic. What the model compiler lays a mesh's vertices out by (the material's
+	/// <c>VSInputSignature</c>).
+	/// </summary>
+	public sealed record VertexInput( string Name, string Semantic, string D3DSemanticName, int D3DSemanticIndex );
+
+	/// <summary>
+	/// The vertex shader's inputs, as vfx records a <c>.shader</c>'s for a material (<c>m_vsInputSignatureArray</c>): the
+	/// members of the struct its <c>MainVs</c> takes (a surface's: the <c>VS_INPUT</c> its MATERIAL_INPUTS block declares,
+	/// the inputs of the <c>.shader</c> it replaced), with every dynamic combo's (off and on), ordered by HLSL semantic and
+	/// index. Empty for a module with no vertex stage.
+	/// </summary>
+	public IReadOnlyList<VertexInput> VertexInputs { get; init; } = [];
+
 	/// <summary>The input textures, by name.</summary>
 	public IReadOnlyDictionary<string, Input> Inputs { get; init; }
 
@@ -91,6 +106,7 @@ public sealed partial class MaterialInputs
 		var hidden = new HashSet<string>( StringComparer.Ordinal );
 		var featureLines = new List<string>();
 		var used = new HashSet<string>( StringComparer.Ordinal );
+		IReadOnlyList<VertexInput> vertexInputs = [];
 		string representative = null;
 
 		// A surface has no entry points or features of its own: its inputs are in its MATERIAL_INPUTS block (the textures
@@ -125,6 +141,9 @@ public sealed partial class MaterialInputs
 				if ( !added ) break;
 				text = Code( module.CompiledLines( stage, values ) );
 			}
+
+			// A surface declares the vertex inputs in its block, read with the pixel stage's lines; a module in its vertex stage
+			if ( stage == (surface ? StageKind.Pixel : StageKind.Vertex) ) vertexInputs = ReadVertexInputs( module, stage, values, text );
 
 			// What an ActiveIf reads: these values, and the block's own defines (#define S_X F_X)
 			var conditions = new Dictionary<string, string>( StringComparer.Ordinal );
@@ -214,7 +233,51 @@ public sealed partial class MaterialInputs
 		if ( representative is not null && !textures.Exists( t => t.Name == representative ) && textures.Find( t => t.Name.TrimEnd( '0', '1', '2', '3', '4', '5', '6', '7', '8', '9' ) == representative ) is { } numbered )
 			representative = numbered.Name;
 
-		return new MaterialInputs { Version = HeaderVersion().Match( module.Text ) is { Success: true } version ? int.Parse( version.Groups[1].Value, CultureInfo.InvariantCulture ) : 0, Inputs = inputs, Textures = [.. textures.Where( t => used.Contains( t.Name ) )], Declared = textures, Attributes = attributes, RepresentativeTexture = representative, Parameters = parameters, ExpressionAttributes = expressionAttributes, ShownTextures = [.. textures.Where( t => (used.Contains( t.Name ) || conditioned.Contains( t.Name )) && !hidden.Contains( t.Name ) )], FeatureLines = string.Join( "\n", featureLines ) };
+		return new MaterialInputs { Version = HeaderVersion().Match( module.Text ) is { Success: true } version ? int.Parse( version.Groups[1].Value, CultureInfo.InvariantCulture ) : 0, Inputs = inputs, Textures = [.. textures.Where( t => used.Contains( t.Name ) )], Declared = textures, Attributes = attributes, RepresentativeTexture = representative, Parameters = parameters, VertexInputs = vertexInputs, ExpressionAttributes = expressionAttributes, ShownTextures = [.. textures.Where( t => (used.Contains( t.Name ) || conditioned.Contains( t.Name )) && !hidden.Contains( t.Name ) )], FeatureLines = string.Join( "\n", featureLines ) };
+	}
+
+	/// <summary>
+	/// The vertex inputs in a stage's lines: read with its dynamic combos as they are (off) and again with every one on
+	/// (each <c>D_</c> name the module or an include mentions, at its highest value), as vfx's signature holds the inputs of
+	/// all of a static combo's dynamic combos (the lightmap uv, compute skinning's streams).
+	/// </summary>
+	static List<VertexInput> ReadVertexInputs( PassModule module, StageKind stage, Dictionary<string, int> values, string text )
+	{
+		var on = new Dictionary<string, int>( values, StringComparer.Ordinal );
+		var dynamic = module.Combos( stage ).Where( c => !c.Static ).ToDictionary( c => c.Name, c => c.Max, StringComparer.Ordinal );
+		foreach ( var name in module.BindingNames().Where( n => n.StartsWith( "D_", StringComparison.Ordinal ) ) )
+			on[name] = dynamic.TryGetValue( name, out var max ) ? max : 1;
+
+		var inputs = new List<VertexInput>();
+		foreach ( var lines in new[] { text, Code( module.CompiledLines( stage, on ) ) } )
+		{
+			foreach ( var input in VertexStruct( lines ) )
+				if ( !inputs.Exists( i => i.Name == input.Name ) ) inputs.Add( input );
+		}
+
+		return [.. inputs.OrderBy( i => i.D3DSemanticName, StringComparer.Ordinal ).ThenBy( i => i.D3DSemanticIndex )];
+	}
+
+	/// <summary>
+	/// The members of the struct the vertex entry takes (<c>MainVs( VS_INPUT i )</c>), or of a <c>VS_INPUT</c> or
+	/// <c>VertexInput</c> where there's no entry (a surface's block); members with an HLSL and a vertex semantic only.
+	/// </summary>
+	static IEnumerable<VertexInput> VertexStruct( string text )
+	{
+		var names = VertexEntry().Matches( text ).Select( m => m.Groups["type"].Value ).Append( "VS_INPUT" ).Append( "VertexInput" );
+		foreach ( var name in names )
+		{
+			if ( Regex.Match( text, $@"\bstruct\s+{Regex.Escape( name )}\s*\{{(?<body>[^{{}}]*)\}}" ) is not { Success: true } body ) continue;
+			foreach ( Match m in VertexMember().Matches( body.Groups["body"].Value ) )
+			{
+				// A member with no vertex semantic names no mesh stream (a module's own extra input): no model is laid out by it
+				if ( SemanticAnnotation().Match( m.Groups["annotations"].Value ) is not { Success: true } semantic ) continue;
+				yield return new VertexInput( m.Groups["name"].Value, semantic.Groups["semantic"].Value, m.Groups["d3d"].Value,
+					m.Groups["index"].Length > 0 ? int.Parse( m.Groups["index"].Value, CultureInfo.InvariantCulture ) : 0 );
+			}
+
+			yield break;
+		}
 	}
 
 	/// <summary>The lines as one text without comments, so declarations spanning lines read as one.</summary>
@@ -267,6 +330,15 @@ public sealed partial class MaterialInputs
 			value[i] = float.TryParse( args[i], NumberStyles.Float, CultureInfo.InvariantCulture, out var f ) ? f : 0;
 		return (value, file);
 	}
+
+	[GeneratedRegex( @"\bMainVs\s*\(\s*(?:const\s+)?(?<type>\w+)\s+\w+" )]
+	private static partial Regex VertexEntry();
+
+	[GeneratedRegex( @"\b(?<type>\w+)\s+(?<name>\w+)\s*:\s*(?<d3d>[A-Za-z_]\w*?)(?<index>\d*)\s*(?:<(?<annotations>[^<>]*)>)?\s*;" )]
+	private static partial Regex VertexMember();
+
+	[GeneratedRegex( @"\bSemantic\s*\(\s*(?<semantic>\w+)\s*\)" )]
+	private static partial Regex SemanticAnnotation();
 
 	[GeneratedRegex( @"/\*.*?\*/", RegexOptions.Singleline )]
 	private static partial Regex BlockComment();
