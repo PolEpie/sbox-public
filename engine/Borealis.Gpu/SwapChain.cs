@@ -453,7 +453,9 @@ public sealed unsafe class SwapChain : IDisposable
 		VkResult result;
 		using ( device.Enter( "vkQueuePresentKHR" ) )
 		{
+			var presentStart = System.Diagnostics.Stopwatch.GetTimestamp();
 			lock ( queue.SubmitLock ) result = vk.vkQueuePresentKHR( queue.Handle, &present );
+			if ( Memory.AllocationTrace.Enabled ) Memory.AllocationTrace.Note( false, 0, -1, Memory.AllocationTrace.Present, 0, presentStart, System.Diagnostics.Stopwatch.GetTimestamp() - presentStart );
 		}
 
 		device.RememberEvent( "presented image, result*16+image:", (int)result * 16 + index );
