@@ -3332,6 +3332,9 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	/// </summary>
 	public void BeginFrame()
 	{
+		// Before the device recycles lists: the last frame's still say where they were submitted
+		GraphMeasureReport.BeginFrame( Gpu );
+
 		using ( Zones.DeviceFrame.Start() )
 			Gpu.BeginFrame();
 

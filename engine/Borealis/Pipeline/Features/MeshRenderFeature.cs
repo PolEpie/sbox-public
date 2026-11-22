@@ -1445,8 +1445,9 @@ internal sealed partial class MeshRenderFeature : RenderFeature
 		// The object whose stretch of draws is being recorded, if it has callbacks (CRenderBatchList::m_pLastCallbackBeforeObject)
 		DrawCallbacks open = null;
 
-		foreach ( var item in items )
+		for ( int i = 0; i < items.Length; i++ )
 		{
+			var item = items[i];
 			ref readonly var run = ref runs[item.Run];
 			if ( culledOnly && run.CullDraw < 0 ) continue;
 			if ( context.Census ) context.CensusNote = CensusNote( run, list, left );
@@ -1477,14 +1478,26 @@ internal sealed partial class MeshRenderFeature : RenderFeature
 				var tools = context.ToolsPass;
 				if ( tools == ToolsPass.Wireframe ) context.ToolsPass = ToolsPass.None;
 
-				context.BindInstances( 1, run.FirstInstance );
+				// The custom objects straight after it that draw as it does go with it, in one run (CustomObject.RenderRun): on
+				// Borealis.Gpu one lent block for them all, rather than one each
+				var customRun = CustomRun ??= new();
+				customRun.Clear();
+				customRun.Add( new CustomDraw( custom, run.FirstInstance ) );
+				while ( i + 1 < items.Length && !context.Census && Joins( runs[items[i + 1].Run], custom, layer, depth, view.IsShadow, open, culledOnly ) )
+				{
+					ref readonly var next = ref runs[items[++i].Run];
+					customRun.Add( new CustomDraw( next.Custom, next.FirstInstance ) );
+				}
+
+				var customDraws = customRun.Count;
 				using ( Zones.CustomObject.Start() )
 				using ( RedrawnEveryFrame.Begin() )
-					custom.Render( context, view, layer );
+					custom.RenderRun( context, view, layer, CollectionsMarshal.AsSpan( customRun ) );
+				customRun.Clear();
 				context.ToolsPass = tools;
 				context.SetCombo( CsVertexAnimation, 0 );
 				context.RestoreBound();
-				stats.CustomDraws++;
+				stats.CustomDraws += customDraws;
 				continue;
 			}
 
@@ -1560,6 +1573,23 @@ internal sealed partial class MeshRenderFeature : RenderFeature
 
 		if ( vertexAnimation != 0 ) context.SetCombo( CsVertexAnimation, 0 );
 		context.SetObjectAttributes( null );
+	}
+
+	// The custom objects of a run being drawn (DrawItems); custom objects record on the main thread, but kept per thread anyway
+	[ThreadStatic] static List<CustomDraw> CustomRun;
+
+	/// <summary>
+	/// Whether <paramref name="next"/> joins the run of custom objects <paramref name="first"/> started in
+	/// <see cref="DrawItems"/>: a custom object of the same type drawn in this layer, with nothing to do before it (no frame
+	/// buffer copy, no callbacks to switch).
+	/// </summary>
+	static bool Joins( in Run next, CustomObject first, MeshLayer layer, bool depth, bool shadow, DrawCallbacks open, bool culledOnly )
+	{
+		if ( next.Custom is not { } custom || custom.GetType() != first.GetType() ) return false;
+		if ( culledOnly && next.CullDraw < 0 ) return false;
+		if ( next.ReadsFrameBuffer && !depth ) return false;
+		if ( !depth && !shadow && next.Callbacks != open ) return false;
+		return layer.LayerType != MeshLayerType.DepthPrepass || custom.DepthPrepass;
 	}
 
 	/// <summary>

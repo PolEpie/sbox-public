@@ -39,7 +39,8 @@ public partial class SceneObject
 	/// <summary>Keep a rigid model's bounds here from now on, worked out from its mesh instances as native's transform does.</summary>
 	void KeepRigidBounds()
 	{
-		if ( !ResolvesDraws || this is SceneModel )
+		// A scene model without a twin starts as a rigid one, as its twin's bounds would be, until its pose sets them
+		if ( !ResolvesDraws || (this is SceneModel && HasTwin) )
 		{
 			_boundsKind = BoundsKind.Native;
 			return;

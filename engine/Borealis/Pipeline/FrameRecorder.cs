@@ -69,6 +69,44 @@ internal sealed partial class FrameRecorder : IDisposable
 
 		/// <summary>The frame's shape up to and including this segment, for the device's layout plan (<see cref="GpuContext.PlanLayouts"/>).</summary>
 		public int Shape;
+
+		/// <summary>
+		/// The main-thread segment whose list it records into after that segment's own (<see cref="PlanSharedLists"/>), or -1
+		/// when it has a list of its own.
+		/// </summary>
+		public int Borrows;
+	}
+
+	/// <summary>
+	/// Whether main-thread segments that follow one another record into one list when recording beside workers (on unless
+	/// <c>-separate-main-lists</c>): each list costs its beginning, end, submission and a pool reset when it's recycled.
+	/// </summary>
+	internal static bool ShareMainLists { get; set; } = !Array.Exists( Environment.GetCommandLineArgs(), a => a.Equals( "-separate-main-lists", StringComparison.OrdinalIgnoreCase ) );
+
+	/// <summary>Segments the last plan has recording into another's list, for tests.</summary>
+	internal int SharedLists { get; private set; }
+
+	/// <summary>
+	/// With lists of their own (<see cref="SeparateContexts"/>), a main-thread segment straight after another records into
+	/// that one's list (the first of a run of them), as a serial frame's segments share the frame's list: unless either is
+	/// async compute, it waits for or hands off compute work, or either signals, which needs a submission of its own.
+	/// </summary>
+	void PlanSharedLists()
+	{
+		SharedLists = 0;
+		for ( int i = 0; i < segmentCount; i++ )
+		{
+			ref var segment = ref segments[i];
+			segment.Borrows = -1;
+			if ( i == 0 || !SeparateContexts || !ShareMainLists ) continue;
+
+			ref var before = ref segments[i - 1];
+			var bothMain = (!Parallel || segment.OnMainThread) && (!Parallel || before.OnMainThread);
+			if ( !bothMain || segment.Async || before.Async || segment.HandOff >= 0 || segment.WaitFor >= 0 || segment.Signal || before.Signal ) continue;
+
+			segment.Borrows = before.Borrows >= 0 ? before.Borrows : i - 1;
+			SharedLists++;
+		}
 	}
 
 	/// <summary>
@@ -208,7 +246,31 @@ internal sealed partial class FrameRecorder : IDisposable
 		AddFrame( frame );
 
 		PlanSegments( parallel, asyncCompute );
+		PlanSharedLists();
 	}
+
+	// The last plan's structure (GraphMeasure): the segments' shapes and how their lists are shared
+	int measuredShape;
+
+	/// <summary>The render <see cref="GraphMeasure"/> lists this recorder's uses under.</summary>
+	internal int MeasureRender { get; set; }
+
+	/// <summary>
+	/// For <see cref="GraphMeasure"/>: whether this plan's structure differs from the last one's, as a plan kept from frame
+	/// to frame would have to be made again; the segments' shapes (<see cref="ShapeOf"/>), not their draw counts.
+	/// </summary>
+	internal bool PlanChanged()
+	{
+		var shape = HashCode.Combine( segmentCount, Parallel, layerCount, workCount );
+		for ( int i = 0; i < segmentCount; i++ )
+			shape = HashCode.Combine( shape, ShapeOf( i ), segments[i].Borrows, segments[i].OnMainThread );
+
+		var changed = shape != measuredShape;
+		measuredShape = shape;
+		return changed;
+	}
+
+	internal int SegmentCount => segmentCount;
 
 	/// <summary>
 	/// Short names of <see cref="FrameResources"/>, by bit, for the plan overlay.
@@ -617,9 +679,15 @@ internal sealed partial class FrameRecorder : IDisposable
 		for ( int l = 0; l < layerCount; l++ )
 			layers[l].Layer.BeforeSegments( layers[l].Frame, layers[l].Frame.System.FrameContext );
 
-		var shape = 0;
-		for ( int i = 0; i < segmentCount; i++ )
-			segments[i].Shape = shape = HashCode.Combine( shape, ShapeOf( i ) );
+		var shaped = GraphMeasure.Now();
+		using ( Zones.PlanShapes.Start() )
+		{
+			var shape = 0;
+			for ( int i = 0; i < segmentCount; i++ )
+				segments[i].Shape = shape = HashCode.Combine( shape, ShapeOf( i ) );
+		}
+
+		if ( GraphMeasure.Enabled ) GraphMeasure.AddShapes( GraphMeasure.Now() - shaped );
 
 		var start = Stopwatch.GetTimestamp();
 		var workers = 0;
@@ -715,7 +783,8 @@ internal sealed partial class FrameRecorder : IDisposable
 			}
 
 			// Context command memory is thread-owned (CRenderBatchList::Start). Only fully serial frames share the first context.
-			rc.BeginSegment( frame.System.FrameContext, SeparateContexts ? null : frames[0].System.FrameContext );
+			// or, recording beside workers, a main-thread segment straight after another shares that one's (PlanSharedLists)
+			rc.BeginSegment( frame.System.FrameContext, !SeparateContexts ? frames[0].System.FrameContext : segment.Borrows >= 0 ? segments[segment.Borrows].Context : null );
 			rc.InheritViewConstants( frame.ConstantsKey );
 			if ( SeparateContexts )
 			{
@@ -763,7 +832,8 @@ internal sealed partial class FrameRecorder : IDisposable
 		ref var before = ref segments[i - 1];
 		return segment.Kind == SegmentKind.Draw && before.Kind == SegmentKind.Draw && segment.Frame == before.Frame
 			&& segment.First > 0 && before.Index + before.Count - 1 == segment.Index && before.End == segment.First
-			&& segment.HandOff < 0 && segment.WaitFor < 0 && !before.Signal && !segment.Async && !before.Async;
+			&& segment.HandOff < 0 && segment.WaitFor < 0 && !before.Signal && !segment.Async && !before.Async
+			&& segment.Borrows < 0 && before.Borrows < 0;
 	}
 
 	/// <summary>
@@ -825,6 +895,7 @@ internal sealed partial class FrameRecorder : IDisposable
 						var mark = layerCosts is null ? default : CostMark.Of( rc, stats );
 						var started = item.Layer is DepthPrepassLayer ? Stopwatch.GetTimestamp() : 0;
 						var scope = rc.BeginGpuScope( rc.Census ? CensusScope( item.View.View?.Name, item.View.IsShadow, item.Layer.Name ) : item.Layer.Name );
+						if ( GraphMeasure.Listing ) GraphMeasure.Pass( MeasureRender, item.Layer.Name );
 						item.Layer.Begin( frame, rc, item.View, start: from == 0 );
 						frame.System.DrawRange( rc, item.View, item.Layer, from, to - from, ref stats );
 						rc.EndPass();
@@ -843,6 +914,7 @@ internal sealed partial class FrameRecorder : IDisposable
 					{
 						var mark = layerCosts is null ? default : CostMark.Of( rc, stats );
 						var scope = rc.BeginGpuScope( rc.Census ? CensusScope( layers[l].Frame?.View?.Name, false, layers[l].Layer.Name ) : layers[l].Layer.Name );
+						if ( GraphMeasure.Listing ) GraphMeasure.Pass( MeasureRender, layers[l].Layer.Name );
 						frame.UseFrameConstants( rc );
 						layers[l].Layer.Record( frame, rc, ref stats );
 						rc.EndPass();

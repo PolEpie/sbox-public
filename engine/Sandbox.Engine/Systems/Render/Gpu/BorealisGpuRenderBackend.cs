@@ -127,6 +127,8 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 			GpuAssistedDescriptorChecks = false,
 			Presentation = presentation,
 			ProgressMarkers = markers,
+			// The process's device notes frames that stop (where the frame thread waited, how far the queues got)
+			HangWatch = frames && Environment.GetEnvironmentVariable( "BOREALIS_HANGWATCH" ) != "0",
 			PipelineCacheFolder = pipelineCacheFolder,
 			Message = message,
 
@@ -791,6 +793,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 
 	public override void Release( object resource )
 	{
+		backingsVersion++;
 		if ( resource is Texture released ) Released?.Invoke( this, released );
 
 		switch ( resource )
@@ -843,6 +846,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 		}
 
 		textures.Add( texture, new Backing<TextureHandle>( handle ) );
+		backingsVersion++;
 		context.Track( handle, layout );
 	}
 
@@ -1693,13 +1697,36 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 
 		// A lent frame's transforms under everything, then a draw's attributes over the block's: a post process's blit reads
 		// the frame grab its command list set on the block
-		if ( lentTransforms.IsValid ) lowered.Set( "g_TransformBuffer", lentTransforms );
-		if ( blockAttributes?.Managed is { } block && !ReferenceEquals( block, attributes.Managed ) ) Lower( block );
+		if ( blockAttributes?.Managed is { } block && !ReferenceEquals( block, attributes.Managed ) ) lowered.CopyFrom( LoweredBlock( block ) );
+		else if ( lentTransforms.IsValid ) lowered.Set( "g_TransformBuffer", lentTransforms );
 		Lower( attributes.Managed );
 		return lowered;
 	}
 
-	void Lower( ManagedRenderAttributes managed )
+	// The block's attributes lowered once and copied under each draw's: lowered again only when the set changes (its version),
+	// in a new device frame (streamed textures swap their images), when the lent transforms change, or when a backing was
+	// made or let go (backingsVersion)
+	readonly ShaderAttributes loweredBlock = new();
+	(ManagedRenderAttributes Set, int Version, ulong Frame, BufferHandle Transforms, int Backings) loweredBlockKey;
+	int backingsVersion;
+
+	ShaderAttributes LoweredBlock( ManagedRenderAttributes block )
+	{
+		var key = (block, block.Version, gpu.FrameNumber, lentTransforms, backingsVersion);
+		if ( loweredBlockKey == key ) return loweredBlock;
+
+		loweredBlock.Clear();
+		if ( lentTransforms.IsValid ) loweredBlock.Set( "g_TransformBuffer", lentTransforms );
+		Lower( block, loweredBlock );
+
+		// Lowering may make backings (a texture's first use, an append buffer's counter): keyed after them
+		loweredBlockKey = (block, block.Version, gpu.FrameNumber, lentTransforms, backingsVersion);
+		return loweredBlock;
+	}
+
+	void Lower( ManagedRenderAttributes managed ) => Lower( managed, lowered );
+
+	void Lower( ManagedRenderAttributes managed, ShaderAttributes lowered )
 	{
 		foreach ( var (token, value) in managed.Values )
 		{
@@ -1716,7 +1743,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 					lowered.SetById( AttributeId( token, name ), context.View( BoundTextureOf( texture ), mip ) );
 					break;
 				case GpuBuffer buffer:
-					LowerBuffer( name, buffer );
+					LowerBuffer( name, buffer, lowered );
 					break;
 				case byte[] data:
 					lowered.SetById( AttributeId( token, name ), data );

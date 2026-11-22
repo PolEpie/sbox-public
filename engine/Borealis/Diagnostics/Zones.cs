@@ -19,6 +19,9 @@ internal static class Zones
 	public static readonly Zone TreeQuery = new( "Borealis Tree Query", Color.Yellow );
 	public static readonly Zone Setup = new( "Borealis Setup", Color.Orange );
 	public static readonly Zone ResidentCull = new( "Borealis Resident Cull", Color.Orange );
+	public static readonly Zone Plan = new( "Borealis Plan", Color.Orange );
+	public static readonly Zone PlanShapes = new( "Borealis Plan Shapes", Color.Orange );
+	public static readonly Zone LayoutFixUps = new( "Borealis Layout Fix-ups", Color.Blue );
 	public static readonly Zone Record = new( "Borealis Record", Color.Red );
 	public static readonly Zone GpuDrivenDraw = new( "Borealis GPU-driven Draw", Color.Red );
 	public static readonly Zone OverlayDraw = new( "Borealis Overlay Draw", Color.Red );
@@ -59,6 +62,8 @@ internal static class Zones
 	public static readonly Zone WorldWrite = new( "Borealis World Write", Color.Cyan );
 	public static readonly Zone ObjectWrite = new( "Borealis Object Write", Color.Cyan );
 	public static readonly Zone WorldLighting = new( "Borealis World Lighting", Color.Cyan );
+	public static readonly Zone ChildView = new( "Borealis Child View", Color.Blue );
+	public static readonly Zone DrawCallbacks = new( "Borealis Draw Callbacks", Color.White );
 
 	/// <summary>Sandbox.ShaderCompiler's phases (<c>CompilePhase</c>), by value.</summary>
 	public static readonly Zone[] Slang =

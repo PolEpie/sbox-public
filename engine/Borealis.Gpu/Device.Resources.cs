@@ -241,7 +241,7 @@ public sealed unsafe partial class Device
 			};
 
 			ulong buffer;
-			Vk.vkCreateBuffer( Vk.Device, &create, null, &buffer ).Check( "vkCreateBuffer" );
+			using ( Enter( "vkCreateBuffer" ) ) Vk.vkCreateBuffer( Vk.Device, &create, null, &buffer ).Check( "vkCreateBuffer" );
 
 			VkMemoryRequirements requirements;
 			Vk.vkGetBufferMemoryRequirements( Vk.Device, buffer, &requirements );
@@ -340,7 +340,7 @@ public sealed unsafe partial class Device
 				pQueueFamilyIndices = families,
 			};
 
-			Vk.vkCreateImage( Vk.Device, &create, null, &image ).Check( $"vkCreateImage ({desc.Name}, {desc.Format} {desc.Width}x{desc.Height})" );
+			using ( Enter( "vkCreateImage" ) ) Vk.vkCreateImage( Vk.Device, &create, null, &image ).Check( $"vkCreateImage ({desc.Name}, {desc.Format} {desc.Width}x{desc.Height})" );
 
 			VkMemoryRequirements requirements;
 			Vk.vkGetImageMemoryRequirements( Vk.Device, image, &requirements );
@@ -979,7 +979,7 @@ public sealed unsafe partial class Device
 		};
 
 		ulong pipeline;
-		Vk.vkCreateComputePipelines( Vk.Device, pipelineCache, 1, &create, null, &pipeline ).Check( $"vkCreateComputePipelines ({info.Name})" );
+		using ( Enter( "vkCreateComputePipelines" ) ) Vk.vkCreateComputePipelines( Vk.Device, pipelineCache, 1, &create, null, &pipeline ).Check( $"vkCreateComputePipelines ({info.Name})" );
 		return pipeline;
 	}
 
@@ -1409,6 +1409,23 @@ public sealed unsafe partial class Device
 		foreach ( var record in all )
 			list.Add( (record.Info, record.External || record.Memory.Block is null ? 0 : (long)record.Memory.Size) );
 		return list;
+	}
+
+	/// <summary>
+	/// Every live texture's handle, description and the device memory it holds, and every live buffer's handle, name, size,
+	/// use and memory, for profiling what lives how long.
+	/// </summary>
+	public (List<(TextureHandle Handle, TextureInfo Info, long Bytes)> Textures, List<(BufferHandle Handle, string Name, long Size, BufferUsage Usage, MemoryLocation Location, long Bytes)> Buffers) ListResources()
+	{
+		var textures = new List<(TextureHandle, TextureInfo, long)>();
+		foreach ( var (index, generation, record) in Textures.AllWithHandles() )
+			textures.Add( (new TextureHandle( index, generation ), record.Info, record.External || record.Memory.Block is null ? 0 : (long)record.Memory.Size) );
+
+		var buffers = new List<(BufferHandle, string, long, BufferUsage, MemoryLocation, long)>();
+		foreach ( var (index, generation, record) in Buffers.AllWithHandles() )
+			buffers.Add( (new BufferHandle( index, generation ), record.Name, record.Size, record.Usage, record.Location, record.Memory.Block is null ? 0 : (long)record.Memory.Size) );
+
+		return (textures, buffers);
 	}
 
 	/// <summary>

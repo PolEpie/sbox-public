@@ -364,6 +364,9 @@ internal static class EngineLoop
 
 			using ( _toolsRender.Start() )
 				IToolsDll.Current?.OnRender();
+
+			// The frame's end for deleted scene objects (the game window's Render runs them in the game)
+			SceneWorld.RunEndOfFrameDeletes();
 			return;
 		}
 

@@ -110,6 +110,22 @@ internal sealed class HandlePool<T> where T : struct
 		return ref pages[page][slot];
 	}
 
+	/// <summary>Every live record with its handle's index and generation, for profiling.</summary>
+	public List<(uint Index, uint Generation, T Record)> AllWithHandles()
+	{
+		lock ( free )
+		{
+			var freeSet = new HashSet<uint>( free );
+			var all = new List<(uint, uint, T)>();
+			for ( uint i = 1; i < next; i++ )
+			{
+				if ( !freeSet.Contains( i ) ) all.Add( (i, generations[i >> PageBits][i & (PageSize - 1)], pages[i >> PageBits][i & (PageSize - 1)]) );
+			}
+
+			return all;
+		}
+	}
+
 	/// <summary>Every live record, for shutdown.</summary>
 	public List<T> All()
 	{
