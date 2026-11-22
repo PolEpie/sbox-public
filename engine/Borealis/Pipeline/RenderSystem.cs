@@ -356,7 +356,15 @@ public sealed partial class RenderSystem : IDisposable
 		GiveStencil( skyFrame );
 		recorder ??= new FrameRecorder();
 		var host = RenderHost.Current;
-		recorder.Plan( frame, ParallelRecording, host.AsyncCompute );
+		var planStart = GraphMeasure.Now();
+		var planAlloc = GraphMeasure.Enabled ? GC.GetAllocatedBytesForCurrentThread() : 0;
+		using ( Zones.Plan.Start() ) recorder.Plan( frame, ParallelRecording, host.AsyncCompute );
+		if ( GraphMeasure.Enabled )
+		{
+			var planTicks = GraphMeasure.Now() - planStart;
+			GraphMeasure.AddPlan( planTicks, GC.GetAllocatedBytesForCurrentThread() - planAlloc, recorder.SegmentCount, recorder.PlanChanged() );
+			recorder.MeasureRender = GraphMeasure.BeginRender();
+		}
 
 		// The dev tools's frame plan: frames drawn into a window show their plan, published with its times
 		var plan = host.WantsFramePlan && output.Window ? recorder.Snapshot( view.Name ) : null;
