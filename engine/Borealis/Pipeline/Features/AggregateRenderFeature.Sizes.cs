@@ -22,6 +22,11 @@ internal sealed partial class AggregateRenderFeature
 	AggregateSizes sizes;
 	int sizedGeneration = -1;
 
+	// Main-view frames since the last sizing started. Counted here, not taken from the frame's generation: generations come
+	// from one counter every render system's transforms share (each camera's, a 3D skybox's), so with two systems a frame
+	// this one's could all be odd and a multiple of SizeEveryFrames never come, leaving resident draws asking for nothing
+	int framesUnsized = int.MaxValue;
+
 	/// <summary>The worker's sizings, for measuring: the last one's time and fragments, and the total.</summary>
 	internal AggregateSizes Sizes => sizes;
 
@@ -34,12 +39,17 @@ internal sealed partial class AggregateRenderFeature
 		var device = RenderHost.Current?.Device;
 		if ( WorkerSize( device ) != 0 ) return TextureSizes.All;
 
-		// The frame's first main view, every few frames, unless the last sizing is still running
-		if ( !pass.IsShadow && ReferenceEquals( pass.View, pass.Root ) && sizedGeneration != argGeneration && argGeneration % SizeEveryFrames == 0 )
+		// The frame's first main view, every few frames; while the last sizing is still running, the next frame tries again
+		if ( !pass.IsShadow && ReferenceEquals( pass.View, pass.Root ) && sizedGeneration != argGeneration )
 		{
 			sizedGeneration = argGeneration;
-			var meshes = resident is not null && (resident.MeshGroups.Count > 0 || resident.Overlays.Count > 0) && Meshes is not null ? pass.Visible( Meshes ) : null;
-			sizes.Start( world, pass, visible, meshes, resident?.Holds, pass.ResidentHolds is not null ? resident : null );
+			if ( framesUnsized < int.MaxValue ) framesUnsized++;
+			if ( framesUnsized >= SizeEveryFrames && !sizes.Running )
+			{
+				framesUnsized = 0;
+				var meshes = resident is not null && (resident.MeshGroups.Count > 0 || resident.Overlays.Count > 0) && Meshes is not null ? pass.Visible( Meshes ) : null;
+				sizes.Start( world, pass, visible, meshes, resident?.Holds, pass.ResidentHolds is not null ? resident : null );
+			}
 		}
 
 		return 0;
@@ -81,6 +91,9 @@ internal sealed class AggregateSizes : ITextureSizeSource, System.Threading.IThr
 	// Whether a sizing runs on the pool now: this queued as its own work item, so starting one allocates no task
 	volatile bool running;
 
+	/// <summary>Whether a sizing runs on a worker now: <see cref="Start"/> does nothing until it's done.</summary>
+	public bool Running => running;
+
 	void System.Threading.IThreadPoolWorkItem.Execute()
 	{
 		try
@@ -113,6 +126,9 @@ internal sealed class AggregateSizes : ITextureSizeSource, System.Threading.IThr
 	/// <summary>Main thread time spent starting sizings, in milliseconds.</summary>
 	public double StartMs { get; private set; }
 
+	/// <summary>Sizings started so far.</summary>
+	public int Started { get; private set; }
+
 	/// <summary>
 	/// Copy the view and its visible aggregates and size them on a worker; nothing while the last sizing runs. The main
 	/// thread's part. With <paramref name="held"/>, the view's resident list whose aggregates and meshes the collect left
@@ -121,6 +137,7 @@ internal sealed class AggregateSizes : ITextureSizeSource, System.Threading.IThr
 	public void Start( RenderWorld world, ViewPass pass, List<int> visible, List<int> meshesVisible = null, bool[] holds = null, AggregateRenderFeature.ResidentList held = null )
 	{
 		if ( running ) return;
+		Started++;
 		var start = Stopwatch.GetTimestamp();
 
 		var objects = world.Objects;
