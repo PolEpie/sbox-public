@@ -81,6 +81,45 @@ public class FrameThreadTests
 		never.Set();
 	}
 
+	/// <summary>
+	/// A join that waits does so without the caller's synchronization context (the main thread's hears of its waits and runs
+	/// queued game continuations in them): the context hears of no wait, and the caller's context is back after it.
+	/// </summary>
+	[TestMethod]
+	public void AJoinThatWaitsDoesntTellTheCallersContext()
+	{
+		var thread = new Sandbox.BorealisGpuFrameThread( () => Thread.Sleep( 30 ), timed: false );
+		var previous = SynchronizationContext.Current;
+		var context = new WaitNotifiedContext();
+		SynchronizationContext.SetSynchronizationContext( context );
+		try
+		{
+			thread.HandOver();
+			thread.Join();
+			Assert.AreEqual( 1, thread.JoinsWaited, "the join waited" );
+			Assert.AreEqual( 0, context.Waits, "the caller's context heard of the join's wait" );
+			Assert.AreSame( context, SynchronizationContext.Current );
+		}
+		finally
+		{
+			SynchronizationContext.SetSynchronizationContext( previous );
+			thread.Dispose();
+		}
+	}
+
+	sealed class WaitNotifiedContext : SynchronizationContext
+	{
+		public int Waits;
+
+		public WaitNotifiedContext() => SetWaitNotificationRequired();
+
+		public override int Wait( IntPtr[] waitHandles, bool waitAll, int millisecondsTimeout )
+		{
+			Waits++;
+			return base.Wait( waitHandles, waitAll, millisecondsTimeout );
+		}
+	}
+
 	[TestMethod, TestCategory( Allocations.Category )]
 	public void HandOverAndJoinAllocateNothingOnEitherThread()
 	{

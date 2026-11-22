@@ -143,18 +143,7 @@ internal sealed partial class BorealisGpuRenderBackend
 		MainWaits++;
 		using ( Sandbox.Rendering.RenderSync.RenderWait() )
 		using ( MainWaitTiming.Scope() )
-		{
-			if ( drawn.Wait( LongWait ) ) return;
-
-			// Never expected: said once with where the main thread waits, then it waits on
-			if ( !warnedLongWait )
-			{
-				warnedLongWait = true;
-				Log.Warning( $"The main thread has waited {LongWait.TotalSeconds:F0} s for the render thread's frame, which is at '{BorealisGpuFrameThread.Doing}'; the main thread at {new System.Diagnostics.StackTrace( 1, false )}" );
-			}
-
-			drawn.Wait();
-		}
+			BorealisGpuFrameThread.WaitWithoutSyncContext( drawn, LongWait, "render", ref warnedLongWait );
 	}
 
 	static readonly TimeSpan LongWait = TimeSpan.FromSeconds( 5 );
