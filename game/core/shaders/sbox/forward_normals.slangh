@@ -6,17 +6,20 @@
 #ifndef SBOX_FORWARD_NORMALS_SLANGH
 #define SBOX_FORWARD_NORMALS_SLANGH
 
-[vk::constant_id( 121 )] const bool kForwardNormalsOutput = false;
+// In the renderer's reserved ids (0x10000 and up, vfx_shader_params.h), above any SpecializedConstant()'s
+[vk::constant_id( 65538 )] const bool kForwardNormalsOutput = false;
 
 /// The world-space normal octahedrally encoded in red and green, roughness in blue, alpha 1 where a surface wrote it
 /// (RGB10A2), packed into one word as the target stores it: it's taken before lighting and held across it, where every
-/// register counts.
+/// register counts. The word goes through the lane's own read of it, a wave operation the compiler doesn't move: else it
+/// sank the packing to the output, past the light loops, which then held the encoded normal and roughness (three
+/// registers) instead of the word.
 uint ForwardNormalsPack( float3 normal, float roughness )
 {
 	float3 n = normal / max( abs( normal.x ) + abs( normal.y ) + abs( normal.z ), 1e-6 );
 	float2 o = n.z >= 0 ? n.xy : ( 1.0 - abs( n.yx ) ) * float2( n.x >= 0 ? 1.0 : -1.0, n.y >= 0 ? 1.0 : -1.0 );
 	uint3 q = uint3( round( saturate( float3( o * 0.5 + 0.5, roughness ) ) * 1023.0 ) );
-	return q.x | ( q.y << 10 ) | ( q.z << 20 ) | ( 3u << 30 );
+	return WaveReadLaneAt( q.x | ( q.y << 10 ) | ( q.z << 20 ) | ( 3u << 30 ), WaveGetLaneIndex() );
 }
 
 /// A packed word as the target's channels.
