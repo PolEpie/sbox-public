@@ -18,17 +18,21 @@ public class SceneCustomObject : SceneObject
 
 		using ( var h = IHandle.MakeNextHandle( this ) )
 		{
-			CManagedSceneObject.Create( sceneWorld );
+			if ( MakesNativeTwin ) CManagedSceneObject.Create( sceneWorld );
+			else MakeWithoutTwin( sceneWorld, null, TwinlessFlags );
 
-			if ( native.IsValid )
+			if ( this.IsValid() )
 			{
 				// Start off with infinite bounds so it will actually get rendered
 				// if the user forgets/doesn't need bounds.
-				native.SetBoundsInfinite();
+				if ( HasTwin ) native.SetBoundsInfinite();
 				KeepFixedBounds( infinite: true );
 			}
 		}
 	}
+
+	/// <summary>What native's <c>CManagedSceneObject::Create</c> sets.</summary>
+	internal const Rendering.SceneObjectFlags TwinlessFlags = Rendering.SceneObjectFlags.IsTranslucent;
 
 	internal unsafe override void OnNativeInit( CSceneObject ptr )
 	{

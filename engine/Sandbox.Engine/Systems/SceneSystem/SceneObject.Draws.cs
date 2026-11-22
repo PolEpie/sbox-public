@@ -46,7 +46,8 @@ public partial class SceneObject
 	/// <summary>Start working out draws in managed code, for an object managed code just made from <paramref name="model"/>.</summary>
 	internal void StartResolvingDraws( Model model )
 	{
-		ResolvesDraws = model is not null && !(model.ResourcePath?.StartsWith( "maps/", StringComparison.OrdinalIgnoreCase ) ?? false);
+		// A map's model on a twin keeps the twin's draws; without a twin there are none to read
+		ResolvesDraws = model is not null && (!HasTwin || !(model.ResourcePath?.StartsWith( "maps/", StringComparison.OrdinalIgnoreCase ) ?? false));
 		_drawMaterials = null;
 		_ownDrawData = null;
 		_flagsWithOverrides = false;

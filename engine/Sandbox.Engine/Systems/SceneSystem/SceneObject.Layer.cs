@@ -69,7 +69,7 @@ public partial class SceneObject
 	/// The layer match id as a string token (<c>CSceneObject::m_nLayerMatchID</c>): set with <see cref="RenderLayer"/>, or read
 	/// once from native for an object native code made (a map's overlays). Native still gets it while something reads it.
 	/// </summary>
-	internal uint LayerMatchToken => _layerMatch ??= native.GetLayerMatchIDValue();
+	internal uint LayerMatchToken => _layerMatch ??= HasTwin ? native.GetLayerMatchIDValue() : 0;
 
 	/// <summary>
 	/// For a layer to draw this object, the target layer must match (or be unset)
@@ -102,9 +102,9 @@ public partial class SceneObject
 
 	void SetLayerMatch( StringToken token )
 	{
-		if ( native.IsNull ) Sandbox.Interop.ThrowNullSelf( "CSceneObject", "SetLayerMatchID" );
+		var twin = WritesTwin( "SetLayerMatchID" );
 		_layerMatch = token.Value;
-		if ( WritesNative ) native.SetLayerMatchID( token );
+		if ( WritesNative && twin ) native.SetLayerMatchID( token );
 	}
 
 	static readonly StringToken LightGroupName = new( "LightGroup" );
