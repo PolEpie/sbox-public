@@ -70,8 +70,8 @@ internal sealed unsafe class MemoryAllocator : IDisposable
 	/// </summary>
 	public double SpareSeconds { get; set; }
 
-	/// <summary><see cref="SpareSeconds"/> for a device's allocator: <c>BOREALIS_SPARE_SECONDS</c>, or 0.</summary>
-	public static double DeviceSpareSeconds { get; set; } = double.TryParse( Environment.GetEnvironmentVariable( "BOREALIS_SPARE_SECONDS" ), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var seconds ) ? seconds : 0;
+	/// <summary><see cref="SpareSeconds"/> for a device's allocator: 5, or <c>BOREALIS_SPARE_SECONDS</c> (0 goes by frames only).</summary>
+	public static double DeviceSpareSeconds { get; set; } = double.TryParse( Environment.GetEnvironmentVariable( "BOREALIS_SPARE_SECONDS" ), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var seconds ) ? seconds : 5;
 
 	/// <summary>Whether <paramref name="since"/> (<see cref="System.Diagnostics.Stopwatch"/> ticks) is <see cref="SpareSeconds"/> ago.</summary>
 	internal bool KeptLongEnough( long since ) => SpareSeconds <= 0 || System.Diagnostics.Stopwatch.GetElapsedTime( since ).TotalSeconds >= SpareSeconds;
@@ -364,12 +364,11 @@ internal sealed unsafe class MemoryAllocator : IDisposable
 	public static bool BlocksAhead { get; set; } = true;
 
 	/// <summary>
-	/// Whether images over a quarter of a small block share large blocks (<c>BOREALIS_LARGE_BLOCKS=1</c>), or each is its own
-	/// allocation (the default). Large blocks of a map's big textures stranded 76-114 MiB on Construct, holes between
-	/// 4-32 MiB images that only a new block could pack; their own allocations strand nothing for a driver call per big
-	/// texture made, which the texture streamer makes on its reading workers.
+	/// Whether images over a quarter of a small block share large blocks (the default), or each is its own allocation
+	/// (<c>BOREALIS_LARGE_BLOCKS=0</c>, for comparisons). Their own made about 35 of a Construct reload's 250 driver
+	/// allocations; with draining, large blocks reserve no more video memory once a map is loaded.
 	/// </summary>
-	public static bool LargeBlocks { get; set; } = Environment.GetEnvironmentVariable( "BOREALIS_LARGE_BLOCKS" ) == "1";
+	public static bool LargeBlocks { get; set; } = Environment.GetEnvironmentVariable( "BOREALIS_LARGE_BLOCKS" ) != "0";
 
 	/// <summary><see cref="LargeBlocks"/> for this allocator.</summary>
 	public bool ShareLargeBlocks { get; init; } = LargeBlocks;
@@ -603,10 +602,11 @@ internal sealed unsafe class MemoryAllocator : IDisposable
 	public ulong OwnBufferSize => blockSize / 4;
 
 	/// <summary>
-	/// Whether every buffer over <see cref="OwnBufferSize"/> is its own (on), or only content's (geometry pages) while the rest
-	/// share large blocks. For comparisons: <c>BOREALIS_SHARED_BIG_BUFFERS=1</c> turns it off.
+	/// Whether every buffer over <see cref="OwnBufferSize"/> is its own, or only content's (geometry pages) while the rest
+	/// share large blocks (the default: each its own made about 35 of a Construct reload's 250 driver allocations). For
+	/// comparisons: <c>BOREALIS_SHARED_BIG_BUFFERS=0</c> makes each its own.
 	/// </summary>
-	public static bool OwnBigBuffers { get; set; } = Environment.GetEnvironmentVariable( "BOREALIS_SHARED_BIG_BUFFERS" ) != "1";
+	public static bool OwnBigBuffers { get; set; } = Environment.GetEnvironmentVariable( "BOREALIS_SHARED_BIG_BUFFERS" ) == "0";
 
 	// Own buffer sizes with spares being made ahead (how many), and how often each size has been taken
 	readonly Dictionary<(int Type, ulong Size), int> makingPagesAhead = new();
