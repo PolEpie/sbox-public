@@ -13,6 +13,9 @@ public sealed unsafe partial class Device
 
 	// When the current frame began (BeginFrame), and what the hang watch noted while it went on too long
 	long frameBegan;
+
+	// The allocator's driver calls and reserved bytes when the frame began, for what the watch says went on during it
+	(long Allocations, long Frees, ulong Reserved) frameMemory;
 	volatile string stallNote;
 	Thread watchThread;
 	volatile bool watching;
@@ -69,6 +72,7 @@ public sealed unsafe partial class Device
 		frameThread = Environment.CurrentManagedThreadId;
 		var now = Stopwatch.GetTimestamp();
 		var began = Volatile.Read( ref frameBegan );
+		frameMemory = (Allocator.DriverAllocations, Allocator.DriverFrees, Allocator.Reserved);
 		Volatile.Write( ref frameBegan, now );
 		if ( stallNote is not { } note || began == 0 ) return;
 
@@ -104,7 +108,8 @@ public sealed unsafe partial class Device
 			var what = doing;
 			var since = Stopwatch.GetElapsedTime( Volatile.Read( ref doingSince ) ).TotalMilliseconds;
 			var note = $"frame thread {(what is null ? "outside the device" : $"in {what}")} for {since:F0} ms; {DescribeTimeline( graphicsQueue )}"
-				+ (computeQueue != graphicsQueue ? $", {DescribeTimeline( computeQueue )}" : "");
+				+ (computeQueue != graphicsQueue ? $", {DescribeTimeline( computeQueue )}" : "")
+				+ $"; since the frame began {Allocator.DriverAllocations - frameMemory.Allocations} driver allocations and {Allocator.DriverFrees - frameMemory.Frees} frees, reserved {frameMemory.Reserved >> 20} -> {Allocator.Reserved >> 20} MiB";
 			RememberEvent( $"watch: {note}; frame going on, ms:", (long)(stalled * 1000) );
 			stallNote = $"at {stalled:F1} s: {note}";
 		}

@@ -364,6 +364,11 @@ internal sealed unsafe class MemoryAllocator : IDisposable
 	/// <summary>Blocks asked of the driver so far (<c>vkAllocateMemory</c>), shared and dedicated.</summary>
 	public long DriverAllocations => System.Threading.Interlocked.Read( ref driverAllocations );
 
+	/// <summary>Blocks given back to the driver so far (<c>vkFreeMemory</c>).</summary>
+	public long DriverFrees => System.Threading.Interlocked.Read( ref driverFrees );
+
+	long driverFrees;
+
 	long driverAllocations;
 
 	/// <summary><see cref="System.Diagnostics.Stopwatch"/> ticks the driver's allocations took, in all and the longest.</summary>
@@ -1143,6 +1148,8 @@ internal sealed unsafe class MemoryAllocator : IDisposable
 
 	void FreeBlock( MemoryBlock block, bool counted = true )
 	{
+		System.Threading.Interlocked.Increment( ref driverFrees );
+
 		// Freeing memory unmaps it
 		using ( Owner is { } watched ? watched.Enter( "vkFreeMemory" ) : default )
 			vk.vkFreeMemory( vk.Device, block.Memory, null );
