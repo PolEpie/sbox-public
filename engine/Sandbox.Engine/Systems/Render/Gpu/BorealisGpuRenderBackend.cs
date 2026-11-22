@@ -491,7 +491,8 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 		TrackWorkerTextures();
 		WriteWorkerUpdates();
 		WriteSheets();
-		SubmitUploads();
+		// A block recording into the list of uploads (BeginUpdateWork) goes in it, not after it
+		if ( !inUploads ) SubmitUploads();
 		PollReadbacks();
 		lent = lendNext is not null;
 		list = lendNext ?? gpu.BeginCommandList( QueueType.Graphics, "Graphics block" );
@@ -630,10 +631,19 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 			context.FinishReadable();
 			if ( blockTimer >= 0 ) services.PassTimer?.End( list, blockTimer );
 			blockTimer = -1;
-			SubmittedReadbacks( blockReadbacks, lent ? default : gpu.Submit( list, default, presentTo ) );
+			if ( inUploads )
+			{
+				// Read back once the uploads are submitted, with the work before and after it in their list
+				uploadReadbacks.AddRange( blockReadbacks );
+				blockReadbacks.Clear();
+				uploads?.Barrier( PipelineStage.AllCommands, MemoryAccess.MemoryWrite, PipelineStage.AllCommands, MemoryAccess.MemoryRead | MemoryAccess.MemoryWrite );
+				written.Clear();
+			}
+			else SubmittedReadbacks( blockReadbacks, lent ? default : gpu.Submit( list, default, presentTo ) );
 		}
 		finally
 		{
+			inUploads = false;
 			// A viewport's depth range set in a block of its own ends with it (a lent frame keeps its own)
 			if ( !lent ) DepthRange = (0, 1);
 			list = null;
@@ -644,6 +654,40 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 			pendingLayout = null;
 			blockAttributes = null;
 			drawer.Material = null;
+		}
+	}
+
+	// Whether the block recording records into the list of uploads (BeginUpdateWork)
+	bool inUploads;
+
+	/// <summary>Blocks the game asked for outside one, recorded with the uploads rather than submitted each, for the tests.</summary>
+	internal int UpdateWorkRecorded { get; private set; }
+
+	/// <summary>
+	/// Work the game asks for outside a block (a dispatch, a copy, mips, painting into a texture) on the main thread: recorded
+	/// into the list of uploads, after everything recorded there so far and before what's recorded next, in call order with
+	/// the update's buffer writes, and submitted with them before the next block (the frame's first, a readback's), rather than
+	/// in a block of its own submitted at once. A readback after it submits it first, as it submits uploads.
+	/// </summary>
+	internal override Graphics.Scope BeginUpdateWork()
+	{
+		if ( list is not null || lendNext is not null || !ThreadSafe.IsMainThread ) return Graphics.Scope.CreateOn( this );
+
+		var into = UploadList();
+		into.Barrier( PipelineStage.AllCommands, MemoryAccess.MemoryWrite, PipelineStage.AllCommands, MemoryAccess.MemoryRead | MemoryAccess.MemoryWrite );
+		written.Clear();
+		lendNext = into;
+		inUploads = true;
+		UpdateWorkRecorded++;
+		try
+		{
+			return Graphics.Scope.CreateOn( this );
+		}
+		catch
+		{
+			lendNext = null;
+			inUploads = false;
+			throw;
 		}
 	}
 
@@ -2124,8 +2168,8 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	{
 		if ( OutsideBlock )
 		{
-			// Outside a render block a copy runs now, as on Source 2's device: in a block of its own
-			using ( Graphics.Scope.CreateOn( this ) ) CopyTexture( source, destination, sourceMip, sourceSlice, destinationMip, destinationSlice );
+			// Outside a render block a copy is recorded with the update's uploads, before the next block draws
+			using ( BeginUpdateWork() ) CopyTexture( source, destination, sourceMip, sourceSlice, destinationMip, destinationSlice );
 			return;
 		}
 
@@ -2194,7 +2238,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	{
 		if ( OutsideBlock )
 		{
-			using ( Graphics.Scope.CreateOn( this ) ) GenerateMipMaps( texture, method, initialMip );
+			using ( BeginUpdateWork() ) GenerateMipMaps( texture, method, initialMip );
 			return;
 		}
 
@@ -2222,8 +2266,8 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	{
 		if ( OutsideBlock )
 		{
-			// Outside a render block a dispatch runs now, as on Source 2's device: in a block of its own (gizmo text from layout)
-			using ( Graphics.Scope.CreateOn( this ) ) Dispatch( computeMaterial, attributes, threadsX, threadsY, threadsZ );
+			// Outside a render block a dispatch is recorded with the update's uploads (gizmo text from layout), before the next block
+			using ( BeginUpdateWork() ) Dispatch( computeMaterial, attributes, threadsX, threadsY, threadsZ );
 			return;
 		}
 
@@ -2237,7 +2281,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	{
 		if ( OutsideBlock )
 		{
-			using ( Graphics.Scope.CreateOn( this ) ) DispatchIndirect( computeMaterial, attributes, indirectBuffer, bufferOffset );
+			using ( BeginUpdateWork() ) DispatchIndirect( computeMaterial, attributes, indirectBuffer, bufferOffset );
 			return;
 		}
 
