@@ -326,13 +326,18 @@ internal sealed class RenderFrame
 
 	/// <summary>
 	/// Draw <paramref name="count"/> of <paramref name="view"/>'s runs of <paramref name="layer"/> from <paramref name="first"/>.
-	/// Translucent layers copy the frame on the first reader (<c>CRenderBatchList::DrawCurrentPrimitives</c>); a layer split
-	/// across contexts copies at the first reader of each part that has one. May execute on a worker thread.
+	/// Translucent layers copy the frame on the first reader (<c>CRenderBatchList::DrawCurrentPrimitives</c>); in a layer split
+	/// across contexts, the part with that reader copies it and the parts after it read that copy. May execute on a worker thread.
 	/// </summary>
 	internal void DrawRange( GpuContext rc, ViewPass view, MeshLayer layer, int first, int count, ref RenderStats stats )
 	{
 		var copies = FrameBufferCopy is not null && view == MainPass && layer.LayerType == MeshLayerType.Translucent && !layer.Depth && ReadsFrameBuffer( layer.Runs );
-		if ( copies ) rc.BeginFrameBufferReads( FrameBufferCopy, View.Viewport );
+		if ( copies )
+		{
+			// Parts are submitted in order: one after the first reader's finds the copy made
+			var reader = first > 0 ? System.FirstFrameBufferReader( view, layer ) : -1;
+			rc.BeginFrameBufferReads( FrameBufferCopy, View.Viewport, madeBefore: reader >= 0 && reader < first );
+		}
 
 		System.DrawRange( rc, view, layer, first, count, ref stats );
 

@@ -658,6 +658,22 @@ public sealed partial class RenderSystem : IDisposable
 	}
 
 	/// <summary>
+	/// The first run of <paramref name="layer"/> in <paramref name="view"/> that copies the frame, across features, or -1.
+	/// </summary>
+	internal int FirstFrameBufferReader( ViewPass view, MeshLayer layer )
+	{
+		var start = 0;
+		for ( int i = 0; i < features.Count; i++ )
+		{
+			var first = features[i].FirstFrameBufferReader( view, layer );
+			if ( first >= 0 ) return start + first;
+			start += features[i].RunCount( view, layer );
+		}
+
+		return -1;
+	}
+
+	/// <summary>
 	/// Write estimated draw counts per run, in feature order.
 	/// </summary>
 	internal void RunWeights( ViewPass view, MeshLayer layer, Span<int> weights )

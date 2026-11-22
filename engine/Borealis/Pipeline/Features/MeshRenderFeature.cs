@@ -1362,6 +1362,31 @@ internal sealed partial class MeshRenderFeature : RenderFeature
 
 	internal override bool ReadsFrameBuffer( ViewPass view, MeshRuns runs ) => (view.State<RunLists>( this ).FrameBufferReads & runs) != 0;
 
+	/// <summary>
+	/// The first run that copies the frame where <see cref="Draw"/> draws it (a reader drawn in colour), in its run order.
+	/// </summary>
+	internal override int FirstFrameBufferReader( ViewPass view, MeshLayer layer )
+	{
+		var lists = view.State<RunLists>( this );
+		if ( layer.Depth || (lists.FrameBufferReads & layer.Runs) == 0 || OverlaysOneRun( view, layer, lists ) ) return -1;
+
+		var index = 0;
+		for ( int bit = 0; bit < lists.ByBit.Length; bit++ )
+		{
+			if ( (layer.Runs & Lists[bit].Runs) == 0 ) continue;
+
+			var runs = CollectionsMarshal.AsSpan( lists.ByBit[bit] );
+			foreach ( var item in CollectionsMarshal.AsSpan( lists.ItemsByBit[bit] ) )
+			{
+				ref readonly var run = ref runs[item.Run];
+				if ( run.ReadsFrameBuffer && (run.Custom is null || layer.DrawsCustomObjectsIn( view )) ) return index;
+				index++;
+			}
+		}
+
+		return -1;
+	}
+
 	/// <summary>Whether a prepared view draws something that needs a stencil in its depth (<see cref="GpuMaterial.NeedsStencil"/>).</summary>
 	internal bool WantsStencil( ViewPass view ) => view.State<RunLists>( this ).Stencil;
 

@@ -541,8 +541,11 @@ internal abstract class GpuContext : IDisposable
 	/// <summary>Read part of a buffer back once the GPU has written it. The callback runs later, on any thread.</summary>
 	public abstract void ReadBuffer( GpuBuffer buffer, int offset, int bytes, GpuReadback callback );
 
-	/// <summary>Allow one lazy frame copy for this translucent layer.</summary>
-	public abstract void BeginFrameBufferReads( GpuTexture copy, Rect viewport );
+	/// <summary>
+	/// Allow one lazy frame copy for this translucent layer; with <paramref name="madeBefore"/>, an earlier part of the layer
+	/// made it, and its first reader here only binds it.
+	/// </summary>
+	public abstract void BeginFrameBufferReads( GpuTexture copy, Rect viewport, bool madeBefore = false );
 
 	/// <summary>Stop frame copies after the translucent layer.</summary>
 	public abstract void EndFrameBufferReads();

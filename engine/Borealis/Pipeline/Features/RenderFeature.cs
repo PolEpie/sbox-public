@@ -92,5 +92,10 @@ internal abstract class RenderFeature
 	/// </summary>
 	internal virtual bool ReadsFrameBuffer( ViewPass view, MeshRuns runs ) => false;
 
+	/// <summary>
+	/// The first of its runs in <paramref name="layer"/> that copies the frame before it draws, or -1.
+	/// </summary>
+	internal virtual int FirstFrameBufferReader( ViewPass view, MeshLayer layer ) => -1;
+
 	internal virtual void Dispose() { }
 }

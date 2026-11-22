@@ -432,13 +432,14 @@ internal sealed class HeadlessContext : GpuContext
 
 	GpuTexture frameBufferCopy;
 	Rect frameBufferCopyViewport;
-	bool frameBufferCopied;
+	bool frameBufferCopied, frameBufferMadeBefore;
 
-	public override void BeginFrameBufferReads( GpuTexture copy, Rect viewport )
+	public override void BeginFrameBufferReads( GpuTexture copy, Rect viewport, bool madeBefore = false )
 	{
 		frameBufferCopy = copy;
 		frameBufferCopyViewport = viewport;
 		frameBufferCopied = false;
+		frameBufferMadeBefore = madeBefore;
 	}
 
 	public override void EndFrameBufferReads() => frameBufferCopy = null;
@@ -448,7 +449,7 @@ internal sealed class HeadlessContext : GpuContext
 		if ( frameBufferCopy is null || frameBufferCopied ) return;
 		frameBufferCopied = true;
 
-		Record( Command( GpuOp.CopyFrameBuffer ) with { Texture = frameBufferCopy, Source = bound.Color } );
+		if ( !frameBufferMadeBefore ) Record( Command( GpuOp.CopyFrameBuffer ) with { Texture = frameBufferCopy, Source = bound.Color } );
 		var viewport = frameBufferCopyViewport;
 		attributes.Set( FrameBufferCopyTexture, frameBufferCopy );
 		attributes.Set( FrameBufferCopyRectangle, new Vector4( 0, 0, viewport.Width / frameBufferCopy.Width, viewport.Height / frameBufferCopy.Height ) );

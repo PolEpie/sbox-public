@@ -1427,13 +1427,14 @@ internal sealed partial class BackendContext : GpuContext
 
 	GpuTexture frameBufferCopy;
 	Rect frameBufferCopyViewport;
-	bool frameBufferCopied;
+	bool frameBufferCopied, frameBufferMadeBefore;
 
-	public override void BeginFrameBufferReads( GpuTexture copy, Rect viewport )
+	public override void BeginFrameBufferReads( GpuTexture copy, Rect viewport, bool madeBefore = false )
 	{
 		frameBufferCopy = copy;
 		frameBufferCopyViewport = viewport;
 		frameBufferCopied = false;
+		frameBufferMadeBefore = madeBefore;
 	}
 
 	public override void EndFrameBufferReads() => frameBufferCopy = null;
@@ -1443,13 +1444,14 @@ internal sealed partial class BackendContext : GpuContext
 		if ( frameBufferCopy is null || frameBufferCopied || bound.Color is null ) return;
 		frameBufferCopied = true;
 
-		CopyTexture( bound.Color, frameBufferCopy, 1 );
+		// Made by an earlier part of the layer, in a list submitted before this one, which left it readable
+		if ( !frameBufferMadeBefore ) CopyTexture( bound.Color, frameBufferCopy, 1 );
 		var viewport = frameBufferCopyViewport;
 
 		// Its mips for blurred refraction, then readable by the draws after it: they bind only what's readable
 		if ( frameBufferCopy is BackendTexture copy )
 		{
-			if ( device.FrameBufferCopyMips ) GenerateFrameBufferCopyMips( copy, viewport );
+			if ( device.FrameBufferCopyMips && !frameBufferMadeBefore ) GenerateFrameBufferCopyMips( copy, viewport );
 			Transition( copy, ImageLayout.ShaderRead );
 		}
 
