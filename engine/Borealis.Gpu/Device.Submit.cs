@@ -454,6 +454,7 @@ public sealed unsafe partial class Device
 	}
 	readonly int[] freeListsLow = [int.MaxValue, int.MaxValue];
 	ulong trimFrom;
+	long trimFromTicks;
 
 	/// <summary>
 	/// Free upload pages and spare command lists that stayed unused for <see cref="UploadPageIdleFrames"/> frames, past
@@ -466,7 +467,7 @@ public sealed unsafe partial class Device
 	void TrimSpares()
 	{
 		for ( int c = 0; c < FreePages.Length; c++ ) freePagesLow[c] = Math.Min( freePagesLow[c], FreePages[c].Count );
-		if ( FrameNumber - trimFrom < UploadPageIdleFrames ) return;
+		if ( FrameNumber - trimFrom < UploadPageIdleFrames || !Allocator.KeptLongEnough( trimFromTicks ) ) return;
 
 		for ( int c = 0; c < FreePages.Length; c++ )
 		{
@@ -512,6 +513,7 @@ public sealed unsafe partial class Device
 		}
 
 		trimFrom = FrameNumber;
+		trimFromTicks = System.Diagnostics.Stopwatch.GetTimestamp();
 	}
 
 	readonly CommandList[] keptLists = new CommandList[KeptFreeCommandLists];

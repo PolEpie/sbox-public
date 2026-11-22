@@ -63,6 +63,19 @@ internal sealed unsafe class MemoryAllocator : IDisposable
 	/// <summary>Frames an empty block is kept for in case its kind is needed again, before it's freed.</summary>
 	public const ulong SpareFrames = 300;
 
+	/// <summary>
+	/// Seconds an empty block, a free upload page or a spare command list is kept as well as <see cref="SpareFrames"/> frames:
+	/// at a menu's thousands of frames a second, 300 frames are a fraction of a second, and blocks were freed and made again a
+	/// few times a second. 0 (a standalone allocator's) goes by frames only; a device's takes <see cref="DeviceSpareSeconds"/>.
+	/// </summary>
+	public double SpareSeconds { get; set; }
+
+	/// <summary><see cref="SpareSeconds"/> for a device's allocator: <c>BOREALIS_SPARE_SECONDS</c>, or 0.</summary>
+	public static double DeviceSpareSeconds { get; set; } = double.TryParse( Environment.GetEnvironmentVariable( "BOREALIS_SPARE_SECONDS" ), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var seconds ) ? seconds : 0;
+
+	/// <summary>Whether <paramref name="since"/> (<see cref="System.Diagnostics.Stopwatch"/> ticks) is <see cref="SpareSeconds"/> ago.</summary>
+	internal bool KeptLongEnough( long since ) => SpareSeconds <= 0 || System.Diagnostics.Stopwatch.GetElapsedTime( since ).TotalSeconds >= SpareSeconds;
+
 	/// <summary>Size of the shared blocks; allocations over a quarter of it get their own.</summary>
 	public ulong BlockSize => blockSize;
 
@@ -402,6 +415,9 @@ internal sealed unsafe class MemoryAllocator : IDisposable
 	/// </summary>
 	[ThreadStatic] internal static bool OwnAllocation;
 
+	/// <summary>While set on a thread, its allocations that fit a large block share large blocks: upload pages (<see cref="CommandList.SharedPages"/>).</summary>
+	[ThreadStatic] internal static bool InLargeBlocks;
+
 	static GpuException NoRoom() => new( "vkAllocateMemory (no room in the blocks there are)", VkResult.ErrorFragmentedPool );
 
 	Allocation Allocate( in VkMemoryRequirements requirements, bool image, bool target, int type, bool content, bool refusable, bool fallback )
@@ -432,7 +448,7 @@ internal sealed unsafe class MemoryAllocator : IDisposable
 			return new Allocation( dedicated, dedicatedOffset, size, dedicatedNode );
 		}
 
-		var large = size > blockSize / 4;
+		var large = size > blockSize / 4 || (InLargeBlocks && size <= LargeBlockSize / 4);
 		var key = (type, image, large, content, fallback);
 		ulong freshSize;
 		lock ( allocationLock )
@@ -801,7 +817,7 @@ internal sealed unsafe class MemoryAllocator : IDisposable
 			for ( int i = spares.Count - 1; i >= 0; i-- )
 			{
 				var block = spares[i];
-				if ( frame - block.EmptySince < SpareFrames ) continue;
+				if ( frame - block.EmptySince < SpareFrames || !KeptLongEnough( block.EmptySinceTicks ) ) continue;
 				Remove( block );
 				FreeBlock( block );
 			}
@@ -1171,6 +1187,7 @@ internal sealed unsafe class MemoryAllocator : IDisposable
 	{
 		EndDrain( block );
 		block.EmptySince = frame;
+		block.EmptySinceTicks = System.Diagnostics.Stopwatch.GetTimestamp();
 		if ( block.Spare ) return;
 		block.Spare = true;
 		spares.Add( block );

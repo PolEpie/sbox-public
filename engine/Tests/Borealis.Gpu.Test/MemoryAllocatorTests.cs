@@ -44,6 +44,33 @@ public class MemoryAllocatorTests : GpuTest
 	}
 
 	/// <summary>
+	/// A device's allocator keeps an empty block for <see cref="MemoryAllocator.SpareSeconds"/> as well as
+	/// <see cref="MemoryAllocator.SpareFrames"/> frames: a menu's frames pass 300 in a fraction of a second.
+	/// </summary>
+	[TestMethod]
+	public void SparesAreKeptForSecondsAsWellAsFrames()
+	{
+		using var allocator = new MemoryAllocator( Device.Vk, Device.Allocator.MemoryProperties, false ) { QuietSeconds = 0, GrowBlocks = false, MakeBlocksAhead = false, SpareSeconds = 0.5 };
+		var requirements = new VkMemoryRequirements { size = allocator.BlockSize / 2, alignment = 256, memoryTypeBits = ~0u };
+		var kept = allocator.Allocate( requirements, MemoryLocation.Device, image: false );
+		var freed = allocator.Allocate( requirements, MemoryLocation.Device, image: false );
+		var other = allocator.Allocate( requirements, MemoryLocation.Device, image: false );
+		Assert.AreEqual( 2 * allocator.BlockSize, allocator.Reserved );
+
+		// The second block emptied: kept past the frames while the seconds haven't passed, then freed
+		allocator.Free( other );
+		allocator.Trim( 1 );
+		allocator.Trim( 2 + MemoryAllocator.SpareFrames );
+		Assert.AreEqual( 2 * allocator.BlockSize, allocator.Reserved, "kept for its seconds" );
+		System.Threading.Thread.Sleep( 600 );
+		allocator.Trim( 3 + MemoryAllocator.SpareFrames );
+		Assert.AreEqual( allocator.BlockSize, allocator.Reserved, "freed once both passed" );
+
+		allocator.Free( kept );
+		allocator.Free( freed );
+	}
+
+	/// <summary>
 	/// Threads that find no room in a kind's blocks at the same moment make one new block between them, not one each: sixteen
 	/// recording threads once made sixteen 16 MiB blocks at once after a map loaded, 70-170 ms each in the driver.
 	/// </summary>
