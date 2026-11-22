@@ -36,10 +36,21 @@ public partial class SceneObject
 		_bounds = infinite ? InfiniteBounds : BBox.FromPositionAndSize( Vector3.Zero );
 	}
 
+	/// <summary>
+	/// Keep these bounds here from now on: an object without a twin whose type works its bounds out itself, as native's object
+	/// does (a light from its range, a cubemap from its box), set as native's <c>SetBounds</c> keeps them.
+	/// </summary>
+	private protected void KeepBounds( in BBox bounds )
+	{
+		_boundsKind = BoundsKind.Fixed;
+		SetKeptBounds( bounds );
+	}
+
 	/// <summary>Keep a rigid model's bounds here from now on, worked out from its mesh instances as native's transform does.</summary>
 	void KeepRigidBounds()
 	{
-		if ( !ResolvesDraws || this is SceneModel )
+		// A scene model without a twin starts as a rigid one, as its twin's bounds would be, until its pose sets them
+		if ( !ResolvesDraws || (this is SceneModel && HasTwin) )
 		{
 			_boundsKind = BoundsKind.Native;
 			return;

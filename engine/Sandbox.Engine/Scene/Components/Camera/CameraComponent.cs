@@ -658,6 +658,42 @@ public sealed partial class CameraComponent : Component, Component.ExecuteInEdit
 		}
 	}
 
+	/// <summary>
+	/// The camera's part of the frame's extract (<see cref="Scene.ExtractRender"/>), on the main thread: whether it draws, and
+	/// its scene camera prepared for it as <see cref="AddToRenderList"/> prepares it.
+	/// </summary>
+	internal bool PrepareForRenderList()
+	{
+		if ( !Active ) return false;
+		if ( Viewport.z <= 0 ) return false;
+		if ( Viewport.w <= 0 ) return false;
+
+		using ( Scene.PushScope() )
+		{
+			InitializeRendering();
+		}
+
+		return true;
+	}
+
+	/// <summary>
+	/// Draw the camera <see cref="PrepareForRenderList"/> prepared: in the scene's scope on the main thread, without one on the
+	/// render thread, which runs no game code (the scope sets the game's statics).
+	/// </summary>
+	internal void DrawToRenderList( SwapChainHandle_t swapChain, Vector2? size )
+	{
+		if ( ThreadSafe.IsRenderThread )
+		{
+			RenderWith( Rendering.SceneRenderer.Current, swapChain, CustomSize ?? size );
+			return;
+		}
+
+		using ( Scene.PushScope() )
+		{
+			RenderWith( Rendering.SceneRenderer.Current, swapChain, CustomSize ?? size );
+		}
+	}
+
 	void RenderWith( Rendering.ISceneRenderer renderer, SwapChainHandle_t swapChain, Vector2? size )
 	{
 		if ( RenderTarget is not null && RenderTarget.native.IsValid )

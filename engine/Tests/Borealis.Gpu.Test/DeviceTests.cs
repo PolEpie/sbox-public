@@ -257,6 +257,48 @@ public class DeviceTests : GpuTest
 	}
 
 	/// <summary>
+	/// A list another thread begins while a frame starts (the game's frame thread starts frames while the main thread
+	/// records), after the switch and before the slot's old lists are recycled, belongs to the new frame: it isn't recycled
+	/// with the slot's old lists under its recording, and records, submits and uploads what it was given.
+	/// </summary>
+	[TestMethod]
+	public void ListBegunOnAnotherThreadWhileAFrameStartsStays()
+	{
+		var readback = Device.CreateBuffer( new BufferInfo { Size = 1024, Memory = MemoryLocation.Readback, Name = "Readback" } );
+		var buffer = Device.CreateBuffer( new BufferInfo { Size = 1024, Usage = BufferUsage.Storage, Name = "Written by the other thread" } );
+		var data = Enumerable.Range( 0, 256 ).Select( i => (uint)(i * 5 + 3) ).ToArray();
+
+		// The slot the next frame takes has lists of its own to recycle
+		for ( int i = 0; i < Device.FramesInFlight; i++ )
+		{
+			Device.BeginFrame();
+			Device.Submit( Device.BeginCommandList( name: "Earlier" ) );
+		}
+
+		CommandList list = null;
+		Device.FrameSwitchedForTests = () => list = System.Threading.Tasks.Task.Run( () => Device.BeginCommandList( name: "Begun meanwhile" ) ).Result;
+		try
+		{
+			Device.BeginFrame();
+		}
+		finally
+		{
+			Device.FrameSwitchedForTests = null;
+		}
+
+		Assert.IsNotNull( list );
+		list.UpdateBuffer<uint>( buffer, data );
+		list.Barrier( new BufferBarrier { Buffer = buffer, SourceStage = PipelineStage.Transfer, SourceAccess = MemoryAccess.TransferWrite, DestinationStage = PipelineStage.Transfer, DestinationAccess = MemoryAccess.TransferRead } );
+		list.CopyBuffer( buffer, 0, readback, 0, 1024 );
+		list.Barrier( new BufferBarrier { Buffer = readback, SourceStage = PipelineStage.Transfer, SourceAccess = MemoryAccess.TransferWrite, DestinationStage = PipelineStage.Host, DestinationAccess = MemoryAccess.HostRead } );
+		Device.Wait( Device.Submit( list ) );
+
+		CollectionAssert.AreEqual( data, MemoryMarshal.Cast<byte, uint>( Device.Map( readback ) ).ToArray() );
+		Device.Destroy( buffer );
+		Device.Destroy( readback );
+	}
+
+	/// <summary>
 	/// The validation layer is really checking: a copy into a buffer with no barrier after a fill of it is a write-after-write
 	/// hazard, and gets reported. (Every other test passes only if nothing is reported.)
 	/// </summary>

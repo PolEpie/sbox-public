@@ -47,24 +47,7 @@ public partial struct MeshTraceRequest
 
 		if ( targetWorld != null && targetWorld.IsValid() )
 		{
-			if ( filterCallback is not null )
-			{
-				r.filterDelegate = (IntPtr)((delegate* unmanaged< int, byte >)&FilterFunctionInternal);
-				_currentfilterCallback = filterCallback;
-			}
-
-			Result? hit = null;
-			try
-			{
-				if ( targetWorld.native.MeshTrace( r, ref result ) )
-				{
-					hit = Result.From( this, result );
-				}
-			}
-			finally
-			{
-				_currentfilterCallback = default;
-			}
+			Result? hit = TracesNativeTwins ? TraceNativeTwins( r ) : TraceObjects( r );
 
 			// Maps have no native objects to trace: their own meshes, if nearer
 			if ( TraceMaps( r, hit?.Fraction ?? float.MaxValue ) is { } mapHit ) hit = mapHit;
@@ -93,37 +76,13 @@ public partial struct MeshTraceRequest
 
 		if ( targetWorld != null && targetWorld.IsValid() )
 		{
-			if ( filterCallback is not null )
-			{
-				r.filterDelegate = (IntPtr)((delegate* unmanaged< int, byte >)&FilterFunctionInternal);
-				_currentfilterCallback = filterCallback;
-			}
+			var output = new List<Result>();
+			if ( TracesNativeTwins ) TraceNativeTwinsAll( r, output );
+			else TraceObjectsAll( r, output );
 
-			var results = NativeEngine.CUtlVectorMeshTraceOutput.Create( 32, 32 );
-
-			try
-			{
-
-				var output = new List<Result>();
-				if ( targetWorld.native.MeshTraceAll( r, results ) )
-				{
-					var hitCount = results.Count();
-					for ( int i = 0; i < hitCount; i++ )
-					{
-						output.Add( Result.From( this, results.Element( i ) ) );
-					}
-				}
-
-				// Maps have no native objects to trace: their own meshes
-				TraceMapsAll( r, output );
-				if ( output.Count > 0 ) return output.ToArray();
-			}
-			finally
-			{
-				_currentfilterCallback = default;
-
-				results.DeleteThis();
-			}
+			// Maps aren't scene objects: their own meshes
+			TraceMapsAll( r, output );
+			if ( output.Count > 0 ) return output.ToArray();
 		}
 
 		if ( targetModel is not null )
@@ -137,6 +96,51 @@ public partial struct MeshTraceRequest
 	}
 
 	/// <summary>The target world's maps (<see cref="SceneMap.Geometry"/>), read by Borealis.Source2.</summary>
+	/// <summary>The nearest hit through the native twins' ray trace environment (<see cref="TracesNativeTwins"/>).</summary>
+	readonly unsafe Result? TraceNativeTwins( MeshTraceInput r )
+	{
+		MeshTraceOutput result = default;
+		result.distance = float.MaxValue;
+
+		if ( filterCallback is not null )
+		{
+			r.filterDelegate = (IntPtr)((delegate* unmanaged< int, byte >)&FilterFunctionInternal);
+			_currentfilterCallback = filterCallback;
+		}
+
+		try
+		{
+			return targetWorld.native.MeshTrace( r, ref result ) ? Result.From( this, result ) : null;
+		}
+		finally
+		{
+			_currentfilterCallback = default;
+		}
+	}
+
+	/// <summary>Every hit through the native twins' ray trace environment (<see cref="TracesNativeTwins"/>).</summary>
+	readonly unsafe void TraceNativeTwinsAll( MeshTraceInput r, List<Result> into )
+	{
+		if ( filterCallback is not null )
+		{
+			r.filterDelegate = (IntPtr)((delegate* unmanaged< int, byte >)&FilterFunctionInternal);
+			_currentfilterCallback = filterCallback;
+		}
+
+		var results = NativeEngine.CUtlVectorMeshTraceOutput.Create( 32, 32 );
+		try
+		{
+			if ( !targetWorld.native.MeshTraceAll( r, results ) ) return;
+			var count = results.Count();
+			for ( int i = 0; i < count; i++ ) into.Add( Result.From( this, results.Element( i ) ) );
+		}
+		finally
+		{
+			_currentfilterCallback = default;
+			results.DeleteThis();
+		}
+	}
+
 	readonly List<MapGeometry> MapsToTrace()
 	{
 		if ( targetWorld is null ) return null;
@@ -446,7 +450,7 @@ public partial struct MeshTraceRequest
 		public VertexDetail Vertex1;
 		public VertexDetail Vertex2;
 
-		internal unsafe static Result From( in MeshTraceRequest input, in MeshTraceOutput result )
+		internal unsafe static Result From( in MeshTraceRequest input, in MeshTraceOutput result, SceneObject sceneObject = null )
 		{
 			Result tr = default;
 
@@ -462,7 +466,7 @@ public partial struct MeshTraceRequest
 			tr.Material = Material.FromNative( result.material );
 			tr.Transform = result.transform;
 			tr.HitTriangle = result.triangleIndex;
-			tr.SceneObject = HandleIndex.Get<SceneObject>( result.sceneobjectHandle );
+			tr.SceneObject = sceneObject ?? HandleIndex.Get<SceneObject>( result.sceneobjectHandle );
 
 			tr.HitTriangleUv = result.uv;
 			tr.VertexInfluence = new Vector3( result.uv.x, result.uv.y, 1 - result.uv.x - result.uv.y );

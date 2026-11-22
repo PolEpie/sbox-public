@@ -363,17 +363,38 @@ public sealed class MeshObject : RenderObject
 			bones[i] = worldBones[i];
 			boneMatrices[i] = Matrix3x4.From( worldBones[i] );
 		}
+
+		// Set whole here: a pose written in place before it isn't taken over this one
+		posePending = false;
 	}
+
+	// The pose being written (PoseBoneMatrices), drawn once it's taken (TakePose); and whether one was written since
+	Matrix3x4[] poseWritten = [];
+	volatile bool posePending;
 
 	/// <summary>
 	/// Pose a skinned mesh in place: room for <paramref name="count"/> world-space bone matrices, by model bone index, for the
-	/// caller to fill - <see cref="SetBones"/> without converting or copying. <see cref="Bones"/> is left empty.
+	/// caller to fill - <see cref="SetBones"/> without converting or copying. <see cref="Bones"/> is left empty. The pose is a
+	/// second array, drawn from once <see cref="TakePose"/> swaps it in: animation workers write the next frame's pose while a
+	/// frame is drawn from the last one.
 	/// </summary>
 	internal Span<Matrix3x4> PoseBoneMatrices( int count )
 	{
 		if ( bones.Length != 0 ) bones = [];
-		if ( boneMatrices.Length != count ) boneMatrices = new Matrix3x4[count];
-		return boneMatrices;
+		if ( poseWritten.Length != count ) poseWritten = new Matrix3x4[count];
+		posePending = true;
+		return poseWritten;
+	}
+
+	/// <summary>
+	/// Draw the pose last written with <see cref="PoseBoneMatrices"/> from now on, if one was: a reference swap, at the sync
+	/// point (the world writing the object's change), when nothing writes or draws it.
+	/// </summary>
+	internal void TakePose()
+	{
+		if ( !posePending ) return;
+		posePending = false;
+		(boneMatrices, poseWritten) = (poseWritten, boneMatrices);
 	}
 
 	/// <summary>

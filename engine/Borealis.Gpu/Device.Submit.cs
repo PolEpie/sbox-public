@@ -250,8 +250,14 @@ public sealed unsafe partial class Device
 	}
 	readonly List<SwapChain> swapChains = new();
 
-	/// <summary>Frames begun so far; the first is 0.</summary>
-	public ulong FrameNumber { get; private set; }
+	/// <summary>Frames begun so far; the first is 0. Read on any thread: frames may begin on a thread of their own.</summary>
+	public ulong FrameNumber
+	{
+		get => Volatile.Read( ref frameNumber );
+		private set => Volatile.Write( ref frameNumber, value );
+	}
+
+	ulong frameNumber;
 
 	/// <summary>Which of the <see cref="FramesInFlight"/> slots the current frame uses.</summary>
 	public int FrameSlot => (int)(FrameNumber % (ulong)FramesInFlight);
@@ -285,27 +291,89 @@ public sealed unsafe partial class Device
 	public void BeginFrame()
 	{
 		FrameStarts[(int)((FrameNumber + 1) & (FrameHistory - 1))] = System.Diagnostics.Stopwatch.GetTimestamp();
-		var carried = CarryRecording();
-		RememberEvent( "frame starts:", (long)FrameNumber + 1 );
+		WatchFrame();
 
-		Flush();
-		frame.Graphics = graphicsQueue.Submitted;
-		frame.Compute = computeQueue.Submitted;
+		SwitchFrame();
+		var doing = Enter( "BeginFrame: collect garbage" );
+		CollectGarbage();
+		doing.Dispose();
+		doing = Enter( "BeginFrame: trim spares" );
+		TrimSpares();
+		doing.Dispose();
+		doing = Enter( "BeginFrame: upload pages ahead" );
+		MakeUploadPagesAhead();
+		doing.Dispose();
+		doing = Enter( "BeginFrame: trim the allocator" );
+		Allocator.Trim( FrameNumber );
+		doing.Dispose();
+		doing = Enter( "BeginFrame: relocate" );
+		RelocateDraining();
+		doing.Dispose();
+		doing = Enter( "BeginFrame: memory budget" );
+		if ( FrameNumber % MemoryBudgetFrames == 0 ) RefreshMemoryBudget();
+		doing.Dispose();
+	}
 
-		// What was destroyed waits for the carried lists' frame as well: they may use it
-		if ( carried is null ) TagDestroyed();
+	/// <summary>
+	/// Held while the frame switches (the carry, the flush, the new frame number), and by <see cref="BeginList"/> while it
+	/// adds a list to the frame: frames may begin on a thread of their own while others record (the game's frame thread).
+	/// Taken inside the queues' submit locks, as a list made under one (scope pairing) takes it.
+	/// </summary>
+	readonly object frameSwitch = new();
 
-		FrameNumber++;
-		frame = frames[FrameSlot];
+	/// <summary>Called by <see cref="BeginFrame"/> once the frame switched, before it waits for the slot: for the tests.</summary>
+	internal Action FrameSwitchedForTests { get; set; }
 
+	void SwitchFrame()
+	{
+		List<CommandList> carried;
+		var doing = Enter( "BeginFrame: flush" );
+		var compute = computeQueue != graphicsQueue ? computeQueue : null;
+		Monitor.Enter( graphicsQueue.SubmitLock );
+		if ( compute is not null ) Monitor.Enter( compute.SubmitLock );
+		Monitor.Enter( frameSwitch );
+		try
+		{
+			carried = CarryRecording();
+			RememberEvent( "frame starts:", (long)FrameNumber + 1 );
+
+			FlushLocked( graphicsQueue );
+			if ( compute is not null ) FlushLocked( compute );
+			frame.Graphics = graphicsQueue.Submitted;
+			frame.Compute = computeQueue.Submitted;
+
+			// What was destroyed waits for the carried lists' frame as well: they may use it
+			if ( carried is null ) TagDestroyed();
+
+			FrameNumber++;
+			frame = frames[FrameSlot];
+		}
+		finally
+		{
+			Monitor.Exit( frameSwitch );
+			if ( compute is not null ) Monitor.Exit( compute.SubmitLock );
+			Monitor.Exit( graphicsQueue.SubmitLock );
+		}
+
+		doing.Dispose();
+		FrameSwitchedForTests?.Invoke();
+		doing = Enter( "BeginFrame: wait for the frame slot" );
 		graphicsQueue.Wait( frame.Graphics );
 		computeQueue.Wait( frame.Compute );
+		doing.Dispose();
+		doing = Enter( "BeginFrame: recycle" );
 
+		// Lists another thread began in this frame since it switched stay; those of the frame that last used the slot go
 		var recycle = recycling;
 		lock ( frame.Lists )
 		{
-			recycle.AddRange( frame.Lists );
-			frame.Lists.Clear();
+			for ( int i = 0; i < frame.Lists.Count; i++ )
+			{
+				if ( frame.Lists[i].Frame == FrameNumber ) continue;
+				recycle.Add( frame.Lists[i] );
+				frame.Lists.RemoveAt( i-- );
+			}
+
 			if ( carried is not null ) frame.Lists.AddRange( carried );
 		}
 
@@ -319,12 +387,7 @@ public sealed unsafe partial class Device
 		}
 
 		recycle.Clear();
-		CollectGarbage();
-		TrimSpares();
-		MakeUploadPagesAhead();
-		Allocator.Trim( FrameNumber );
-		RelocateDraining();
-		if ( FrameNumber % MemoryBudgetFrames == 0 ) RefreshMemoryBudget();
+		doing.Dispose();
 	}
 
 	// The frame's lists as BeginFrame recycles them, kept
@@ -477,8 +540,13 @@ public sealed unsafe partial class Device
 
 		if ( !freeLists[(int)queue].TryTake( out var list ) ) list = new CommandList( this, QueueFor( queue ), queue );
 
-		lock ( frame.Lists ) frame.Lists.Add( list );
-		list.Frame = FrameNumber;
+		// Not while another thread switches frames (BeginFrame): in the frame and with the frame number it's recycled by
+		lock ( frameSwitch )
+		{
+			lock ( frame.Lists ) frame.Lists.Add( list );
+			list.Frame = FrameNumber;
+		}
+
 		list.Begin( name, gate );
 		return list;
 	}
@@ -561,7 +629,7 @@ public sealed unsafe partial class Device
 				pSignalSemaphoreInfos = signals,
 			};
 
-			Check( Vk.vkQueueSubmit2( queue.Handle, 1, &submit, 0 ), "vkQueueSubmit2" );
+			using ( Enter( "vkQueueSubmit2" ) ) Check( Vk.vkQueueSubmit2( queue.Handle, 1, &submit, 0 ), "vkQueueSubmit2" );
 			Interlocked.Increment( ref submissions );
 			queue.Pending.Clear();
 			Volatile.Write( ref queue.Flushed, value );
@@ -682,7 +750,7 @@ public sealed unsafe partial class Device
 			pSignalSemaphoreInfos = &signal,
 		};
 
-		Check( Vk.vkQueueSubmit2( queue.Handle, 1, &submit, 0 ), "vkQueueSubmit2" );
+		using ( Enter( "vkQueueSubmit2 (held lists)" ) ) Check( Vk.vkQueueSubmit2( queue.Handle, 1, &submit, 0 ), "vkQueueSubmit2" );
 		Interlocked.Increment( ref submissions );
 		queue.Pending.Clear();
 		Volatile.Write( ref queue.Flushed, value );

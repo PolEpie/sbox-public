@@ -19,6 +19,7 @@ internal sealed partial class BorealisGpuRenderBackend
 	public override void CopyBuffer( GpuBuffer source, GpuBuffer destination, uint sourceOffset, uint destinationOffset, uint size )
 	{
 		if ( size == 0 ) return;
+		FromMain();
 		var from = BufferOf( source );
 		var to = BufferOf( destination );
 		if ( list is not null )
@@ -40,6 +41,7 @@ internal sealed partial class BorealisGpuRenderBackend
 
 	void Fill( BufferHandle buffer, uint value, long offset, long size )
 	{
+		FromMain();
 		if ( list is not null )
 		{
 			context.FillBuffer( buffer, value, offset, size );
@@ -118,6 +120,7 @@ internal sealed partial class BorealisGpuRenderBackend
 
 	public override void CopyStructureCount( GpuBuffer source, GpuBuffer destination, uint destinationOffset )
 	{
+		FromMain();
 		var counter = CounterOf( source );
 		var to = BufferOf( destination );
 		if ( list is not null )
@@ -164,6 +167,7 @@ internal sealed partial class BorealisGpuRenderBackend
 	public override void ReadBufferAsync( GpuBuffer buffer, AsyncGPUReadback.BufferReadDelegate callback, int offset, int size )
 	{
 		if ( size <= 0 ) return;
+		FromMain();
 		var source = BufferOf( buffer );
 		var readback = new Readback
 		{

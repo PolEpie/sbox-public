@@ -381,7 +381,10 @@ internal sealed partial class SceneBridge
 	/// context is the parent's (custom objects, dynamic objects and command lists aren't drawn, nor the camera's stages).
 	/// </summary>
 	bool RenderChildOnGpu( SceneCamera camera, in ViewSetup setup, Texture target, Texture depthTarget, out CameraState state )
-		=> RenderOnGpu( camera, setup, target, depthTarget, rendering.View.ToneMapScalar, out state );
+	{
+		using ( Borealis.Zones.ChildView.Start() )
+			return RenderOnGpu( camera, setup, target, depthTarget, rendering.View.ToneMapScalar, out state );
+	}
 
 	/// <summary>
 	/// Render a view on the Borealis.Gpu device into targets of its own for <paramref name="target"/> and

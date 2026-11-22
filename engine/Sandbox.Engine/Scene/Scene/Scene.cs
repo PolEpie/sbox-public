@@ -353,6 +353,53 @@ public partial class Scene : GameObject
 		}
 	}
 
+	/// <summary>
+	/// The game's half of a frame the game window draws (<c>GameWindow.Render</c>), on the main thread at the sync point: the
+	/// scene's render preparation (<see cref="PreCameraRender"/>: <see cref="GameObjectSystem.Stage.PrepareRender"/>, every
+	/// camera's scene camera) and each camera that draws prepared for it, in <paramref name="drawn"/> in priority order. What
+	/// draws them (<see cref="DrawRender"/>) then reads only what they prepared, on whichever thread draws the frame.
+	/// </summary>
+	internal void ExtractRender( List<CameraComponent> drawn )
+	{
+		drawn.Clear();
+		if ( IsSuspended ) return;
+
+		using var _extractScope = _extractTimer.Start();
+		PreCameraRender();
+
+		var cameras = RentSortedCameras();
+		try
+		{
+			foreach ( var cc in cameras )
+			{
+				if ( cc.Active == false ) continue;
+				if ( cc.IsSceneEditorCamera ) continue;
+				if ( cc.PrepareForRenderList() ) drawn.Add( cc );
+			}
+		}
+		finally
+		{
+			ReturnSortedCameras( cameras );
+		}
+	}
+
+	/// <summary>
+	/// Draw the cameras <see cref="ExtractRender"/> prepared, in order, into the frame being drawn: on the main thread, in the
+	/// scene's scope as <see cref="Render"/> draws them, or on the render thread, which runs no game code and doesn't push it.
+	/// </summary>
+	internal void DrawRender( List<CameraComponent> drawn, SwapChainHandle_t swapChain, Vector2? size )
+	{
+		using var _renderScope = _renderTimer.Start();
+		foreach ( var cc in drawn )
+		{
+			if ( !cc.IsValid() ) continue;
+			using var _cam = _cameraRenderTimer.Start( cc.GameObject?.Name );
+			cc.DrawToRenderList( swapChain, size );
+		}
+	}
+
+	static Superluminal _extractTimer = new Superluminal( "Scene.ExtractRender", Color.Cyan );
+
 	List<CameraComponent> _sortedCameraScratch;
 
 	/// <summary>
@@ -413,8 +460,12 @@ public partial class Scene : GameObject
 	internal void PreCameraRender()
 	{
 		// Prepare scene-owned rendering data before cameras copy it. Child views reuse the snapshot.
-		if ( ThreadSafe.IsMainThread )
+		if ( ThreadSafe.IsMainThread && !ThreadSafe.IsRenderThread )
 		{
+			// A camera rendered from the game's update (RenderToTexture) waits for the render thread's frame first: what's
+			// prepared here is what that frame draws from
+			Sandbox.Engine.GameWindow.Current?.JoinRenderThread();
+			TakeRenderSnapshots();
 			Signal( GameObjectSystem.Stage.PrepareRender );
 		}
 

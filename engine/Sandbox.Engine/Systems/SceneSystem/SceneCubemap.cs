@@ -44,7 +44,16 @@ public sealed class SceneCubemap : SceneLight
 
 		using ( var h = IHandle.MakeNextHandle( this ) )
 		{
-			CSceneSystem.CreateEnvMap( sceneWorld, projectionMode );
+			if ( MakesNativeTwin ) CSceneSystem.CreateEnvMap( sceneWorld, projectionMode );
+			else MakeLightWithoutTwin( sceneWorld, NewDescription( TypeEnvironmentProbe ), Rendering.SceneObjectFlags.IsEnvMap | Rendering.SceneObjectFlags.IsLight | Rendering.SceneObjectFlags.IsIndirectLight );
+		}
+
+		if ( envMap.IsNull )
+		{
+			// What CreateEnvMap gives a new one: the projection asked for, a box as far as its range, no texture
+			managed = true;
+			projection = (ProjectionMode)projectionMode;
+			projectionBounds = new BBox( new Vector3( -512 ), new Vector3( 512 ) );
 		}
 
 		TakeOver();
@@ -219,11 +228,17 @@ public sealed class SceneCubemap : SceneLight
 
 	/// <summary>
 	/// The native twin's bounds from its projection box, and, while something reads it, the irradiance it works out from the
-	/// cube (Borealis doesn't use it) and its note to native's light binner.
+	/// cube (Borealis doesn't use it) and its note to native's light binner. Without a twin the bounds are worked out here,
+	/// as <c>CEnvMapSceneObject::CalculateBounds</c> does.
 	/// </summary>
 	void Calculate()
 	{
-		if ( envMap.IsNull ) return;
+		if ( envMap.IsNull )
+		{
+			if ( managed ) KeepBounds( TransformBounds( Transform, projectionBounds ) );
+			return;
+		}
+
 		envMap.CalculateBounds();
 		if ( !WritesNative ) return;
 		envMap.CalculateRadianceSH();

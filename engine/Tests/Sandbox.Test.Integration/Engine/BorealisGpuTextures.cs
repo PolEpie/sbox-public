@@ -474,10 +474,11 @@ public class BorealisGpuTexturesTest
 
 	/// <summary>
 	/// A compute shader dispatched with its own attributes outside any render block (gizmo text rendered while it lays out)
-	/// runs at once in a block of its own, as Source 2's device runs one, with what was set on its attributes.
+	/// is recorded with the update's uploads, not submitted in a block of its own, and a readback after it sees what it wrote,
+	/// with what was set on its attributes, as on Source 2's device, which runs one at once.
 	/// </summary>
 	[TestMethod]
-	public unsafe void ComputeOutsideABlockRunsAtOnce()
+	public unsafe void ComputeOutsideABlockRunsBeforeAReadback()
 	{
 		RequireVulkan();
 		using var borealis = BorealisGpuRenderBackend.Create( validation: true );
@@ -499,7 +500,9 @@ public class BorealisGpuTexturesTest
 			downsample.Attributes.Set( "InvTextureSize", new Vector2( 0.5f, 0.5f ) );
 
 			Assert.IsFalse( Graphics.IsActive );
+			var recorded = borealis.UpdateWorkRecorded;
 			downsample.Dispatch( 2, 2, 1 );
+			Assert.AreEqual( recorded + 1, borealis.UpdateWorkRecorded, "recorded with the uploads" );
 
 			var mip = new byte[2 * 2 * 4];
 			fixed ( byte* data = mip )

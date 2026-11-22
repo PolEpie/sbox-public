@@ -451,7 +451,12 @@ public sealed unsafe class SwapChain : IDisposable
 
 		var queue = device.QueueFor( QueueType.Graphics );
 		VkResult result;
-		lock ( queue.SubmitLock ) result = vk.vkQueuePresentKHR( queue.Handle, &present );
+		using ( device.Enter( "vkQueuePresentKHR" ) )
+		{
+			var presentStart = System.Diagnostics.Stopwatch.GetTimestamp();
+			lock ( queue.SubmitLock ) result = vk.vkQueuePresentKHR( queue.Handle, &present );
+			if ( Memory.AllocationTrace.Enabled ) Memory.AllocationTrace.Note( false, 0, -1, Memory.AllocationTrace.Present, 0, presentStart, System.Diagnostics.Stopwatch.GetTimestamp() - presentStart );
+		}
 
 		device.RememberEvent( "presented image, result*16+image:", (int)result * 16 + index );
 		if ( result is VkResult.ErrorOutOfDate or VkResult.Suboptimal ) outOfDate = true;
@@ -465,6 +470,7 @@ public sealed unsafe class SwapChain : IDisposable
 	VkResult AcquireNext( uint* index )
 	{
 		var start = System.Diagnostics.Stopwatch.GetTimestamp();
+		using var _ = device.Enter( "vkAcquireNextImageKHR" );
 		while ( true )
 		{
 			var result = vk.vkAcquireNextImageKHR( vk.Device, swapchain, 500_000_000, acquireSemaphores[acquireSlot], 0, index );
