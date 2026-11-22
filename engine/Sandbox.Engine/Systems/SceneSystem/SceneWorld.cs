@@ -145,6 +145,7 @@ public sealed partial class SceneWorld : IHandle
 
 		InternalSceneMaps.Clear();
 
+		RunQueuedDeletes();
 		Rendering.SceneRenderer.Forget( this );
 		CSceneSystem.DestroyWorld( this );
 		native = IntPtr.Zero;
@@ -181,15 +182,55 @@ public sealed partial class SceneWorld : IHandle
 	{
 		if ( !native.IsValid ) return;
 		native.DeleteEndOfFrameObjects();
+		RunQueuedDeletes();
+	}
+
+	/// <summary>Objects deleted (<see cref="SceneObject.Delete"/>) whose world's deletes haven't run yet.</summary>
+	readonly List<SceneObject> queuedDeletes = new();
+
+	internal void QueueDelete( SceneObject sceneObject )
+	{
+		lock ( queuedDeletes ) queuedDeletes.Add( sceneObject );
+	}
+
+	/// <summary>
+	/// Take the objects deleted since the last run out of this world and its renderer. A native twin goes with native's next
+	/// end-of-frame deletes.
+	/// </summary>
+	void RunQueuedDeletes()
+	{
+		SceneObject[] deleted;
+		lock ( queuedDeletes )
+		{
+			if ( queuedDeletes.Count == 0 ) return;
+			deleted = queuedDeletes.ToArray();
+			queuedDeletes.Clear();
+		}
+
+		foreach ( var sceneObject in deleted ) sceneObject.Destroyed();
+	}
+
+	/// <summary>
+	/// The frame's end: every world's deleted objects leave it, whether or not anything called <see cref="DeletePendingObjects"/>
+	/// (a native view once ran each drawn world's; nothing draws natively now, so a world nobody flushed kept them).
+	/// </summary>
+	internal static void RunEndOfFrameDeletes()
+	{
+		foreach ( var world in All.ToArray() )
+		{
+			bool any;
+			lock ( world.queuedDeletes ) any = world.queuedDeletes.Count > 0;
+			if ( any ) world.DeletePendingObjects();
+		}
 	}
 
 	/// <summary>
 	/// Flush all system-wide queued scene object and world deletes.
-	/// Normally processed at end-of-frame by FinishRenderingViews,
-	/// but during shutdown no frame runs so we must flush manually.
+	/// Normally processed at the frame's end, but during shutdown no frame runs so we must flush manually.
 	/// </summary>
 	internal static void FlushQueuedDeletes()
 	{
+		RunEndOfFrameDeletes();
 		CSceneSystem.PerformEndOfFrameDeletes();
 	}
 

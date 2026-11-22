@@ -127,8 +127,13 @@ public partial class SceneObject : IHandle
 			World?.Render?.Deleted( this );
 			CSceneSystem.DeleteSceneObjectAtFrameEnd( this );
 			native = IntPtr.Zero; // avoid double delete etc
+
+			// Gone from its world when the world's deletes run (SceneWorld.DeletePendingObjects, or the frame's end)
+			World?.QueueDelete( this );
 		}
 	}
+
+	bool _destroyed;
 
 	internal virtual void OnNativeInit( CSceneObject ptr )
 	{
@@ -150,14 +155,27 @@ public partial class SceneObject : IHandle
 
 	internal virtual void OnNativeDestroy()
 	{
+		native = IntPtr.Zero;
+
+		// Native deleting an object managed code didn't (its world went, or native code deleted an object it made)
+		Destroyed();
+	}
+
+	/// <summary>
+	/// Out of its world and its renderer, once: when its world's queued deletes run after <see cref="Delete"/>, or when native
+	/// destroys it first.
+	/// </summary>
+	internal virtual void Destroyed()
+	{
+		if ( _destroyed ) return;
+		_destroyed = true;
+
 		World.Render?.Destroyed( this );
 
 		lock ( World.InternalSceneObjects )
 		{
 			World.InternalSceneObjects.Remove( this );
 		}
-
-		native = IntPtr.Zero;
 
 		if ( _attributes != null )
 		{
