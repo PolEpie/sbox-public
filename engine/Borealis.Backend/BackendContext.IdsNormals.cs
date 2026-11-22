@@ -35,7 +35,7 @@ internal sealed partial class BackendContext
 
 	// The ids alive too: a child view drawn inside another's frame (water's refraction) was seen with its ids target gone
 	// after its clear (idsfx note), which the resolve then leaves to depth
-	bool IdsNormalsReady( BackendDevice.VisibilityView visibility ) => visibility.ClearedFrame == device.GpuDrivenFrame && visibility.Ids.IsValid && visibility.IdsCalls.IsValid && Gpu.IsAlive( visibility.Ids ) && Gpu.IsAlive( visibility.IdsCalls );
+	bool IdsNormalsReady( BackendDevice.VisibilityView visibility ) => visibility.ClearedFrame == device.GpuDrivenFrame && visibility.IdsReady && visibility.IdsCalls.IsValid && Gpu.IsAlive( visibility.Ids ) && Gpu.IsAlive( visibility.IdsCalls );
 
 	/// <summary>
 	/// Sample 0's place in its pixel, as Vulkan's standard sample locations put it for <paramref name="samples"/>: the ids and
