@@ -272,6 +272,22 @@ internal sealed partial class BorealisGpuRenderBackend
 	// leaves alone until it joins
 	void StartAhead()
 	{
+		var cpuAtStart = ThreadCpuTime.NowMs();
+		try
+		{
+			StartAheadTimed();
+		}
+		finally
+		{
+			// Its CPU time, besides the wall time it took (which includes the waits for the GPU and the swap chain)
+			RenderThreadCpuTiming.AddMillisecondsFromAnyThread( ThreadCpuTime.NowMs() - cpuAtStart );
+		}
+	}
+
+	static readonly Sandbox.Diagnostics.PerformanceStats.Timings RenderThreadCpuTiming = Sandbox.Diagnostics.PerformanceStats.Timings.Get( "Borealis render thread CPU" );
+
+	void StartAheadTimed()
+	{
 		if ( renderDraw is { } draw )
 		{
 			renderDraw = null;

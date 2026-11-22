@@ -141,19 +141,49 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 		return new BorealisGpuRenderBackend( gpu, ownsDevice: true ) { followsFrames = frames };
 	}
 
-	/// <summary>The device's own zones (pipeline and shader module creation) in the engine's profiler, while it records.</summary>
+	/// <summary>
+	/// The device's own zones (pipeline and shader module creation) in the engine's profiler, while it records. On the render
+	/// thread they're timed too: it should never make a pipeline or a shader module (they're made on workers and at loads),
+	/// so each one it makes is counted (<see cref="RenderThreadCompiles"/>) and one over 20 ms is logged.
+	/// </summary>
 	sealed class TraceZones : IDeviceProfiler
 	{
+		// The render thread's open zones: when each began, or 0 for a zone that isn't a compile
+		[ThreadStatic] static long[] started;
+		[ThreadStatic] static int depth;
+
 		public unsafe void BeginZone( nint name, uint color )
 		{
 			if ( NativeEngine.PerformanceTrace.__N.PerformanceTrace_BeginEvent != null ) NativeEngine.PerformanceTrace.BeginEvent( name, null, color, null, 0, null );
+			if ( !ThreadSafe.IsRenderThread ) return;
+
+			started ??= new long[16];
+			var compile = name == Borealis.Gpu.Device.PipelineZoneName || name == Borealis.Gpu.Device.ShaderModuleZoneName;
+			if ( depth < started.Length ) started[depth] = compile ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+			depth++;
 		}
 
 		public unsafe void EndZone()
 		{
 			if ( NativeEngine.PerformanceTrace.__N.PerformanceTrace_BeginEvent != null ) NativeEngine.PerformanceTrace.EndEvent();
+			if ( !ThreadSafe.IsRenderThread || depth == 0 ) return;
+
+			depth--;
+			if ( depth >= started.Length || started[depth] == 0 ) return;
+			var ms = System.Diagnostics.Stopwatch.GetElapsedTime( started[depth] ).TotalMilliseconds;
+			System.Threading.Interlocked.Increment( ref renderThreadCompiles );
+			RenderThreadCompileTiming.AddMillisecondsFromAnyThread( ms );
+			if ( ms > SlowRenderThreadCompileMs ) Log.Warning( $"The render thread waited {ms:F1} ms making a pipeline or shader module, which it should never make: at {new System.Diagnostics.StackTrace( 2, false )}" );
 		}
 	}
+
+	static long renderThreadCompiles;
+
+	/// <summary>Pipelines and shader modules the render thread made (it should make none), for the tests and stats.</summary>
+	internal static long RenderThreadCompiles => System.Threading.Interlocked.Read( ref renderThreadCompiles );
+
+	const double SlowRenderThreadCompileMs = 20;
+	static readonly Sandbox.Diagnostics.PerformanceStats.Timings RenderThreadCompileTiming = Sandbox.Diagnostics.PerformanceStats.Timings.Get( "Borealis render thread compiles" );
 
 	/// <summary>The longest a scene's load waits for models in <see cref="WaitForContent"/>, so one that keeps asking still loads.</summary>
 	internal static double ContentWaitSeconds { get; set; } = 8;
