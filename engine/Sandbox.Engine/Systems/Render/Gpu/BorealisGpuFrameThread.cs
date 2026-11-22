@@ -20,12 +20,19 @@ internal sealed class BorealisGpuFrameThread : IDisposable
 	internal static readonly bool Enabled = !CommandLine.HasSwitch( "-norenderthread" ) && !CommandLine.HasSwitch( "-serialrecording" )
 		&& System.Environment.GetEnvironmentVariable( "BOREALIS_RENDERTHREAD" ) != "0";
 
+	/// <summary>
+	/// Whether the thread also draws the game window's frames (the render thread, docs/reference/borealis-render-thread.md):
+	/// with <c>-renderthread</c> or <c>BOREALIS_RENDERTHREAD=draw</c>, and the frame thread on. Off by default: it loses the
+	/// device in the game window (the report of the card that made it says what's known).
+	/// </summary>
+	internal static readonly bool Draws = Enabled && (CommandLine.HasSwitch( "-renderthread" ) || System.Environment.GetEnvironmentVariable( "BOREALIS_RENDERTHREAD" ) == "draw");
+
 	/// <summary>The longest <see cref="Dispose"/> waits for the thread; one still busy is left to the process's exit.</summary>
 	internal static readonly TimeSpan StopTimeout = TimeSpan.FromSeconds( 2 );
 
 	readonly Action work;
 	readonly Thread thread;
-	readonly bool timed;
+	readonly bool timed, markRenderThread;
 
 	// Kept events: waiting on them allocates nothing once each has blocked once
 	readonly ManualResetEventSlim go = new( false, 64 );
@@ -52,10 +59,11 @@ internal sealed class BorealisGpuFrameThread : IDisposable
 	/// A thread that runs <paramref name="work"/> each time it's handed a frame; <paramref name="timed"/> times it and the
 	/// joins that wait in the engine's timings (which need the engine's native side).
 	/// </summary>
-	public BorealisGpuFrameThread( Action work, string name = "Borealis.Gpu frame", bool timed = true )
+	public BorealisGpuFrameThread( Action work, string name = "Borealis.Gpu frame", bool timed = true, bool renderThread = false )
 	{
 		this.work = work;
 		this.timed = timed;
+		markRenderThread = renderThread;
 		thread = new Thread( Loop ) { IsBackground = true, Name = name, Priority = ThreadPriority.AboveNormal };
 		thread.Start();
 	}
@@ -81,7 +89,20 @@ internal sealed class BorealisGpuFrameThread : IDisposable
 		if ( !done.IsSet )
 		{
 			JoinsWaited++;
-			using ( timed ? JoinTiming.Scope() : default ) done.Wait();
+			using ( timed ? JoinTiming.Scope() : default )
+			{
+				if ( !done.Wait( LongJoin ) )
+				{
+					// Never expected: said once with where each thread is, then the join waits on
+					if ( !warnedLongJoin )
+					{
+						warnedLongJoin = true;
+						Log.Warning( $"The main thread has waited {LongJoin.TotalSeconds:F0} s for the {thread.Name} thread, which is at '{Doing}'; the main thread at {new System.Diagnostics.StackTrace( 1, false )}" );
+					}
+
+					done.Wait();
+				}
+			}
 		}
 
 		if ( error is { } e )
@@ -91,8 +112,17 @@ internal sealed class BorealisGpuFrameThread : IDisposable
 		}
 	}
 
+	static readonly TimeSpan LongJoin = TimeSpan.FromSeconds( 5 );
+	bool warnedLongJoin;
+
+	/// <summary>What the thread's work says it's doing (a step's static name), for a join that waits too long.</summary>
+	internal static string Doing { get; set; } = "idle";
+
 	void Loop()
 	{
+		// It draws the frames handed over with the main thread's rendering code (BorealisGpuRenderBackend.HandOverRenderFrame)
+		if ( markRenderThread ) ThreadSafe.MarkRenderThread();
+
 		while ( true )
 		{
 			go.Wait();
@@ -102,6 +132,7 @@ internal sealed class BorealisGpuFrameThread : IDisposable
 			try
 			{
 				using ( timed ? AheadTiming.Scope() : default ) work();
+				Doing = "idle";
 			}
 			catch ( Exception e )
 			{

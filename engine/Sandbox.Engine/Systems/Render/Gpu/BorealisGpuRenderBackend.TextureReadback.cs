@@ -23,6 +23,7 @@ internal sealed partial class BorealisGpuRenderBackend
 	/// </summary>
 	public override unsafe bool ReadPixels( Texture texture, NativeRect source, int slice, int mip, NativeRect destination, IntPtr data, ImageFormat format, int stride )
 	{
+		FromMain();
 		if ( list is not null ) return false;
 		if ( source.w != destination.w || source.h != destination.h || source.w <= 0 || source.h <= 0 ) return false;
 
