@@ -15,7 +15,8 @@ public sealed class ScenePointLight : SceneLight
 
 		using ( var h = IHandle.MakeNextHandle( this ) )
 		{
-			CSceneSystem.CreatePointLight( sceneWorld );
+			if ( MakesNativeTwin ) CSceneSystem.CreatePointLight( sceneWorld );
+			else MakeLightWithoutTwin( sceneWorld, NewDescription( TypePoint ) );
 		}
 
 		Position = position;

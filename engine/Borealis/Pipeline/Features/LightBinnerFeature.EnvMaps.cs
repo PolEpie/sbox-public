@@ -110,12 +110,15 @@ internal sealed partial class LightBinnerFeature
 	/// </summary>
 	internal static GpuEnvMap Pack( EnvMapObject envMap )
 	{
-		// Match native InverseTR: diag(scale) * R^T * (x - t), not inverse scale.
-		// Map probes can use scale -1, reversing box projection.
+		// Match native InverseTR (MatrixInvert): diag(scale) * R^T * (x - t), divided by the first axis's squared scale unless
+		// that is 1 - the inverse for a uniform scale. Map probes can use scale -1, reversing box projection.
 		var transform = envMap.Transform;
+		var scale = transform.Scale;
+		var scaleSquared = scale.x * scale.x;
+		if ( MathF.Abs( scaleSquared - 1.0f ) >= 1e-3f && scaleSquared != 0.0f ) scale /= scaleSquared;
 		var worldToLocal = Matrix.CreateTranslation( -transform.Position )
 			* Matrix.CreateRotation( transform.Rotation ).Transpose()
-			* Matrix.CreateScale( transform.Scale );
+			* Matrix.CreateScale( scale );
 
 		var bounds = envMap.ProjectionBounds;
 		var tint = envMap.Tint;

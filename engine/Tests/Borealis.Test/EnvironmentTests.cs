@@ -44,13 +44,14 @@ public class EnvironmentTests
 
 		var packed = LightBinnerFeature.Pack( probe );
 
-		// Yawed 90 degrees, the probe's forward is world +y, and its scale of 5 multiplies
+		// Yawed 90 degrees, the probe's forward is world +y, and its scale of 5 divides (native's MatrixInvert: the inverse
+		// for a uniform scale)
 		var local = ToLocal( packed, new Vector3( 100, 50, 0 ) );
-		Assert.AreEqual( 250, local.x, 1e-3, "along its forward" );
+		Assert.AreEqual( 10, local.x, 1e-3, "along its forward" );
 		Assert.AreEqual( 0, local.y, 1e-3 );
 		Assert.AreEqual( 0, local.z, 1e-3 );
 		Assert.AreEqual( 0, ToLocal( packed, new Vector3( 100, 0, 0 ) ).Length, 1e-3, "its position is its origin" );
-		Assert.AreEqual( 50, ToLocal( packed, new Vector3( 100, 10, 0 ) ).Length, 1e-3, "and its scale multiplies" );
+		Assert.AreEqual( 2, ToLocal( packed, new Vector3( 100, 10, 0 ) ).Length, 1e-3, "and its scale divides" );
 
 		// A map's probes have a scale of -1, which turns their local space inside out, as native's does
 		var mapProbe = new EnvMapObject( null, bounds, new Transform( new Vector3( 100, 0, 0 ), Rotation.Identity, -1 ) );
