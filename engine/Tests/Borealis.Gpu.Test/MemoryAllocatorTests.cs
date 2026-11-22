@@ -44,6 +44,36 @@ public class MemoryAllocatorTests : GpuTest
 	}
 
 	/// <summary>
+	/// Threads that find no room in a kind's blocks at the same moment make one new block between them, not one each: sixteen
+	/// recording threads once made sixteen 16 MiB blocks at once after a map loaded, 70-170 ms each in the driver.
+	/// </summary>
+	[TestMethod]
+	public void ThreadsShortOfRoomMakeOneBlockBetweenThem()
+	{
+		using var allocator = new MemoryAllocator( Device.Vk, Device.Allocator.MemoryProperties, false ) { QuietSeconds = 0, GrowBlocks = false, MakeBlocksAhead = false };
+		var requirements = new VkMemoryRequirements { size = allocator.BlockSize / 8, alignment = 256, memoryTypeBits = ~0u };
+		const int threads = 16;
+		var allocations = new Allocation[threads];
+		using var start = new System.Threading.Barrier( threads );
+		var workers = new System.Threading.Thread[threads];
+		for ( int i = 0; i < threads; i++ )
+		{
+			var index = i;
+			workers[i] = new System.Threading.Thread( () =>
+			{
+				start.SignalAndWait();
+				allocations[index] = allocator.Allocate( requirements, MemoryLocation.Upload, image: false );
+			} );
+			workers[i].Start();
+		}
+
+		foreach ( var worker in workers ) worker.Join();
+		Assert.AreEqual( 2, allocator.DriverAllocations, "sixteen eighths of a block take two blocks" );
+		Assert.AreEqual( 2 * allocator.BlockSize, allocator.Reserved );
+		foreach ( var allocation in allocations ) allocator.Free( allocation );
+	}
+
+	/// <summary>
 	/// Images over a quarter of a small block share large blocks, made only when one is needed, and only the biggest get
 	/// their own; and once the last empty block of a kind is taken, another is made ahead on a worker, so the next allocation
 	/// that needs one doesn't wait for the driver (a map's first seconds waited ~0.5 s on the main thread).

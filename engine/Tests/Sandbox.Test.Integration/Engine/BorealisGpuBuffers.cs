@@ -100,4 +100,35 @@ public class BorealisGpuBuffersTest
 			RenderBackend.SetDefault( previous );
 		}
 	}
+
+	/// <summary>
+	/// A synchronous read waits for the GPU (and with a render thread, for it): each is counted at the sync point's counter
+	/// (<see cref="Sandbox.Rendering.RenderSync.Readbacks"/>, <c>r_sync_readbacks</c>), and still reads what was written.
+	/// </summary>
+	[TestMethod]
+	public void SynchronousReadsAreCounted()
+	{
+		TestGraphics.Require();
+		using var borealis = BorealisGpuRenderBackend.Create( validation: true );
+
+		var previous = RenderBackend.Default;
+		RenderBackend.SetDefault( borealis );
+		try
+		{
+			using var buffer = new GpuBuffer<uint>( 16 );
+			buffer.SetData( new uint[] { 7, 8, 9 }, 0 );
+
+			var before = Sandbox.Rendering.RenderSync.Readbacks;
+			var read = new uint[3];
+			for ( int i = 0; i < 3; i++ ) buffer.GetData( read, 0, 3 );
+
+			CollectionAssert.AreEqual( new uint[] { 7, 8, 9 }, read );
+			Assert.AreEqual( before + 3, Sandbox.Rendering.RenderSync.Readbacks, "each read counted" );
+			Assert.AreEqual( 0, borealis.ValidationErrors );
+		}
+		finally
+		{
+			RenderBackend.SetDefault( previous );
+		}
+	}
 }

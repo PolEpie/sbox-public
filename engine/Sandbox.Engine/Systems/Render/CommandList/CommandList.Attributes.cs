@@ -178,6 +178,22 @@ public sealed partial class CommandList
 			list.AddEntry( &Execute, new Entry { Token = token, Object2 = texture, Object4 = this, Data1 = new Vector4( mip, 0, 0, 0 ) } );
 		}
 
+		/// <summary>
+		/// Set a texture's bindless index to this int attribute, looked up as the list plays back, where the renderer draws,
+		/// and tell texture streaming the texture is used then (<see cref="Texture.MarkUsed"/> with <paramref name="requiredMipSize"/>).
+		/// </summary>
+		internal void SetIndex( StringToken token, Texture texture, int requiredMipSize = 0 )
+		{
+			static void Execute( ref Entry entry, CommandList commandList )
+			{
+				var texture = (Texture)entry.Object2;
+				texture.MarkUsed( (int)entry.Data1.x );
+				var attrAccess = (AttributeAccess)entry.Object4;
+				attrAccess.attributes.Set( entry.Token, texture.Index );
+			}
+			list.AddEntry( &Execute, new Entry { Token = token, Object2 = texture, Object4 = this, Data1 = new Vector4( requiredMipSize, 0, 0, 0 ) } );
+		}
+
 		public void Set( StringToken token, SamplerState samplerState )
 		{
 			static void Execute( ref Entry entry, CommandList commandList )
@@ -419,8 +435,8 @@ public sealed partial class CommandList
 
 			lock ( list._lock )
 			{
-				entry = list._entries.Count;
 				list.AddEntry( &Execute, new Entry { Object5 = token, Object2 = this, Data1 = new Vector4( (int)downsampleMethod, maxMips, 0, 0 ) } );
+				entry = list._recorded.Entries.Count - 1;
 			}
 
 			return new RenderTargetHandle { Name = token };
@@ -434,7 +450,8 @@ public sealed partial class CommandList
 		{
 			lock ( list._lock )
 			{
-				ref var grab = ref CollectionsMarshal.AsSpan( list._entries )[entry];
+				list.Writing();
+				ref var grab = ref CollectionsMarshal.AsSpan( list._recorded.Entries )[entry];
 				grab.Data1.y = Math.Max( grab.Data1.y, mips );
 			}
 		}
@@ -462,6 +479,10 @@ public sealed partial class CommandList
 		/// </summary>
 		public RenderTarget GetRenderTarget( string name )
 		{
+			// The render thread's replay writes and reads these without the lock: the main thread may hold it while it waits
+			// for the render thread, and leaves them to the replay meanwhile (ClearRenderTargets)
+			if ( ThreadSafe.IsRenderThread ) return _renderTargets.TryGetValue( name, out var played ) ? played : null;
+
 			// Serialize against execute-thread writes / Reset clears, which hold the CommandList's _lock.
 			lock ( list._lock )
 			{
@@ -473,7 +494,9 @@ public sealed partial class CommandList
 
 		internal void ClearRenderTargets()
 		{
-			// Caller (Reset) already holds the CommandList's _lock.
+			// Caller (Reset) already holds the CommandList's _lock. While a frame handed over may replay the list on the render
+			// thread, the grabs it records are its own: the next replay's grabs replace them
+			if ( RenderSync.Overlapping ) return;
 			_renderTargets.Clear();
 		}
 	}

@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Threading;
 
 namespace Sandbox;
 
@@ -93,43 +94,155 @@ internal sealed class ManagedRenderAttributes
 		public int Stamp;
 	}
 
-	readonly Dictionary<uint, Entry<object>> values = new();
-	readonly Dictionary<uint, Entry<int>> combos = new();
+	/// <summary>The values and combos, and what reuses their arrays.</summary>
+	sealed class Store
+	{
+		public readonly Dictionary<uint, Entry<object>> Values = new();
+		public readonly Dictionary<uint, Entry<int>> Combos = new();
 
-	// Arrays that cleared or replaced values left, by token, reused when the token is set again. Not texture boxes: they're
-	// shared per texture (WholeTextures, MipValue), and one kept here would hold its texture past the set's clear
-	readonly Dictionary<uint, object> spare = new();
+		// Arrays that cleared or replaced values left, by token, reused when the token is set again. Not texture boxes: they're
+		// shared per texture (WholeTextures, MipValue), and one kept here would hold its texture past the set's clear
+		public readonly Dictionary<uint, object> Spare = new();
 
-	// Constant buffer bytes set without a copy (SetShared): the caller's, never written or reused here
-	readonly HashSet<uint> borrowed = new();
+		// Constant buffer bytes set without a copy (SetShared): the caller's, never written or reused here
+		public readonly HashSet<uint> Borrowed = new();
+
+		public int Version, RemovedAt;
+
+		/// <summary>
+		/// Become a copy of <paramref name="other"/>: its numbers and copied bytes into arrays of this store's own (reused by token,
+		/// so a set copied every frame allocates nothing once warm), what's shared (boxes, buffers, borrowed bytes) as it is.
+		/// </summary>
+		public void CopyFrom( Store other )
+		{
+			foreach ( var (k, entry) in Values ) Keep( k, entry.Value );
+			Values.Clear();
+			Borrowed.Clear();
+			foreach ( var (k, entry) in other.Values )
+			{
+				var value = entry.Value switch
+				{
+					float[] floats => Copy( k, floats ),
+					byte[] bytes when !other.Borrowed.Contains( k ) => Copy( k, bytes ),
+					var shared => shared,
+				};
+
+				if ( value is byte[] && other.Borrowed.Contains( k ) ) Borrowed.Add( k );
+				Values[k] = new Entry<object> { Value = value, Stamp = entry.Stamp };
+			}
+
+			Combos.Clear();
+			foreach ( var (k, entry) in other.Combos ) Combos[k] = entry;
+			Version = other.Version;
+			RemovedAt = other.RemovedAt;
+		}
+
+		public T[] Copy<T>( uint k, T[] source )
+		{
+			var array = Array<T>( k, source.Length );
+			source.AsSpan().CopyTo( array );
+			return array;
+		}
+
+		// An array of this length for k's value that only this store holds: its value's, else one a cleared value left, else new
+		public T[] Array<T>( uint k, int length )
+		{
+			if ( Values.TryGetValue( k, out var current ) && current.Value is T[] array && array.Length == length && Owns( k, array ) ) return array;
+			if ( Spare.Remove( k, out var old ) && old is T[] kept && kept.Length == length ) return kept;
+			return length == 0 ? [] : new T[length];
+		}
+
+		public void Put( uint k, object value, int stamp )
+		{
+			ref var entry = ref CollectionsMarshal.GetValueRefOrAddDefault( Values, k, out var existed );
+			if ( existed && !ReferenceEquals( entry.Value, value ) ) Keep( k, entry.Value );
+			entry.Value = value;
+			entry.Stamp = stamp;
+		}
+
+		// An array this store made (numbers', copied bytes') waits to be reused for its token
+		public void Keep( uint k, object old )
+		{
+			if ( old is float[] || (old is byte[] && !Borrowed.Contains( k )) ) Spare[k] = old;
+		}
+
+		bool Owns( uint k, object value ) => value is not byte[] || !Borrowed.Contains( k );
+
+		public void Own( uint k )
+		{
+			if ( Borrowed.Count > 0 ) Borrowed.Remove( k );
+		}
+	}
+
+	// What the main thread writes, and what the render thread's frame reads while the main thread writes the next one's (Writing)
+	Store current = new(), held;
+	long splitEpoch = -1;
+
+	/// <summary>
+	/// The store a read on this thread reads: on the render thread, the set as its frame was handed over (the held copy once the
+	/// main thread has written since: <see cref="Writing"/>); anywhere else, what's written now.
+	/// </summary>
+	Store Reading
+	{
+		get
+		{
+			var now = Volatile.Read( ref current );
+			if ( !ThreadSafe.IsRenderThread ) return now;
+			return Volatile.Read( ref splitEpoch ) == Rendering.RenderSync.Epoch ? held : now;
+		}
+	}
+
+	/// <summary>
+	/// The store a write goes into. While a frame handed over may be drawing on the render thread (<see cref="Rendering.RenderSync.Overlapping"/>),
+	/// the main thread's first write since the hand-over leaves the store as it was for that frame and goes on in a copy, so the
+	/// frame reads every value as it was handed over, as it reads them on the main thread before the next update writes them. A
+	/// set nobody writes isn't copied, nor anything in serial mode or on the render thread.
+	/// </summary>
+	Store Writing()
+	{
+		if ( !Rendering.RenderSync.Overlapping || ThreadSafe.IsRenderThread ) return current;
+		var epoch = Rendering.RenderSync.Epoch;
+		if ( splitEpoch == epoch ) return current;
+
+		// The other store isn't read in this frame: the render thread reads the one current until the split, and held after
+		var old = current;
+		var fresh = held ?? new Store();
+		fresh.CopyFrom( old );
+		held = old;
+		Volatile.Write( ref splitEpoch, epoch );
+		Volatile.Write( ref current, fresh );
+		Rendering.RenderSync.CountAttributeSplit();
+		return fresh;
+	}
 
 	/// <summary>Every value by token: <c>float[]</c>, <see cref="TextureValue"/>, <see cref="GpuBuffer"/>, <c>SamplerState</c>, <c>byte[]</c> or a string.</summary>
-	public Entries<object> Values => new( values, int.MinValue );
+	public Entries<object> Values => new( Reading.Values, int.MinValue );
 
 	/// <summary>Every combo by token.</summary>
-	public Entries<int> Combos => new( combos, int.MinValue );
+	public Entries<int> Combos => new( Reading.Combos, int.MinValue );
 
 	/// <summary>The values set after <see cref="Version"/> was <paramref name="version"/>.</summary>
-	public Entries<object> ValuesSince( int version ) => new( values, version );
+	public Entries<object> ValuesSince( int version ) => new( Reading.Values, version );
 
 	/// <summary>The combos set after <see cref="Version"/> was <paramref name="version"/>.</summary>
-	public Entries<int> CombosSince( int version ) => new( combos, version );
+	public Entries<int> CombosSince( int version ) => new( Reading.Combos, version );
 
 	/// <summary>Changes whenever a value or combo is set or cleared, for a reader that converts them only when they change.</summary>
-	public int Version { get; private set; }
+	public int Version => Reading.Version;
 
 	/// <summary>
 	/// The <see cref="Version"/> at which a value or combo last went (a clear, a null object): a reader that copies only what
 	/// changed (<see cref="ValuesSince"/>) copies everything again when this is past its version.
 	/// </summary>
-	public int RemovedAt { get; private set; }
+	public int RemovedAt => Reading.RemovedAt;
 
 	public void Set( StringToken k, params ReadOnlySpan<float> value )
 	{
-		var array = Array<float>( k.Value, value.Length );
+		var store = Writing();
+		var array = store.Array<float>( k.Value, value.Length );
 		value.CopyTo( array );
-		Put( k.Value, array, ++Version );
-		Own( k.Value );
+		store.Put( k.Value, array, ++store.Version );
+		store.Own( k.Value );
 	}
 
 	public void Set( StringToken k, in Matrix value ) => Set( k, MemoryMarshal.Cast<Matrix, float>( new ReadOnlySpan<Matrix>( in value ) ) );
@@ -137,17 +250,19 @@ internal sealed class ManagedRenderAttributes
 	/// <summary>A constant buffer's bytes, copied.</summary>
 	public void SetBytes( StringToken k, ReadOnlySpan<byte> data )
 	{
-		var array = Array<byte>( k.Value, data.Length );
+		var store = Writing();
+		var array = store.Array<byte>( k.Value, data.Length );
 		data.CopyTo( array );
-		Put( k.Value, array, ++Version );
-		Own( k.Value );
+		store.Put( k.Value, array, ++store.Version );
+		store.Own( k.Value );
 	}
 
 	/// <summary>A constant buffer's bytes without a copy: the caller keeps them unchanged while the set is drawn with.</summary>
 	public void SetShared( StringToken k, byte[] data )
 	{
-		Put( k.Value, data, ++Version );
-		borrowed.Add( k.Value );
+		var store = Writing();
+		store.Put( k.Value, data, ++store.Version );
+		store.Borrowed.Add( k.Value );
 	}
 
 	/// <summary>A texture and mip; null clears it. The same texture and mip as before keeps the value boxed then.</summary>
@@ -159,14 +274,15 @@ internal sealed class ManagedRenderAttributes
 			return;
 		}
 
+		var store = Writing();
 		var value = new TextureValue( texture, mip );
 		object boxed;
-		if ( values.TryGetValue( k.Value, out var current ) && current.Value is TextureValue now && now == value ) boxed = current.Value;
+		if ( store.Values.TryGetValue( k.Value, out var current ) && current.Value is TextureValue now && now == value ) boxed = current.Value;
 		else if ( mip < 0 ) boxed = WholeTextures.GetValue( texture, static t => new TextureValue( t, -1 ) );
 		else boxed = MipValue( texture, mip );
 
-		Put( k.Value, boxed, ++Version );
-		Own( k.Value );
+		store.Put( k.Value, boxed, ++store.Version );
+		store.Own( k.Value );
 	}
 
 	// Each texture's whole-texture value boxed once and shared by every set (boxes aren't changed), so a set that is new or was
@@ -186,26 +302,34 @@ internal sealed class ManagedRenderAttributes
 
 	public void SetObject( StringToken k, object value )
 	{
+		var store = Writing();
 		if ( value is null )
 		{
-			if ( values.Remove( k.Value, out var old ) ) Keep( k.Value, old.Value );
-			Own( k.Value );
-			RemovedAt = ++Version;
+			if ( store.Values.Remove( k.Value, out var old ) ) store.Keep( k.Value, old.Value );
+			store.Own( k.Value );
+			store.RemovedAt = ++store.Version;
 			return;
 		}
 
-		Put( k.Value, value, ++Version );
+		store.Put( k.Value, value, ++store.Version );
 
 		// Bytes from outside stay the caller's
-		if ( value is byte[] ) borrowed.Add( k.Value );
-		else Own( k.Value );
+		if ( value is byte[] ) store.Borrowed.Add( k.Value );
+		else store.Own( k.Value );
 	}
 
 	/// <summary>Whether nothing is set.</summary>
-	public bool IsEmpty => values.Count == 0 && combos.Count == 0;
+	public bool IsEmpty
+	{
+		get
+		{
+			var store = Reading;
+			return store.Values.Count == 0 && store.Combos.Count == 0;
+		}
+	}
 
 	/// <summary>How many values are set.</summary>
-	public int ValueCount => values.Count;
+	public int ValueCount => Reading.Values.Count;
 
 	/// <summary>
 	/// Whether <paramref name="other"/> holds the same values and combos, as <c>CRenderAttributes::AreEqual</c> compares two
@@ -214,17 +338,20 @@ internal sealed class ManagedRenderAttributes
 	public bool SameValues( ManagedRenderAttributes other )
 	{
 		if ( ReferenceEquals( this, other ) ) return true;
-		if ( other is null || values.Count != other.values.Count || combos.Count != other.combos.Count ) return false;
+		if ( other is null ) return false;
+		var mine = Reading;
+		var theirs = other.Reading;
+		if ( mine.Values.Count != theirs.Values.Count || mine.Combos.Count != theirs.Combos.Count ) return false;
 
-		foreach ( var (k, entry) in combos )
+		foreach ( var (k, entry) in mine.Combos )
 		{
-			if ( !other.combos.TryGetValue( k, out var theirs ) || theirs.Value != entry.Value ) return false;
+			if ( !theirs.Combos.TryGetValue( k, out var their ) || their.Value != entry.Value ) return false;
 		}
 
-		foreach ( var (k, entry) in values )
+		foreach ( var (k, entry) in mine.Values )
 		{
-			if ( !other.values.TryGetValue( k, out var theirs ) ) return false;
-			var same = (entry.Value, theirs.Value) switch
+			if ( !theirs.Values.TryGetValue( k, out var their ) ) return false;
+			var same = (entry.Value, their.Value) switch
 			{
 				(float[] a, float[] b ) => a.AsSpan().SequenceEqual( b ),
 				(byte[] a, byte[] b ) => a.AsSpan().SequenceEqual( b ),
@@ -238,21 +365,23 @@ internal sealed class ManagedRenderAttributes
 
 	public void SetCombo( StringToken k, int value )
 	{
-		combos[k.Value] = new Entry<int> { Value = value, Stamp = ++Version };
+		var store = Writing();
+		store.Combos[k.Value] = new Entry<int> { Value = value, Stamp = ++store.Version };
 	}
 
-	public object Get( StringToken k ) => values.TryGetValue( k.Value, out var entry ) ? entry.Value : null;
-	public int? GetCombo( StringToken k ) => combos.TryGetValue( k.Value, out var entry ) ? entry.Value : null;
+	public object Get( StringToken k ) => Reading.Values.TryGetValue( k.Value, out var entry ) ? entry.Value : null;
+	public int? GetCombo( StringToken k ) => Reading.Combos.TryGetValue( k.Value, out var entry ) ? entry.Value : null;
 
 	public float[] GetFloats( StringToken k ) => Get( k ) as float[];
 
 	public void Clear()
 	{
-		foreach ( var (k, entry) in values ) Keep( k, entry.Value );
-		values.Clear();
-		combos.Clear();
-		borrowed.Clear();
-		RemovedAt = ++Version;
+		var store = Writing();
+		foreach ( var (k, entry) in store.Values ) store.Keep( k, entry.Value );
+		store.Values.Clear();
+		store.Combos.Clear();
+		store.Borrowed.Clear();
+		store.RemovedAt = ++store.Version;
 	}
 
 	/// <summary>Copy every value and combo into <paramref name="other"/>, replacing those of the same token.</summary>
@@ -260,68 +389,34 @@ internal sealed class ManagedRenderAttributes
 	{
 		if ( ReferenceEquals( other, this ) ) return;
 
-		var stamp = ++other.Version;
-		foreach ( var (k, entry) in values )
+		var from = Reading;
+		var to = other.Writing();
+		var stamp = ++to.Version;
+		foreach ( var (k, entry) in from.Values )
 		{
 			// Arrays go into the other set's own, so setting them again here doesn't change them there
 			switch ( entry.Value )
 			{
 				case float[] floats:
-					other.Put( k, other.Copy( k, floats ), stamp );
-					other.Own( k );
+					to.Put( k, to.Copy( k, floats ), stamp );
+					to.Own( k );
 					break;
-				case byte[] bytes when borrowed.Contains( k ):
-					other.Put( k, bytes, stamp );
-					other.borrowed.Add( k );
+				case byte[] bytes when from.Borrowed.Contains( k ):
+					to.Put( k, bytes, stamp );
+					to.Borrowed.Add( k );
 					break;
 				case byte[] bytes:
-					other.Put( k, other.Copy( k, bytes ), stamp );
-					other.Own( k );
+					to.Put( k, to.Copy( k, bytes ), stamp );
+					to.Own( k );
 					break;
 				default:
-					other.Put( k, entry.Value, stamp );
-					other.Own( k );
+					to.Put( k, entry.Value, stamp );
+					to.Own( k );
 					break;
 			}
 		}
 
-		foreach ( var (k, entry) in combos ) other.combos[k] = new Entry<int> { Value = entry.Value, Stamp = stamp };
-	}
-
-	T[] Copy<T>( uint k, T[] source )
-	{
-		var array = Array<T>( k, source.Length );
-		source.AsSpan().CopyTo( array );
-		return array;
-	}
-
-	// An array of this length for k's value that only this set holds: its value's, else one a cleared value left, else new
-	T[] Array<T>( uint k, int length )
-	{
-		if ( values.TryGetValue( k, out var current ) && current.Value is T[] array && array.Length == length && Owns( k, array ) ) return array;
-		if ( spare.Remove( k, out var old ) && old is T[] kept && kept.Length == length ) return kept;
-		return length == 0 ? [] : new T[length];
-	}
-
-	void Put( uint k, object value, int stamp )
-	{
-		ref var entry = ref CollectionsMarshal.GetValueRefOrAddDefault( values, k, out var existed );
-		if ( existed && !ReferenceEquals( entry.Value, value ) ) Keep( k, entry.Value );
-		entry.Value = value;
-		entry.Stamp = stamp;
-	}
-
-	// An array this set made (numbers', copied bytes') waits to be reused for its token
-	void Keep( uint k, object old )
-	{
-		if ( old is float[] || (old is byte[] && !borrowed.Contains( k )) ) spare[k] = old;
-	}
-
-	bool Owns( uint k, object value ) => value is not byte[] || !borrowed.Contains( k );
-
-	void Own( uint k )
-	{
-		if ( borrowed.Count > 0 ) borrowed.Remove( k );
+		foreach ( var (k, entry) in from.Combos ) to.Combos[k] = new Entry<int> { Value = entry.Value, Stamp = stamp };
 	}
 
 	/// <summary>Values or combos by token, those set after a version, enumerated without allocating.</summary>

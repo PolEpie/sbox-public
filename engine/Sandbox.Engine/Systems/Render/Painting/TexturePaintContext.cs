@@ -74,7 +74,7 @@ internal sealed class TexturePaintContext : Painter.Context
 
 	void Submit()
 	{
-		using var scope = Graphics.Scope.CreateOn( _backend );
+		using var scope = _backend.BeginUpdateWork();
 		Graphics.RenderTarget = RenderTarget.From( _texture );
 		_texture.Flags |= TextureFlags.PremultipliedAlpha;
 		scope.Attributes.Set( "UIGammaOutput", true );
