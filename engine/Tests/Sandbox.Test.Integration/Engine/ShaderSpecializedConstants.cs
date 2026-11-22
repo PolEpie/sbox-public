@@ -199,7 +199,7 @@ public class ShaderSpecializedConstantsTest
 		var attributes = new RenderAttributes();
 		for ( int i = 0; i < Names.Length; i++ ) attributes.Set( Names[i], values[i] );
 
-		Vertex Corner( float x, float y ) => new( new Vector3( x, y, 0 ) );
+		static Vertex Corner( float x, float y ) => new( new Vector3( x, y, 0 ) );
 		Vertex[] quad = [Corner( -1, -1 ), Corner( 1, -1 ), Corner( 1, 1 ), Corner( -1, -1 ), Corner( 1, 1 ), Corner( -1, 1 )];
 
 		var world = new SceneWorld();
