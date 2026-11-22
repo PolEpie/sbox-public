@@ -418,7 +418,7 @@ internal sealed unsafe class MemoryAllocator : IDisposable
 		// Anything over a quarter of a large block gets its own allocation, and so does a target too big for a small block
 		if ( size > ownAbove )
 		{
-			var dedicated = NewBlock( type, size, image, content, refusable );
+			var dedicated = NewBlock( type, size, image, content, refusable, AllocationTrace.Dedicated );
 			dedicated.Dedicated = true;
 			dedicated.Fallback = fallback;
 			dedicated.TryAllocate( size, alignment, out var dedicatedOffset, out var dedicatedNode );
@@ -433,14 +433,52 @@ internal sealed unsafe class MemoryAllocator : IDisposable
 		}
 
 		var large = size > blockSize / 4;
+		var key = (type, image, large, content, fallback);
 		ulong freshSize;
 		lock ( allocationLock )
 		{
 			Allocations++;
-			if ( TryShared( type, image, large, content, fallback, size, alignment ) is { } shared ) return shared;
+			while ( true )
+			{
+				if ( TryShared( type, image, large, content, fallback, size, alignment ) is { } shared ) return shared;
+
+				// One new block of a kind at a time: a thread that finds no room while another thread is making one waits for it
+				// and tries again, rather than each making its own. Sixteen recording threads once made sixteen 16 MiB blocks in
+				// the same moment, 70-170 ms each in the driver, for room one block had. Never for a block queued ahead on a
+				// worker: the thread pool threads waiting for it kept that work item from ever running
+				if ( ExistingBlocksOnly || !OneNewBlock || !makingNow.Contains( key ) ) break;
+				System.Threading.Monitor.Wait( allocationLock, 50 );
+			}
+
 			freshSize = large ? LargeBlockSize : NextBlockSize( type, image, content, fallback, size + alignment );
+			if ( !ExistingBlocksOnly ) makingNow.Add( key );
 		}
 
+		try
+		{
+			return AllocateInNewBlock( size, alignment, image, type, content, refusable, fallback, large, freshSize );
+		}
+		finally
+		{
+			if ( !ExistingBlocksOnly )
+			{
+				lock ( allocationLock )
+				{
+					makingNow.Remove( key );
+					System.Threading.Monitor.PulseAll( allocationLock );
+				}
+			}
+		}
+	}
+
+	/// <summary>Whether one new shared block of a kind is made at a time (on); <c>BOREALIS_ONE_NEW_BLOCK=0</c> turns it off, for comparisons.</summary>
+	public static bool OneNewBlock { get; set; } = Environment.GetEnvironmentVariable( "BOREALIS_ONE_NEW_BLOCK" ) != "0";
+
+	// Kinds (type, images, large, content, fallback) a thread is making a shared block of now
+	readonly HashSet<(int Type, bool Images, bool Large, bool Content, bool Fallback)> makingNow = new();
+
+	Allocation AllocateInNewBlock( ulong size, ulong alignment, bool image, int type, bool content, bool refusable, bool fallback, bool large, ulong freshSize )
+	{
 		if ( ExistingBlocksOnly )
 		{
 			// A move out of a large block being drained may make one smaller block, when that was what made draining it worth it
@@ -454,7 +492,7 @@ internal sealed unsafe class MemoryAllocator : IDisposable
 
 		// A new block, made without the lock; another thread (or the one made ahead) may have added one meanwhile, which is
 		// tried first, and then this one stays as a spare
-		var fresh = NewBlock( type, freshSize, image, content, refusable );
+		var fresh = NewBlock( type, freshSize, image, content, refusable, large ? AllocationTrace.Large : (byte)0 );
 		fresh.Large = large;
 		fresh.Content = content;
 		fresh.Fallback = fallback;
@@ -485,7 +523,7 @@ internal sealed unsafe class MemoryAllocator : IDisposable
 			MemoryBlock block = null;
 			try
 			{
-				block = allocator.NewBlock( kind.TypeIndex, size, kind.Images, kind.Content, refusable: true );
+				block = allocator.NewBlock( kind.TypeIndex, size, kind.Images, kind.Content, refusable: true, (byte)(AllocationTrace.Ahead | (kind.Large ? AllocationTrace.Large : 0)) );
 				block.Large = kind.Large;
 				block.Content = kind.Content;
 				block.Fallback = kind.Fallback;
@@ -587,7 +625,7 @@ internal sealed unsafe class MemoryAllocator : IDisposable
 			}
 		}
 
-		var page = NewBlock( type, size, image: false, content, refusable );
+		var page = NewBlock( type, size, image: false, content, refusable, AllocationTrace.Dedicated );
 		page.Dedicated = true;
 		page.Reusable = true;
 		page.Fallback = fallback;
@@ -631,7 +669,7 @@ internal sealed unsafe class MemoryAllocator : IDisposable
 			MemoryBlock block = null;
 			try
 			{
-				block = allocator.NewBlock( type, size, image: false, content: false, refusable: true );
+				block = allocator.NewBlock( type, size, image: false, content: false, refusable: true, AllocationTrace.Dedicated | AllocationTrace.Ahead );
 				block.Dedicated = true;
 				block.Reusable = true;
 			}
@@ -1049,7 +1087,7 @@ internal sealed unsafe class MemoryAllocator : IDisposable
 	bool HasSpare( MemoryBlock empty ) => KindOf( empty ).Spares > (empty.Spare ? 1 : 0);
 
 	/// <summary>A block from the driver, not yet in <see cref="blocks"/> (<see cref="Add"/>): made without the lock.</summary>
-	MemoryBlock NewBlock( int type, ulong size, bool image, bool content, bool refusable )
+	MemoryBlock NewBlock( int type, ulong size, bool image, bool content, bool refusable, byte trace = 0 )
 	{
 		CheckBudget( type, size, content, refusable );
 		System.Threading.Interlocked.Increment( ref driverAllocations );
@@ -1071,6 +1109,7 @@ internal sealed unsafe class MemoryAllocator : IDisposable
 		while ( ticks > (longest = System.Threading.Interlocked.Read( ref longestDriverAllocation )) && System.Threading.Interlocked.CompareExchange( ref longestDriverAllocation, ticks, longest ) != longest ) { }
 
 		var block = new MemoryBlock( size ) { Memory = memory, TypeIndex = type, Images = image };
+		if ( AllocationTrace.Enabled ) AllocationTrace.Note( false, size, type, (byte)(trace | (image ? AllocationTrace.Image : 0) | (content ? AllocationTrace.Content : 0)), frame, start, ticks );
 
 		if ( (properties.Type( type ).propertyFlags & Vk.MemoryHostVisible) != 0 )
 		{
@@ -1153,6 +1192,7 @@ internal sealed unsafe class MemoryAllocator : IDisposable
 		// Freeing memory unmaps it
 		using ( Owner is { } watched ? watched.Enter( "vkFreeMemory" ) : default )
 			vk.vkFreeMemory( vk.Device, block.Memory, null );
+		if ( AllocationTrace.Enabled ) AllocationTrace.Note( true, block.Size, block.TypeIndex, (byte)((block.Images ? AllocationTrace.Image : 0) | (block.Content ? AllocationTrace.Content : 0) | (block.Large ? AllocationTrace.Large : 0) | (block.Dedicated ? AllocationTrace.Dedicated : 0)), frame, System.Diagnostics.Stopwatch.GetTimestamp(), 0 );
 		if ( !counted ) return;
 		Reserved -= block.Size;
 		heapReserved[properties.Type( block.TypeIndex ).heapIndex] -= (long)block.Size;
