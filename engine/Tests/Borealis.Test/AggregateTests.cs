@@ -2,6 +2,7 @@ using Borealis;
 using Borealis.Features;
 using System.Linq;
 using static BorealisTests.TestScenes;
+using GpuDrivenBatch = Borealis.Gpu.GpuContext.GpuDrivenBatch;
 
 namespace BorealisTests;
 
@@ -191,6 +192,52 @@ public class AggregateTests
 		{
 			device.ResidentAggregates = false;
 		}
+	}
+
+	/// <summary>
+	/// A GPU-driven call that hands the device a resident list's batches and then its own takes an array that already starts
+	/// with the list's: the list is copied once while it stays the same, not into every call's array, and each call's own
+	/// batches are cleared when it hands the array back. Calls at once get arrays of their own.
+	/// </summary>
+	[TestMethod]
+	public void ResidentBatchesAreCopiedOnceForCallsWithMore()
+	{
+		using var system = new RenderSystem();
+		var feature = system.GetFeature<AggregateRenderFeature>();
+		var list = new AggregateRenderFeature.ResidentList { Version = 1 };
+		var device = Enumerable.Range( 0, 3 ).Select( i => new GpuDrivenBatch( null, null, default, null, false, i, 1, 0, 1, null ) ).ToArray();
+		var copies = feature.CombinedCopies;
+
+		var first = feature.TakeCombined( list, 0, device, 5 );
+		Assert.IsTrue( first.Batches.Take( 3 ).SequenceEqual( device ), "it starts with the list's batches" );
+		var owner = new object();
+		first.Batches[3] = first.Batches[4] = new GpuDrivenBatch( null, null, default, null, false, 9, 1, 0, 1, owner );
+		AggregateRenderFeature.ReturnCombined( list, 0, first, 5 );
+		Assert.IsTrue( first.Batches.Skip( 3 ).Take( 2 ).All( b => b.Owner is null ), "the call's own batches are cleared" );
+		Assert.AreEqual( copies + 1, feature.CombinedCopies );
+
+		var again = feature.TakeCombined( list, 0, device, 5 );
+		Assert.AreSame( first, again, "the next call takes it back" );
+		Assert.AreEqual( copies + 1, feature.CombinedCopies, "without copying the list again" );
+
+		var beside = feature.TakeCombined( list, 0, device, 4 );
+		Assert.AreNotSame( again, beside, "a call at the same time gets an array of its own" );
+		Assert.IsTrue( beside.Batches.Take( 3 ).SequenceEqual( device ) );
+		AggregateRenderFeature.ReturnCombined( list, 0, again, 3 );
+		AggregateRenderFeature.ReturnCombined( list, 0, beside, 3 );
+
+		// Another version of the list is copied again
+		list.Version++;
+		var changed = feature.TakeCombined( list, 0, device, 3 );
+		Assert.AreEqual( copies + 3, feature.CombinedCopies, "a changed list is copied again" );
+		AggregateRenderFeature.ReturnCombined( list, 0, changed, 3 );
+
+		// As are batches made again differently, and another depth kind has arrays of its own
+		list.DeviceStamp[0]++;
+		AggregateRenderFeature.ReturnCombined( list, 0, feature.TakeCombined( list, 0, device, 3 ), 3 );
+		Assert.AreEqual( copies + 4, feature.CombinedCopies, "batches made differently are copied again" );
+		AggregateRenderFeature.ReturnCombined( list, 1, feature.TakeCombined( list, 1, device, 3 ), 3 );
+		Assert.AreEqual( copies + 5, feature.CombinedCopies, "another depth kind copies into its own" );
 	}
 
 	/// <summary>

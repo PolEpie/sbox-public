@@ -81,6 +81,7 @@ internal sealed partial class BorealisGpuRenderBackend
 		var handle = gpu.CreateBuffer( new BufferInfo { Size = 16, Usage = BufferUsage.Storage | BufferUsage.CopySource | BufferUsage.CopyDestination, Name = "Engine buffer counter" } );
 		gpu.WriteBuffer<uint>( handle, [0, 0, 0, 0] );
 		counters.Add( buffer, new Backing<BufferHandle>( handle ) { Collected = collectedBuffers } );
+		backingsVersion++;
 		ownedBuffers.Add( handle );
 		return handle;
 	}
@@ -95,7 +96,7 @@ internal sealed partial class BorealisGpuRenderBackend
 	readonly Dictionary<string, string> counterNames = new();
 
 	/// <summary>Set a buffer and, when it has one, its hidden counter (<see cref="ShaderResource.CounterName"/>) under <paramref name="name"/>.</summary>
-	void LowerBuffer( string name, GpuBuffer buffer )
+	void LowerBuffer( string name, GpuBuffer buffer, Borealis.Backend.ShaderAttributes lowered )
 	{
 		lowered.Set( name, BufferOf( buffer ) );
 		if ( BoundCounter( buffer ) is not { } counter ) return;
@@ -107,6 +108,7 @@ internal sealed partial class BorealisGpuRenderBackend
 	{
 		if ( !counters.TryGetValue( buffer, out var backing ) ) return;
 		counters.Remove( buffer );
+		backingsVersion++;
 		backing.Collected = null;
 		ownedBuffers.Remove( backing.Handle );
 		gpu.Destroy( backing.Handle );

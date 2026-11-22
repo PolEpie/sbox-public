@@ -163,9 +163,10 @@ internal sealed partial class BackendContext : GpuContext
 		}
 
 		borrowed = shared is not null;
+		lender = shared as BackendContext;
 		if ( borrowed )
 		{
-			recording = ((BackendContext)shared).recording ?? throw new InvalidOperationException( "The shared context isn't recording" );
+			recording = lender.recording ?? throw new InvalidOperationException( "The shared context isn't recording" );
 
 			// A clear the context before left pending (a pass that drew nothing) happens before this one records
 			if ( recording.Active is { } previous && previous != this && previous.recording == recording ) previous.FlushClears();
@@ -263,9 +264,14 @@ internal sealed partial class BackendContext : GpuContext
 	/// </summary>
 	bool PlannedLayout( BackendTexture texture, out ImageLayout layout )
 	{
+		// Recording into another segment's list: that list's plan
+		if ( lender is not null ) return lender.PlannedLayout( texture, out layout );
 		layout = default;
 		return planned && plannedLayouts.TryGetValue( texture, out layout );
 	}
+
+	// The context whose list this one records into (Begin's shared), or null
+	BackendContext lender;
 
 	/// <summary>
 	/// Before a segment's own list: move every texture it used from where the lists submitted before left it to what
@@ -392,6 +398,7 @@ internal sealed partial class BackendContext : GpuContext
 	{
 		recording = null;
 		borrowed = false;
+		lender = null;
 	}
 
 	public override GpuSemaphore SignalAtEnd()
