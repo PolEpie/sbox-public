@@ -122,7 +122,6 @@ namespace Sandbox
 			if ( type == Types.SceneAnimatableObject ) return New<SceneModel>( ptr, ( h ) => new SceneModel( h ) );
 			if ( type == Types.EnvMapSceneObject ) return New<SceneCubemap>( ptr, ( h ) => new SceneCubemap( h ) );
 			if ( type == Types.SceneLightProbeVolumeObject ) return New<SceneLightProbe>( ptr, ( h ) => new SceneLightProbe( h ) );
-			if ( type == Types.DecalSceneObject ) return New<DecalSceneObject>( ptr, ( h ) => new DecalSceneObject( h ) );
 
 			if ( type == Types.PhysicsWorld ) return New<PhysicsWorld3d>( ptr, ( h ) => new PhysicsWorld3d( h ) );
 			if ( type == Types.PhysicsBody ) return New<PhysicsBody3d>( ptr, ( h ) => new PhysicsBody3d( h ) );
@@ -180,7 +179,6 @@ namespace Sandbox
 			internal static uint ManagedSceneObject { get; } = StringToken.FindOrCreate( "ManagedSceneObject" );
 			internal static uint EnvMapSceneObject { get; } = StringToken.FindOrCreate( "EnvMapSceneObject" );
 			internal static uint SceneLightProbeVolumeObject { get; } = StringToken.FindOrCreate( "SceneLightProbeVolumeObject" );
-			internal static uint DecalSceneObject { get; } = StringToken.FindOrCreate( "DecalSceneObject" );
 
 			// Physics
 			internal static uint PhysicsWorld { get; } = StringToken.FindOrCreate( "PhysicsWorld" );

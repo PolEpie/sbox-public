@@ -1,7 +1,4 @@
-﻿
-using System.Runtime.InteropServices;
-
-namespace Sandbox.Engine.Utility.RayTrace;
+﻿namespace Sandbox.Engine.Utility.RayTrace;
 
 public partial struct MeshTraceRequest
 {
@@ -11,29 +8,6 @@ public partial struct MeshTraceRequest
 	internal Model targetModel;
 
 	internal Func<SceneObject, bool> filterCallback;
-
-	[ThreadStatic]
-	static Func<SceneObject, bool> _currentfilterCallback;
-
-	[UnmanagedCallersOnly]
-	static byte FilterFunctionInternal( int value )
-	{
-		try
-		{
-			Assert.NotNull( _currentfilterCallback );
-
-			var shape = HandleIndex.Get<SceneObject>( value );
-			if ( shape is null ) return 1; // should never happen, just use default behaviour
-
-			if ( _currentfilterCallback( shape ) ) return 1;
-			return 0;
-		}
-		catch ( Exception e )
-		{
-			Log.Warning( e, $"Error in trace filter: {e.Message}" );
-			return 1;
-		}
-	}
 
 	/// <summary>
 	/// Run the trace and return the result. The result will return the first hit.
@@ -47,7 +21,7 @@ public partial struct MeshTraceRequest
 
 		if ( targetWorld != null && targetWorld.IsValid() )
 		{
-			Result? hit = TracesNativeTwins ? TraceNativeTwins( r ) : TraceObjects( r );
+			Result? hit = TraceObjects( r );
 
 			// Maps have no native objects to trace: their own meshes, if nearer
 			if ( TraceMaps( r, hit?.Fraction ?? float.MaxValue ) is { } mapHit ) hit = mapHit;
@@ -77,8 +51,7 @@ public partial struct MeshTraceRequest
 		if ( targetWorld != null && targetWorld.IsValid() )
 		{
 			var output = new List<Result>();
-			if ( TracesNativeTwins ) TraceNativeTwinsAll( r, output );
-			else TraceObjectsAll( r, output );
+			TraceObjectsAll( r, output );
 
 			// Maps aren't scene objects: their own meshes
 			TraceMapsAll( r, output );
@@ -96,51 +69,6 @@ public partial struct MeshTraceRequest
 	}
 
 	/// <summary>The target world's maps (<see cref="SceneMap.Geometry"/>), read by Borealis.Source2.</summary>
-	/// <summary>The nearest hit through the native twins' ray trace environment (<see cref="TracesNativeTwins"/>).</summary>
-	readonly unsafe Result? TraceNativeTwins( MeshTraceInput r )
-	{
-		MeshTraceOutput result = default;
-		result.distance = float.MaxValue;
-
-		if ( filterCallback is not null )
-		{
-			r.filterDelegate = (IntPtr)((delegate* unmanaged< int, byte >)&FilterFunctionInternal);
-			_currentfilterCallback = filterCallback;
-		}
-
-		try
-		{
-			return targetWorld.native.MeshTrace( r, ref result ) ? Result.From( this, result ) : null;
-		}
-		finally
-		{
-			_currentfilterCallback = default;
-		}
-	}
-
-	/// <summary>Every hit through the native twins' ray trace environment (<see cref="TracesNativeTwins"/>).</summary>
-	readonly unsafe void TraceNativeTwinsAll( MeshTraceInput r, List<Result> into )
-	{
-		if ( filterCallback is not null )
-		{
-			r.filterDelegate = (IntPtr)((delegate* unmanaged< int, byte >)&FilterFunctionInternal);
-			_currentfilterCallback = filterCallback;
-		}
-
-		var results = NativeEngine.CUtlVectorMeshTraceOutput.Create( 32, 32 );
-		try
-		{
-			if ( !targetWorld.native.MeshTraceAll( r, results ) ) return;
-			var count = results.Count();
-			for ( int i = 0; i < count; i++ ) into.Add( Result.From( this, results.Element( i ) ) );
-		}
-		finally
-		{
-			_currentfilterCallback = default;
-			results.DeleteThis();
-		}
-	}
-
 	readonly List<MapGeometry> MapsToTrace()
 	{
 		if ( targetWorld is null ) return null;

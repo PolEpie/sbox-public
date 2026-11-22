@@ -78,7 +78,6 @@ native accessor g_pSceneSystem as NativeEngine.CSceneSystem
 	}
 
     CSceneSkyBoxObject CreateSkyBox( IMaterial skyMaterial, ISceneWorld world );
-    CDecalSceneObject CreateDecal( ISceneWorld world );
 
     
 	ITexture GetWellKnownTexture( SceneSystemWellKnownTextureObjectID a );
