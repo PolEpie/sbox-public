@@ -19,6 +19,9 @@ internal static class Zones
 	public static readonly Zone TreeQuery = new( "Borealis Tree Query", Color.Yellow );
 	public static readonly Zone Setup = new( "Borealis Setup", Color.Orange );
 	public static readonly Zone ResidentCull = new( "Borealis Resident Cull", Color.Orange );
+	public static readonly Zone Plan = new( "Borealis Plan", Color.Orange );
+	public static readonly Zone PlanShapes = new( "Borealis Plan Shapes", Color.Orange );
+	public static readonly Zone LayoutFixUps = new( "Borealis Layout Fix-ups", Color.Blue );
 	public static readonly Zone Record = new( "Borealis Record", Color.Red );
 	public static readonly Zone GpuDrivenDraw = new( "Borealis GPU-driven Draw", Color.Red );
 	public static readonly Zone OverlayDraw = new( "Borealis Overlay Draw", Color.Red );

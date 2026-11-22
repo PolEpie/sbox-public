@@ -285,9 +285,11 @@ public sealed unsafe partial class Device
 	public void BeginFrame()
 	{
 		FrameStarts[(int)((FrameNumber + 1) & (FrameHistory - 1))] = System.Diagnostics.Stopwatch.GetTimestamp();
+		WatchFrame();
 		var carried = CarryRecording();
 		RememberEvent( "frame starts:", (long)FrameNumber + 1 );
 
+		var doing = Enter( "BeginFrame: flush" );
 		Flush();
 		frame.Graphics = graphicsQueue.Submitted;
 		frame.Compute = computeQueue.Submitted;
@@ -298,8 +300,12 @@ public sealed unsafe partial class Device
 		FrameNumber++;
 		frame = frames[FrameSlot];
 
+		doing.Dispose();
+		doing = Enter( "BeginFrame: wait for the frame slot" );
 		graphicsQueue.Wait( frame.Graphics );
 		computeQueue.Wait( frame.Compute );
+		doing.Dispose();
+		doing = Enter( "BeginFrame: recycle" );
 
 		var recycle = recycling;
 		lock ( frame.Lists )
@@ -319,12 +325,25 @@ public sealed unsafe partial class Device
 		}
 
 		recycle.Clear();
+		doing.Dispose();
+		doing = Enter( "BeginFrame: collect garbage" );
 		CollectGarbage();
+		doing.Dispose();
+		doing = Enter( "BeginFrame: trim spares" );
 		TrimSpares();
+		doing.Dispose();
+		doing = Enter( "BeginFrame: upload pages ahead" );
 		MakeUploadPagesAhead();
+		doing.Dispose();
+		doing = Enter( "BeginFrame: trim the allocator" );
 		Allocator.Trim( FrameNumber );
+		doing.Dispose();
+		doing = Enter( "BeginFrame: relocate" );
 		RelocateDraining();
+		doing.Dispose();
+		doing = Enter( "BeginFrame: memory budget" );
 		if ( FrameNumber % MemoryBudgetFrames == 0 ) RefreshMemoryBudget();
+		doing.Dispose();
 	}
 
 	// The frame's lists as BeginFrame recycles them, kept
@@ -561,11 +580,11 @@ public sealed unsafe partial class Device
 				pSignalSemaphoreInfos = signals,
 			};
 
-			Check( Vk.vkQueueSubmit2( queue.Handle, 1, &submit, 0 ), "vkQueueSubmit2" );
+			using ( Enter( "vkQueueSubmit2" ) ) Check( Vk.vkQueueSubmit2( queue.Handle, 1, &submit, 0 ), "vkQueueSubmit2" );
 			Interlocked.Increment( ref submissions );
 			queue.Pending.Clear();
 			Volatile.Write( ref queue.Flushed, value );
-			ApplyLayouts( list );
+			using ( Zone( ZoneApplyLayouts ) ) ApplyLayouts( list );
 			list.LeaveGate();
 			return list.Submitted = new SyncPoint( list.Queue, value );
 		}
@@ -590,7 +609,7 @@ public sealed unsafe partial class Device
 			Remember( queue, value, list, -1 );
 			queue.Pending.Add( list.Handle );
 			queue.Suspended = list.EndsSuspended ? list : null;
-			ApplyLayouts( list );
+			using ( Zone( ZoneApplyLayouts ) ) ApplyLayouts( list );
 			list.LeaveGate();
 			return list.Submitted = new SyncPoint( list.Queue, value );
 		}
@@ -682,7 +701,7 @@ public sealed unsafe partial class Device
 			pSignalSemaphoreInfos = &signal,
 		};
 
-		Check( Vk.vkQueueSubmit2( queue.Handle, 1, &submit, 0 ), "vkQueueSubmit2" );
+		using ( Enter( "vkQueueSubmit2 (held lists)" ) ) Check( Vk.vkQueueSubmit2( queue.Handle, 1, &submit, 0 ), "vkQueueSubmit2" );
 		Interlocked.Increment( ref submissions );
 		queue.Pending.Clear();
 		Volatile.Write( ref queue.Flushed, value );
@@ -714,6 +733,7 @@ public sealed unsafe partial class Device
 		{
 			recentSubmissions[recentNext] = (queue.Type, value, list.Name, heldBefore, Stopwatch.GetTimestamp(), list.MarkerSlot);
 			recentNext = (recentNext + 1) % recentSubmissions.Length;
+			list.SubmitOrder = ++submitOrder;
 			Tally( list );
 		}
 	}
@@ -730,11 +750,51 @@ public sealed unsafe partial class Device
 
 	(long Lists, long Scopes, long Barriers, long FullBarriers, long Resumed) recorded;
 
+	/// <summary>What the barrier calls of the lists submitted so far held, added up (<see cref="CommandList.BarrierDetail"/>).</summary>
+	public BarrierCounts RecordedBarriers
+	{
+		get { lock ( recentSubmissions ) return recordedBarriers; }
+	}
+
+	BarrierCounts recordedBarriers;
+	long submitOrder;
+
 	void Tally( CommandList list )
 	{
 		var c = list.Counts;
 		recorded = (recorded.Lists + 1, recorded.Scopes + c.Scopes, recorded.Barriers + c.Barriers, recorded.FullBarriers + c.FullBarriers, recorded.Resumed + c.Resumed);
+		recordedBarriers.Add( list.BarrierDetail );
+		if ( TimesBarriers ) System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault( barriersByList, list.Name ?? "", out _ ).Add( list.BarrierDetail );
 	}
+
+	readonly Dictionary<string, BarrierCounts> barriersByList = new();
+
+	/// <summary>
+	/// What the barrier calls of the lists submitted while <see cref="TimesBarriers"/> held, added up by list name, and start
+	/// again.
+	/// </summary>
+	public Dictionary<string, BarrierCounts> TakeBarriersByList()
+	{
+		lock ( recentSubmissions )
+		{
+			var taken = new Dictionary<string, BarrierCounts>( barriersByList );
+			barriersByList.Clear();
+			return taken;
+		}
+	}
+
+	/// <summary>
+	/// Whether command lists time their barrier calls (<see cref="BarrierTicks"/>): recording the call and counting it, on
+	/// whichever thread records the list.
+	/// </summary>
+	public bool TimesBarriers { get; set; }
+
+	long barrierTicks;
+
+	/// <summary><see cref="System.Diagnostics.Stopwatch"/> ticks spent in barrier calls while <see cref="TimesBarriers"/>.</summary>
+	public long BarrierTicks => Interlocked.Read( ref barrierTicks );
+
+	internal void AddBarrierTicks( long ticks ) => Interlocked.Add( ref barrierTicks, ticks );
 
 	/// <summary>
 	/// For after the device is lost: the driver's fault report (only valid then), the process's memory use

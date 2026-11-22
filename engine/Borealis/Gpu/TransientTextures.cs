@@ -20,11 +20,16 @@ internal sealed class TransientTextures : IDisposable
 
 	readonly List<Entry> entries = new();
 
+	// What this render borrowed, and what the render before it did (GraphMeasure): names, sizes and formats, in order
+	int borrowed, lastBorrowed;
+
 	/// <summary>
 	/// A texture like <paramref name="desc"/> for this render: one no earlier part of it borrowed, or a new one.
 	/// </summary>
 	public GpuTexture Get( in TextureDesc desc, string name )
 	{
+		if ( GraphMeasure.Enabled ) borrowed = HashCode.Combine( borrowed, name, desc.Width, desc.Height, desc.Format, desc.Samples, desc.Mips, desc.Depth );
+
 		foreach ( var entry in entries )
 		{
 			if ( entry.Loaned || entry.Name != name || !Same( entry.Desc, desc ) ) continue;
@@ -47,6 +52,13 @@ internal sealed class TransientTextures : IDisposable
 	/// </summary>
 	public void EndRender()
 	{
+		if ( GraphMeasure.Enabled )
+		{
+			GraphMeasure.AddTargets( borrowed != lastBorrowed );
+			lastBorrowed = borrowed;
+			borrowed = 0;
+		}
+
 		for ( int i = entries.Count - 1; i >= 0; i-- )
 		{
 			var entry = entries[i];
