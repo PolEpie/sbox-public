@@ -3313,6 +3313,9 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	{
 		if ( counted.CountPending > 0 && counted.CountFrame != countFrame ) return -1;
 
+		// The frame's total starts at its first stretch, counted or not
+		if ( counted.CountFrame != countFrame ) (counted.CountFrame, counted.CountSum) = (countFrame, 0);
+
 		var query = 0;
 		while ( query < CountQueries && counting[query].For is not null ) query++;
 		if ( query == CountQueries )
@@ -3322,7 +3325,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 			return -1;
 		}
 
-		if ( counted.CountPending++ == 0 ) (counted.CountFrame, counted.CountSum) = (countFrame, 0);
+		counted.CountPending++;
 		counting[query] = (counted, countFrame);
 		return query;
 	}
