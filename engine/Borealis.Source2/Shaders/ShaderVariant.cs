@@ -206,8 +206,29 @@ public sealed class ShaderVariant
 /// </summary>
 public sealed class ShaderStage
 {
+	/// <summary>
+	/// The first of the specialization ids vfx keeps for switches (<c>VFX_SPECIALIZATION_RESERVED_FIRST_ID</c>,
+	/// vfx_shader_params.h), above any <c>SpecializedConstant()</c>'s (64 and up, one per attribute).
+	/// </summary>
+	public const uint ReservedSpecializationFirstId = 0x10000;
+
 	/// <summary><c>SpecializedConstantsBaked</c>'s id (<c>VFX_SPECIALIZED_CONSTANTS_BAKED_ID</c>, vfx_shader_params.h).</summary>
-	internal const uint SpecializedConstantsBakedId = 68;
+	public const uint SpecializedConstantsBakedId = ReservedSpecializationFirstId;
+
+	/// <summary><c>BOREALIS_GPU_DRIVEN_MATERIAL_PER_DRAW_ID</c> (borealis_gpu_driven.h): set, a GPU-driven pixel shader reads <c>g_nBorealisPixelMaterial</c>.</summary>
+	public const uint GpuDrivenMaterialPerDrawId = ReservedSpecializationFirstId + 1;
+
+	// Files older than ShaderFile.ReservedSpecializationIdsVcsVersion had at most four SpecializedConstant()s and these switches after them
+	const uint LegacySpecializedConstantsBakedId = 68;
+	const uint LegacyGpuDrivenMaterialPerDrawId = 120;
+
+	bool LegacySpecializationIds => Program.VcsVersion is > 0 and < ShaderFile.ReservedSpecializationIdsVcsVersion;
+
+	/// <summary><c>SpecializedConstantsBaked</c>'s id in this stage's file.</summary>
+	public uint BakedId => LegacySpecializationIds ? LegacySpecializedConstantsBakedId : SpecializedConstantsBakedId;
+
+	/// <summary>The GPU-driven pixel switch's id in this stage's file (<see cref="GpuDrivenMaterialPerDrawId"/>).</summary>
+	public uint MaterialPerDrawId => LegacySpecializationIds ? LegacyGpuDrivenMaterialPerDrawId : GpuDrivenMaterialPerDrawId;
 
 	readonly ShaderVariable[] variables;
 	readonly Dictionary<(int Set, int Register), SamplerInfo> samplers = new();
@@ -371,7 +392,9 @@ public sealed class ShaderStage
 
 		// A SpecializedConstant() also stays a constant buffer member, which a pipeline reads unless SpecializedConstantsBaked
 		// says its specialization constants hold the values (VFX_SPECIALIZED_CONSTANTS_BAKED_ID): every pipeline here is made with them
-		if ( specialized && !constants.Exists( c => c.Id == SpecializedConstantsBakedId ) ) constants.Add( new SpecializationConstant( SpecializedConstantsBakedId, 1 ) );
+		var baked = BakedId;
+		if ( specialized && !constants.Exists( c => c.Id == baked ) ) constants.Add( new SpecializationConstant( baked, 1 ) );
+
 
 		Constants = [.. constants];
 		MaterialConstants = materialConstants;
