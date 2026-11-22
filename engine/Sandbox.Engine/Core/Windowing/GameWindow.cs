@@ -86,7 +86,13 @@ internal sealed partial class GameWindow : IDisposable
 
 	void AttachSwapChain( VideoMode mode )
 	{
-		if ( RenderBackend.Default is BorealisGpuRenderBackend device ) borealis = new BorealisGpuWindow( device, window.Handle, mode.VSync ) { Samples = SampleCount( mode.Multisample ) };
+		if ( RenderBackend.Default is BorealisGpuRenderBackend device )
+		{
+			borealis = new BorealisGpuWindow( device, window.Handle, mode.VSync ) { Samples = SampleCount( mode.Multisample ) };
+
+			// Scene changes are written at the sync point, unless the game runs serially
+			if ( BorealisGpuFrameThread.Enabled ) Rendering.RenderSync.DeferWrites = true;
+		}
 		else window.CreateSwapChain( "GameWindow", mode.Multisample, mode.VSync, mainWindow: true );
 
 		GameWindowNative.Attach( window.Handle, window.SwapChain );
