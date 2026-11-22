@@ -1,5 +1,6 @@
 using Borealis.Backend;
 using Borealis.Source2;
+using Borealis.Source2.Shaders;
 using Sandbox.ShaderCompiler;
 using System.IO;
 
@@ -438,5 +439,38 @@ public class EmbeddedCompatibilityTests
 		var declared = System.Text.RegularExpressions.Regex.Matches( File.ReadAllText( Path.Combine( shaders, "common_samplers.fxc" ) ), @"^\s*SamplerState\s+(\w+)", System.Text.RegularExpressions.RegexOptions.Multiline )
 			.Select( m => m.Groups[1].Value ).ToArray();
 		CollectionAssert.AreEquivalent( declared, EmbeddedCompatibility.EngineSamplers );
+	}
+
+	/// <summary>
+	/// A lit module's pixel stage (a material .shader's MainPs shading through ShadingModelStandard) gets a forward entry that
+	/// writes the normal and roughness Shade kept at target 1, switched by <c>kForwardNormalsOutput</c>, as surfaces' forward
+	/// entries do, so Borealis's screen-space reflections trace from it; others keep their own entry.
+	/// </summary>
+	[TestMethod]
+	public void LitModulesWriteTheReflectionsNormals()
+	{
+		const string lit = "[shader( \"pixel\" )] float4 MainPs( PixelInput i, bool front : SV_IsFrontFace ) : SV_Target0\n{\n\treturn ShadingModelStandard::Shade( i, m );\n}\n";
+		var wrapped = SlangCompiler.ForwardNormalsEntry( lit );
+		StringAssert.Contains( wrapped, "float4 MainPsLit( PixelInput i, bool front : SV_IsFrontFace ) : SV_Target0" );
+		StringAssert.Contains( wrapped, "ForwardOutput MainPs( PixelInput i, bool front : SV_IsFrontFace ) { return ForwardOut( MainPsLit( i, front ), s_ForwardNormalsKept ); }" );
+
+		// Unlit, writing target 1 itself, or not returning a colour: as written
+		const string unlit = "[shader( \"pixel\" )] float4 MainPs( PixelInput i ) : SV_Target0 { return 1; }\n";
+		Assert.AreEqual( unlit, SlangCompiler.ForwardNormalsEntry( unlit ) );
+		var ids = lit + "struct O { uint2 Id : SV_Target1; };\n";
+		Assert.AreEqual( ids, SlangCompiler.ForwardNormalsEntry( ids ) );
+		var output = lit.Replace( "float4 MainPs", "PS_OUTPUT MainPs" );
+		Assert.AreEqual( output, SlangCompiler.ForwardNormalsEntry( output ) );
+
+		// Compiled: the bark .shader's pixel stage has the switch and a float output at location 1; with no target there the
+		// pipeline leaves it out (BackendDevice.FitOutputs)
+		var (compiler, shaders) = Compiler();
+		var bark = Path.Combine( AppContext.BaseDirectory, "Data", "bark.shader" );
+		var module = PassModule.FromText( Path.Combine( Path.GetTempPath(), "bark_normals.slang" ), PassConverter.Convert( File.ReadAllText( bark ), "bark_normals" ), [shaders] );
+		var pixel = compiler.CompilePass( module, StageKind.Pixel, new Dictionary<string, int>() ).Stage;
+		var reflection = SpirvReflection.Read( pixel.Spirv );
+		CollectionAssert.Contains( reflection.SpecializationIds.ToArray(), BackendDevice.NormalsOutputId );
+		Assert.IsTrue( reflection.Outputs.Any( o => o.Location == 1 && o.Kind == SpirvScalar.Float ), "a float output at target 1" );
+		Assert.IsTrue( reflection.Outputs.Any( o => o.Location == 0 ), "the colour stays at target 0" );
 	}
 }
