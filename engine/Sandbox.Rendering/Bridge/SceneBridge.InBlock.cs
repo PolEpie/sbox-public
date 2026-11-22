@@ -33,7 +33,8 @@ internal sealed partial class SceneBridge
 		CameraState state;
 		try
 		{
-			if ( !RenderOnGpu( camera, setup, target, depthTarget, exposure, out state ) ) return false;
+			using ( Borealis.Zones.ChildView.Start() )
+				if ( !RenderOnGpu( camera, setup, target, depthTarget, exposure, out state ) ) return false;
 		}
 		finally
 		{
