@@ -22,6 +22,10 @@ internal sealed partial class AggregateRenderFeature
 	AggregateSizes sizes;
 	int sizedGeneration = -1;
 
+	// This feature's frames so far. Not the generation: every view's transforms take the next one (TransformBuffer.Generation),
+	// so with two views a frame one of them only ever sees odd generations and would never be sized
+	int sizeFrames;
+
 	/// <summary>The worker's sizings, for measuring: the last one's time and fragments, and the total.</summary>
 	internal AggregateSizes Sizes => sizes;
 
@@ -35,9 +39,10 @@ internal sealed partial class AggregateRenderFeature
 		if ( WorkerSize( device ) != 0 ) return TextureSizes.All;
 
 		// The frame's first main view, every few frames, unless the last sizing is still running
-		if ( !pass.IsShadow && ReferenceEquals( pass.View, pass.Root ) && sizedGeneration != argGeneration && argGeneration % SizeEveryFrames == 0 )
+		if ( !pass.IsShadow && ReferenceEquals( pass.View, pass.Root ) && sizedGeneration != argGeneration )
 		{
 			sizedGeneration = argGeneration;
+			if ( sizeFrames++ % SizeEveryFrames != 0 ) return 0;
 			var meshes = resident is not null && (resident.MeshGroups.Count > 0 || resident.Overlays.Count > 0) && Meshes is not null ? pass.Visible( Meshes ) : null;
 			sizes.Start( world, pass, visible, meshes, resident?.Holds, pass.ResidentHolds is not null ? resident : null );
 		}
