@@ -206,6 +206,8 @@ public partial class Scene : GameObject
 
 	internal virtual void DestroyInternal()
 	{
+		// A frame the render thread draws may be this scene's: it's drawn before the scene goes
+		if ( ThreadSafe.IsMainThread && !ThreadSafe.IsRenderThread ) Sandbox.Engine.GameWindow.Current?.JoinRenderThread();
 		_all.Remove( this );
 
 		// Clearing the object index now means we can save time
