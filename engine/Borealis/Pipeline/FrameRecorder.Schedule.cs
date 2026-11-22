@@ -55,7 +55,7 @@ internal sealed partial class FrameRecorder
 
 	bool HasUntrackedAccess( int index ) => ((layers[index].Reads | layers[index].Writes) & FrameResources.Untracked) != 0;
 
-	bool CanUseCompute( int index ) => layers[index].Layer.SupportsAsyncCompute && !layers[index].Layer.IsSharedIn( layers[index].Frame ) && !HasUntrackedAccess( index );
+	bool CanUseCompute( int index ) => layers[index].Layer.SupportsAsyncCompute && !layers[index].Layer.IsShared && !HasUntrackedAccess( index );
 
 	void PlanComputeBatch( int from, int computeEnd, int end, int maxSegments )
 	{
@@ -76,7 +76,7 @@ internal sealed partial class FrameRecorder
 					graphics.WaitForLayer = c;
 			}
 
-			if ( graphics.Layer.IsSharedIn( graphics.Frame ) && graphics.WorkFrom == graphics.WorkTo ) continue;
+			if ( graphics.Layer.IsShared && graphics.WorkFrom == graphics.WorkTo ) continue;
 
 			if ( graphics.WaitForLayer > acquiredLayer )
 			{
@@ -157,7 +157,7 @@ internal sealed partial class FrameRecorder
 	void AddGraphicsLayer( int index, int maxSegments, bool separate = false )
 	{
 		ref var planned = ref layers[index];
-		if ( planned.Layer.IsSharedIn( planned.Frame ) )
+		if ( planned.Layer.IsShared )
 		{
 			// Fold a pending compute join into the first draw instead of submitting an empty graphics context.
 			if ( planned.WorkFrom < planned.WorkTo && segmentCount > 0

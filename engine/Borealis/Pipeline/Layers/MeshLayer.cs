@@ -146,7 +146,7 @@ internal abstract class MeshLayer : RenderLayer
 	/// </summary>
 	public override void AddWork( FrameRecorder recorder, RenderFrame frame )
 	{
-		if ( IsSharedIn( frame ) ) recorder.AddWork( frame, frame.MainPass, this );
+		if ( IsShared ) recorder.AddWork( frame, frame.MainPass, this );
 	}
 
 	/// <summary>

@@ -44,11 +44,6 @@ internal abstract class RenderLayer
 	public virtual bool IsShared => false;
 
 	/// <summary>
-	/// <see cref="IsShared"/> for <paramref name="frame"/>: a layer may only be able to split what some frames draw.
-	/// </summary>
-	public virtual bool IsSharedIn( RenderFrame frame ) => IsShared;
-
-	/// <summary>
 	/// Whether this layer can execute entirely on compute. The scheduler chooses async execution only when
 	/// declared resource dependencies leave independent graphics work to overlap. Draw layers stay on graphics.
 	/// </summary>

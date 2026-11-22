@@ -821,6 +821,9 @@ public sealed partial class RenderSystem : IDisposable
 
 		using ( Zones.ShadowPrepare.Start() ) shadows.PreparePasses( transforms );
 
+		// Here on the main thread: the translucent layer's parts copy into it on their workers
+		frame.FrameBufferCopy = ReadsFrameBuffer( MeshRenderFeature.FrameBufferCopyingLists ) ? FrameBufferCopy( view.Viewport ) : null;
+
 		// Skyboxes use their own system and view.
 		using ( Zones.SkyboxPrepare.Start() ) PrepareSkybox( world, view );
 	}

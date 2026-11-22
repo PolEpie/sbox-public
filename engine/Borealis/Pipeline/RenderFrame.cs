@@ -74,6 +74,12 @@ internal sealed class RenderFrame
 	public GpuTexture ContactShadowMask { get; internal set; }
 
 	/// <summary>
+	/// The copy of the frame its translucent frame buffer readers sample, made on the main thread when it prepares; null when
+	/// nothing in the main view reads it.
+	/// </summary>
+	public GpuTexture FrameBufferCopy { get; internal set; }
+
+	/// <summary>
 	/// The opaque pass's normals and roughness while this frame traces screen-space reflections, or null
 	/// (<see cref="ScreenSpaceReflectionsLayer.NormalsFor"/>).
 	/// </summary>
@@ -314,15 +320,21 @@ internal sealed class RenderFrame
 	internal bool ReadsFrameBuffer( MeshRuns runs ) => System.ReadsFrameBuffer( runs );
 
 	/// <summary>
-	/// Draw the whole main-thread layer. Translucent layers copy the frame on the first reader
-	/// (<c>CRenderBatchList::DrawCurrentPrimitives</c>).
+	/// Draw the whole main-thread layer (<see cref="DrawRange"/>).
 	/// </summary>
-	internal void DrawLayer( GpuContext rc, MeshLayer layer, ref RenderStats stats )
-	{
-		var copies = layer.LayerType == MeshLayerType.Translucent && !layer.Depth && ReadsFrameBuffer( layer.Runs );
-		if ( copies ) rc.BeginFrameBufferReads( System.FrameBufferCopy( View.Viewport ), View.Viewport );
+	internal void DrawLayer( GpuContext rc, MeshLayer layer, ref RenderStats stats ) => DrawRange( rc, MainPass, layer, 0, RunCount( layer ), ref stats );
 
-		System.DrawRange( rc, MainPass, layer, 0, RunCount( layer ), ref stats );
+	/// <summary>
+	/// Draw <paramref name="count"/> of <paramref name="view"/>'s runs of <paramref name="layer"/> from <paramref name="first"/>.
+	/// Translucent layers copy the frame on the first reader (<c>CRenderBatchList::DrawCurrentPrimitives</c>); a layer split
+	/// across contexts copies at the first reader of each part that has one. May execute on a worker thread.
+	/// </summary>
+	internal void DrawRange( GpuContext rc, ViewPass view, MeshLayer layer, int first, int count, ref RenderStats stats )
+	{
+		var copies = FrameBufferCopy is not null && view == MainPass && layer.LayerType == MeshLayerType.Translucent && !layer.Depth && ReadsFrameBuffer( layer.Runs );
+		if ( copies ) rc.BeginFrameBufferReads( FrameBufferCopy, View.Viewport );
+
+		System.DrawRange( rc, view, layer, first, count, ref stats );
 
 		if ( copies ) rc.EndFrameBufferReads();
 	}
