@@ -79,6 +79,9 @@ internal static class EngineLoop
 			try
 			{
 				GameWindow.Current?.ApplyPendingMode();
+
+				// The next frame's device frame starts on the frame thread from here, while this one ends
+				GameWindow.Current?.HandOverFrame();
 			}
 			catch ( System.Exception e )
 			{

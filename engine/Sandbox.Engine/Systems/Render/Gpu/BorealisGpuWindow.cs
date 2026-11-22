@@ -153,7 +153,27 @@ internal sealed class BorealisGpuWindow : IDisposable
 	/// </summary>
 	public bool Update( Vector2 pixelSize )
 	{
-		if ( pixelSize.x < 1 || pixelSize.y < 1 ) return false;
+		// The frame thread is done with the swap chain before it's looked at (it acquires ahead, HandOverFrame)
+		if ( backend.FrameAhead ) backend.FollowFrame();
+		if ( acquiredAhead )
+		{
+			// An image acquired ahead is drawn at the size it has: minimised, with an empty frame, so it's presented; a new
+			// size waits for the next frame, which acquires on this thread (AcquireAhead skips while it's waited for)
+			if ( pixelSize.x < 1 || pixelSize.y < 1 )
+			{
+				acquiredAhead = false;
+				resizeWanted = true;
+				if ( target is not null ) Draw( backend, target, Color.Black, true, static () => { }, swapChain );
+				return false;
+			}
+
+			if ( pixelSize != Size ) resizeWanted = true;
+			return true;
+		}
+
+		// Minimised: the frame thread doesn't acquire for the window until it has a size again
+		resizeWanted = pixelSize.x < 1 || pixelSize.y < 1;
+		if ( resizeWanted ) return false;
 		if ( pixelSize == Size && target is not null ) return true;
 
 		if ( pixelSize != Size ) swapChain.Resize( (int)pixelSize.x, (int)pixelSize.y );
@@ -212,7 +232,10 @@ internal sealed class BorealisGpuWindow : IDisposable
 		backend.BeforeAcquire( swapChain );
 		try
 		{
-			if ( !swapChain.Acquire( out _ ) ) return false;
+			// Acquired on the frame thread while the game ran (AcquireAhead), or now
+			var ahead = acquiredAhead;
+			acquiredAhead = false;
+			if ( !ahead && !swapChain.Acquire( out _ ) ) return false;
 		}
 		catch ( GpuException e ) when ( e.IsDeviceLost )
 		{
@@ -228,6 +251,26 @@ internal sealed class BorealisGpuWindow : IDisposable
 		if ( timestamps is not null ) backend.WriteTimestamp( timestamps, TimestampSlot, PipelineStage.TopOfPipe, reset: 2 );
 		return true;
 	}
+
+	// An image the frame thread acquired for the next frame, and a size change that waits for a frame without one
+	bool acquiredAhead, resizeWanted;
+
+	/// <summary>
+	/// On the frame thread, after the next frame's device frame started (<see cref="BorealisGpuRenderBackend.HandOverFrame"/>):
+	/// acquire the image the next <see cref="BeginFrame"/> draws into, so a wait for one (vsync's) is off the main thread.
+	/// Nothing while the window has no target, is minimised or waits to resize; that frame acquires itself.
+	/// </summary>
+	internal void AcquireAhead()
+	{
+		if ( target is null || resizeWanted || Size.x < 1 || Size.y < 1 || swapChain.Current.IsValid ) return;
+		using var timing = AcquireAheadTiming.Scope();
+		acquiredAhead = swapChain.Acquire( out _ );
+	}
+
+	/// <summary>Forget an image acquired ahead: the device was lost meanwhile.</summary>
+	internal void ForgetAhead() => acquiredAhead = false;
+
+	static readonly Sandbox.Diagnostics.PerformanceStats.Timings AcquireAheadTiming = Sandbox.Diagnostics.PerformanceStats.Timings.Get( "Borealis.Gpu window acquire ahead" );
 
 	/// <summary>
 	/// A block drawing into the window's target through <paramref name="view"/> (a camera's frame, or the overlay's), with its
@@ -370,6 +413,8 @@ internal sealed class BorealisGpuWindow : IDisposable
 
 	public void Dispose()
 	{
+		// The frame thread may be acquiring for this window
+		if ( backend.FrameAhead ) backend.FollowFrame();
 		backend.Forget( swapChain );
 		swapChain.Dispose();
 		sdl?.Dispose();
