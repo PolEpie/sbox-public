@@ -49,7 +49,7 @@ public partial class SceneObject
 	internal void ChangeFlags( ObjectFlags value, ObjectFlags mask )
 	{
 		value &= mask;
-		native.ChangeFlags( value, mask );
+		if ( WritesTwin( "ChangeFlags" ) ) native.ChangeFlags( value, mask );
 		_flags = (CurrentFlags & ~mask) | (value & ~InternalFlags);
 		NotifyChanged( Rendering.SceneObjectChange.Flags );
 	}

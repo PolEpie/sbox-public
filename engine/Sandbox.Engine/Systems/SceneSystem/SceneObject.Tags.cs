@@ -17,8 +17,8 @@ namespace Sandbox
 	{
 		/// <summary>
 		/// A scene object's tags, kept in managed code. The first time anything asks they're read from the native object, which
-		/// has those native code gave it by then (a map's world geometry); from then on managed code owns them. The native object
-		/// still gets every change: render-mesh traces (<c>ISceneWorld::MeshTrace</c>) filter by its tags.
+		/// has those native code gave it by then (a map's world geometry); from then on managed code owns them. A native twin, if
+		/// there is one, still gets every change.
 		/// </summary>
 		internal class SceneObjectTags : ITagSet
 		{
@@ -36,7 +36,7 @@ namespace Sandbox
 			{
 				get
 				{
-					if ( !read && SceneObject.native.IsValid )
+					if ( !read && SceneObject.HasTwin )
 					{
 						read = true;
 						var count = SceneObject.native.GetTagCount();
@@ -49,17 +49,17 @@ namespace Sandbox
 
 			public override void Add( string tag )
 			{
-				if ( !SceneObject.native.IsValid ) return;
+				if ( !SceneObject.IsValid() ) return;
 				var token = StringToken.FindOrCreate( tag );
 				if ( Tokens.Contains( token ) ) return;
 				tokens.Add( token );
-				SceneObject.native.AddTag( token );
+				if ( SceneObject.HasTwin ) SceneObject.native.AddTag( token );
 				SceneObject.TagsChanged();
 			}
 
 			public override IEnumerable<string> TryGetAll()
 			{
-				if ( !SceneObject.native.IsValid )
+				if ( !SceneObject.IsValid() )
 					yield break;
 
 				foreach ( var token in Tokens.ToArray() )
@@ -76,25 +76,25 @@ namespace Sandbox
 
 			public override bool Has( string tag )
 			{
-				if ( !SceneObject.native.IsValid ) return false;
+				if ( !SceneObject.IsValid() ) return false;
 				return Tokens.Contains( StringToken.FindOrCreate( tag ) );
 			}
 
 			public override void Remove( string tag )
 			{
-				if ( !SceneObject.native.IsValid ) return;
+				if ( !SceneObject.IsValid() ) return;
 				var token = StringToken.FindOrCreate( tag );
 				if ( !Tokens.Remove( token ) ) return;
-				SceneObject.native.RemoveTag( token );
+				if ( SceneObject.HasTwin ) SceneObject.native.RemoveTag( token );
 				SceneObject.TagsChanged();
 			}
 
 			public override void RemoveAll()
 			{
-				if ( !SceneObject.native.IsValid ) return;
+				if ( !SceneObject.IsValid() ) return;
 				read = true;
 				tokens.Clear();
-				SceneObject.native.RemoveAllTags();
+				if ( SceneObject.HasTwin ) SceneObject.native.RemoveAllTags();
 				SceneObject.TagsChanged();
 			}
 		}

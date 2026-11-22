@@ -146,6 +146,12 @@ public sealed partial class SceneWorld : IHandle
 		InternalSceneMaps.Clear();
 
 		RunQueuedDeletes();
+
+		// Objects without a native twin go with the world here; native destroys the rest with its world
+		SceneObject[] remaining;
+		lock ( InternalSceneObjects ) remaining = InternalSceneObjects.Where( x => !x.HasTwin ).ToArray();
+		foreach ( var sceneObject in remaining ) sceneObject.Destroyed();
+
 		Rendering.SceneRenderer.Forget( this );
 		CSceneSystem.DestroyWorld( this );
 		native = IntPtr.Zero;
