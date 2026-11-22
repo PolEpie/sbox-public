@@ -9,7 +9,7 @@ namespace Sandbox;
 /// <see cref="Graphics"/> in a block of its own on the device, as a texture painter's is, so nothing of it runs on
 /// Source 2's device.
 /// </summary>
-internal sealed class BorealisGpuWindow : IDisposable
+internal sealed partial class BorealisGpuWindow : IDisposable
 {
 	readonly BorealisGpuRenderBackend backend;
 	readonly SwapChain swapChain;
