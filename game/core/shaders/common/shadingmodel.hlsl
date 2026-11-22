@@ -131,6 +131,12 @@ struct ShadingModelStandard
         if( DepthNormals::WantsDepthNormals() )
             return DepthNormals::Output( m.Normal, m.Roughness, m.Opacity );
 
+        // A lit pass module's normal and roughness for Borealis's screen-space reflections, as the depth-normals pass writes
+        // them: the forward entry the compiler wraps round its MainPs defines this and writes them (sbox/forward_normals.slangh)
+        #ifdef FORWARD_NORMALS_KEEP
+            ForwardNormalsKeep( m.Normal, m.Roughness );
+        #endif
+
         LightingTerms_t lightingTerms = InitLightingTerms();
         CombinerInput combinerInput = MaterialToCombinerInput( m );
 

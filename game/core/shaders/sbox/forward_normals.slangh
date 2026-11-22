@@ -41,4 +41,14 @@ ForwardOutput ForwardOut( float4 color, uint normals )
 	return o;
 }
 
+/// What a pass module's lit pixel stage kept for the normals target: ShadingModelStandard::Shade keeps the material's normal
+/// and roughness here (common/shadingmodel.hlsl), and the forward entry the compiler wraps round a lit module's MainPs
+/// writes it (SlangCompiler.ForwardNormalsEntry). Zero, nothing written, where nothing shaded.
+static uint s_ForwardNormalsKept = 0;
+
+void ForwardNormalsKeep( float3 normal, float roughness )
+{
+	if ( kForwardNormalsOutput ) s_ForwardNormalsKept = ForwardNormalsPack( normal, roughness );
+}
+
 #endif

@@ -2131,8 +2131,9 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	}
 
 	/// <summary>
-	/// Whether a variant's pixel stage writes the opaque pass's normals: a Slang pass module's that includes
-	/// sbox/forward_normals.slangh (water), whose SPIR-V has <see cref="NormalsOutputId"/>. Compiled programs have none.
+	/// Whether a variant's pixel stage writes the opaque pass's normals: a Slang pass module's that writes
+	/// sbox/forward_normals.slangh's <c>ForwardOutput</c> (water, and a lit module's wrapped MainPs), whose SPIR-V has
+	/// <see cref="NormalsOutputId"/>. Compiled programs have none.
 	/// </summary>
 	static bool WritesNormals( ShaderVariant variant ) => variant.Pixel?.Reflection?.SpecializationIds?.Contains( NormalsOutputId ) == true;
 
