@@ -419,8 +419,8 @@ public sealed partial class CommandList
 
 			lock ( list._lock )
 			{
-				entry = list._entries.Count;
 				list.AddEntry( &Execute, new Entry { Object5 = token, Object2 = this, Data1 = new Vector4( (int)downsampleMethod, maxMips, 0, 0 ) } );
+				entry = list._recorded.Entries.Count - 1;
 			}
 
 			return new RenderTargetHandle { Name = token };
@@ -434,7 +434,8 @@ public sealed partial class CommandList
 		{
 			lock ( list._lock )
 			{
-				ref var grab = ref CollectionsMarshal.AsSpan( list._entries )[entry];
+				list.Writing();
+				ref var grab = ref CollectionsMarshal.AsSpan( list._recorded.Entries )[entry];
 				grab.Data1.y = Math.Max( grab.Data1.y, mips );
 			}
 		}
@@ -462,6 +463,10 @@ public sealed partial class CommandList
 		/// </summary>
 		public RenderTarget GetRenderTarget( string name )
 		{
+			// The render thread's replay writes and reads these without the lock: the main thread may hold it while it waits
+			// for the render thread, and leaves them to the replay meanwhile (ClearRenderTargets)
+			if ( ThreadSafe.IsRenderThread ) return _renderTargets.TryGetValue( name, out var played ) ? played : null;
+
 			// Serialize against execute-thread writes / Reset clears, which hold the CommandList's _lock.
 			lock ( list._lock )
 			{
@@ -473,7 +478,9 @@ public sealed partial class CommandList
 
 		internal void ClearRenderTargets()
 		{
-			// Caller (Reset) already holds the CommandList's _lock.
+			// Caller (Reset) already holds the CommandList's _lock. While a frame handed over may replay the list on the render
+			// thread, the grabs it records are its own: the next replay's grabs replace them
+			if ( RenderSync.Overlapping ) return;
 			_renderTargets.Clear();
 		}
 	}

@@ -40,7 +40,8 @@ internal sealed class BridgeDrawCallbacks : DrawCallbacks
 		running = context;
 		try
 		{
-			BorealisGpuCustomDraw.Draw( context, layerType, camera, run );
+			using ( Borealis.Zones.DrawCallbacks.Start() )
+				BorealisGpuCustomDraw.Draw( context, layerType, camera, run );
 		}
 		finally
 		{

@@ -144,11 +144,12 @@ public class WorldRenderWriteTests
 	}
 
 	/// <summary>
-	/// A scene model posed on another thread (the animation passes run on workers) writes its bones straight into its mesh
-	/// object there; only its bounds, which move it in the world, wait for the next render.
+	/// A scene model posed on another thread (the animation passes run on workers) writes its bones into its mesh object's
+	/// second pose array there, which the next prepare (the sync point) swaps in with its bounds: what's drawn until then is the
+	/// pose before, so a frame being drawn isn't written under.
 	/// </summary>
 	[TestMethod]
-	public void BonesPosedOnAWorkerGoStraightIn()
+	public void BonesPosedOnAWorkerAreDrawnFromTheNextPrepare()
 	{
 		typeof( ThreadSafe ).GetMethod( "MarkMainThread", Any ).Invoke( null, null );
 
@@ -175,15 +176,17 @@ public class WorldRenderWriteTests
 			mesh.Mesh = standIn;
 			Assert.IsTrue( mesh.Mesh.IsSkinned, "skinned" );
 
+			var before = mesh.BoneMatrices.ToArray();
 			System.Threading.Tasks.Task.Run( () => human.Update( 0.4f ) ).Wait();
 
 			var expected = new Matrix3x4[mesh.Mesh.BindPose.Length];
 			human.GetBoneWorldMatrices( expected );
-			var written = mesh.BoneMatrices.ToArray();
-			CollectionAssert.AreEqual( expected, written, "the pose, written on the worker" );
-			Assert.AreEqual( 1, (int)pending.GetValue( render ), "the bounds wait" );
+			CollectionAssert.AreNotEqual( before, expected, "the worker posed it" );
+			CollectionAssert.AreEqual( before, mesh.BoneMatrices.ToArray(), "drawn from the pose before until the next prepare" );
+			Assert.AreEqual( 1, (int)pending.GetValue( render ), "the bounds and pose wait" );
 
 			prepare.Invoke( render, [camera, false] );
+			CollectionAssert.AreEqual( expected, mesh.BoneMatrices.ToArray(), "the pose written on the worker, drawn from the prepare" );
 			var bounds = SceneObject.ToLocal( human.Bounds, mesh.Transform );
 			Assert.IsTrue( bounds.Mins.Distance( mesh.LocalBounds.Mins ) < 1e-3f && bounds.Maxs.Distance( mesh.LocalBounds.Maxs ) < 1e-3f, "bounds after the next frame" );
 		}
@@ -192,6 +195,135 @@ public class WorldRenderWriteTests
 			render.Dispose();
 			camera.Dispose();
 			world.Delete();
+		}
+	}
+
+	/// <summary>
+	/// With changes deferred to the sync point (<see cref="RenderSync.DeferWrites"/>, the game window's mode), nothing is
+	/// written into a render object as it changes, a deleted object stays until then, and the next prepare writes each changed
+	/// object once with everything that changed.
+	/// </summary>
+	[TestMethod]
+	public void DeferredChangesWaitForThePrepare()
+	{
+		typeof( ThreadSafe ).GetMethod( "MarkMainThread", Any ).Invoke( null, null );
+
+		var world = new SceneWorld();
+		var camera = new SceneCamera { World = world };
+		var render = (System.IDisposable)System.Activator.CreateInstance( RenderType, [world] );
+		var deferred = RenderSync.DeferWrites;
+		try
+		{
+			var light = new ScenePointLight( world, Vector3.Zero, 100, Color.White );
+			var box = new SceneObject( world, Model.Load( "models/dev/box.vmdl" ) );
+			var gone = new SceneObject( world, Model.Load( "models/dev/box.vmdl" ) );
+
+			var prepare = RenderType.GetMethod( "Prepare", Any );
+			var find = RenderType.GetMethod( "Find", Any );
+			var pending = RenderType.GetProperty( "PendingChanges", Any );
+			prepare.Invoke( render, [camera, false] );
+			var lightObject = (Borealis.LightObject)find.Invoke( render, [light] );
+			var boxObject = (Borealis.MeshObject)find.Invoke( render, [box] );
+			Assert.IsNotNull( find.Invoke( render, [gone] ), "made" );
+
+			RenderSync.DeferWrites = true;
+			var moved = new Transform( new Vector3( 10, 20, 30 ) );
+			light.Transform = moved;
+			light.LightColor = Color.Red;
+			box.Position = moved.Position;
+			box.Position = moved.Position * 2;
+			box.ColorTint = Color.Green;
+			gone.Delete();
+
+			Assert.AreEqual( 2, (int)pending.GetValue( render ), "a change each for the light and the box, however many they had" );
+			Assert.AreEqual( Vector3.Zero, lightObject.Transform.Position, "the light waits" );
+			Assert.AreNotEqual( Color.Red, lightObject.Color, "its colour waits" );
+			Assert.AreNotEqual( moved.Position * 2, boxObject.Transform.Position, "the box waits" );
+			Assert.IsNotNull( find.Invoke( render, [gone] ), "the deleted object stays until the prepare" );
+
+			prepare.Invoke( render, [camera, false] );
+			Assert.AreEqual( 0, (int)pending.GetValue( render ), "written" );
+			Assert.AreEqual( moved.Position, lightObject.Transform.Position, "light moved" );
+			Assert.AreEqual( Color.Red, lightObject.Color, "light colour" );
+			Assert.AreEqual( moved.Position * 2, boxObject.Transform.Position, "box moved, to where it ended up" );
+			Assert.AreEqual( Color.Green, boxObject.Tint, "box tint" );
+			Assert.IsNull( find.Invoke( render, [gone] ), "the deleted object went" );
+		}
+		finally
+		{
+			RenderSync.DeferWrites = deferred;
+			render.Dispose();
+			camera.Dispose();
+			world.Delete();
+		}
+	}
+
+	/// <summary>
+	/// The sync point (<see cref="RenderSync.Run"/>) writes every live world with changes waiting, one no view prepares again
+	/// this frame (a skybox's or an extra world, drawn inside another's view) as much as the one the window shows; a world no view
+	/// has drawn yet is left to its first, and a view's prepare after the sync point finds nothing to do.
+	/// </summary>
+	[TestMethod]
+	public void TheSyncPointWritesEveryWorldWithChanges()
+	{
+		typeof( ThreadSafe ).GetMethod( "MarkMainThread", Any ).Invoke( null, null );
+
+		var shown = new SceneWorld();
+		var inside = new SceneWorld();
+		var unseen = new SceneWorld();
+		var camera = new SceneCamera { World = shown };
+		var insideCamera = new SceneCamera { World = inside };
+		var shownRender = (System.IDisposable)System.Activator.CreateInstance( RenderType, [shown] );
+		var insideRender = (System.IDisposable)System.Activator.CreateInstance( RenderType, [inside] );
+		var unseenRender = (System.IDisposable)System.Activator.CreateInstance( RenderType, [unseen] );
+		var deferred = RenderSync.DeferWrites;
+		try
+		{
+			var box = new SceneObject( shown, Model.Load( "models/dev/box.vmdl" ) );
+			var sky = new SceneObject( inside, Model.Load( "models/dev/box.vmdl" ) );
+			var never = new SceneObject( unseen, Model.Load( "models/dev/box.vmdl" ) );
+
+			var prepare = RenderType.GetMethod( "Prepare", Any );
+			var find = RenderType.GetMethod( "Find", Any );
+			var pending = RenderType.GetProperty( "PendingChanges", Any );
+			prepare.Invoke( shownRender, [camera, false] );
+			prepare.Invoke( insideRender, [insideCamera, false] );
+			var boxObject = (Borealis.MeshObject)find.Invoke( shownRender, [box] );
+			var skyObject = (Borealis.MeshObject)find.Invoke( insideRender, [sky] );
+			Assert.IsTrue( RenderSync.Worlds >= 3, "each world's renderer is registered" );
+
+			RenderSync.DeferWrites = true;
+			var moved = new Vector3( 10, 20, 30 );
+			box.Position = moved;
+			sky.Position = moved;
+			never.Position = moved;
+			Assert.AreNotEqual( moved, skyObject.Transform.Position, "waits for the sync point" );
+
+			var syncs = RenderSync.Syncs;
+			RenderSync.Run();
+			Assert.AreEqual( syncs + 1, RenderSync.Syncs, "ran" );
+			Assert.AreEqual( moved, boxObject.Transform.Position, "the shown world is written" );
+			Assert.AreEqual( moved, skyObject.Transform.Position, "a world drawn inside another's view is written there too" );
+			Assert.AreEqual( 0, (int)pending.GetValue( insideRender ), "nothing waits in it" );
+			Assert.IsTrue( (int)pending.GetValue( unseenRender ) > 0, "a world no view has drawn waits for its first" );
+
+			// A view after the sync point finds the world ready, and writes what changed after it
+			prepare.Invoke( shownRender, [camera, false] );
+			box.Position = moved * 2;
+			prepare.Invoke( shownRender, [camera, false] );
+			Assert.AreEqual( moved * 2, boxObject.Transform.Position, "a change after the sync point is written by the next prepare" );
+		}
+		finally
+		{
+			RenderSync.DeferWrites = deferred;
+			unseenRender.Dispose();
+			insideRender.Dispose();
+			shownRender.Dispose();
+			insideCamera.Dispose();
+			camera.Dispose();
+			unseen.Delete();
+			inside.Delete();
+			shown.Delete();
 		}
 	}
 

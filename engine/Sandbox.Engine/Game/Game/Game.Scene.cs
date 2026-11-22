@@ -112,6 +112,23 @@ public static partial class Game
 		ActiveScene.Render( swapChain, default );
 	}
 
+	/// <summary>
+	/// The game's half of a frame the game window draws, on the main thread at the sync point (<see cref="Scene.ExtractRender"/>):
+	/// the active scene's cameras prepared into <paramref name="drawn"/>. Returns the scene they draw, or null when the frame
+	/// draws the game as <see cref="Render"/> does (nothing playing, a load showing: its envmaps and overlays, on this thread).
+	/// </summary>
+	internal static Scene ExtractRender( List<CameraComponent> drawn )
+	{
+		drawn.Clear();
+		if ( !IsPlaying || ActiveScene is null ) return null;
+		if ( ActiveScene.IsLoading || LoadingScreen.IsVisible || Networking.IsConnecting ) return null;
+
+		ActiveScene.Camera?.SceneCamera.EnableEngineOverlays = true;
+		SceneCamera.RecordingCamera = ActiveScene.Camera?.SceneCamera;
+		ActiveScene.ExtractRender( drawn );
+		return ActiveScene;
+	}
+
 	internal static void Shutdown()
 	{
 		IsClosing = true;

@@ -80,4 +80,10 @@ internal interface ISceneWorldRender
 	/// Write an aggregate's visibility, tint, flags and lightmaps.
 	/// </summary>
 	void WriteAggregate( SceneObject sceneObject, Borealis.AggregateObject aggregate, SceneObjectChange change );
+
+	/// <summary>
+	/// At the sync point (<see cref="RenderSync.Run"/>): write what waits for the world's next frame (objects made, gone and
+	/// changed since), if anything does, so no view of the frame finds it unwritten. Nothing for a world with nothing waiting.
+	/// </summary>
+	void Sync() { }
 }

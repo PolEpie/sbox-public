@@ -1,3 +1,5 @@
+using System.Threading;
+
 namespace Sandbox.Rendering;
 
 
@@ -17,10 +19,33 @@ public sealed unsafe partial class CommandList
 			if ( !renderer.IsValid() )
 				return;
 
-			renderer.RenderSceneObject( commandList._rendererSetups[entry.Count] );
+			renderer.RenderSceneObject( commandList.PlayedRendererSetup( entry ) );
 		}
 
-		AddEntry( &Execute, new Entry { Object1 = renderer }, ref _rendererSetups, rendererSetup );
+		AddEntry( &Execute, new Entry { Object1 = renderer }, RendererSetupStore, rendererSetup );
+		lock ( _lock )
+		{
+			_drawsRenderers++;
+			Interlocked.Increment( ref liveRendererDraws );
+		}
+	}
+
+	// Renderers this list's recording draws (DrawRenderer), and in every list: a renderer's drawing is its component's code
+	int _drawsRenderers;
+	static int liveRendererDraws;
+
+	/// <summary>
+	/// Whether any command list's recording draws a renderer (<see cref="DrawRenderer"/>): its drawing is the component's code,
+	/// so a frame that may replay one draws on the main thread.
+	/// </summary>
+	internal static bool AnyDrawsRenderers => Volatile.Read( ref liveRendererDraws ) > 0;
+
+	// The recording was cleared (Reset): its renderer draws went with it
+	void ForgetRendererDraws()
+	{
+		if ( _drawsRenderers == 0 ) return;
+		Interlocked.Add( ref liveRendererDraws, -_drawsRenderers );
+		_drawsRenderers = 0;
 	}
 
 	/// <summary>
@@ -46,11 +71,11 @@ public sealed unsafe partial class CommandList
 			// or we'll end up with an infinite loop!
 			if ( Graphics.IsChildView ) return;
 
-			camera.RenderToTexture( rt.ColorTarget, rt.DepthTarget, commandList._viewSetups[entry.Count], out var result );
+			camera.RenderToTexture( rt.ColorTarget, rt.DepthTarget, commandList.PlayedViewSetup( entry ), out var result );
 			commandList.state.views[entry.ViewId] = result;
 		}
 
-		AddEntry( &Execute, new Entry { Object1 = camera, Object5 = target.Name, ViewId = view.Id }, ref _viewSetups, viewSetup );
+		AddEntry( &Execute, new Entry { Object1 = camera, Object5 = target.Name, ViewId = view.Id }, ViewSetupStore, viewSetup );
 		return view;
 	}
 
@@ -70,7 +95,7 @@ public sealed unsafe partial class CommandList
 			var camera = (CameraComponent)entry.Object1;
 			if ( !camera.IsValid() ) return;
 
-			var setup = commandList._reflectionSetups[entry.Count];
+			var setup = commandList.PlayedReflectionSetup( entry );
 			var plane = new Plane( new Vector3( entry.Data1.x, entry.Data1.y, entry.Data1.z ), entry.Data2.x );
 
 			var rt = commandList.GetRenderTarget( (string)entry.Object5 );
@@ -96,7 +121,7 @@ public sealed unsafe partial class CommandList
 			commandList.state.views[entry.ViewId] = RenderReflection( camera, plane, rt, setup );
 		}
 
-		AddEntry( &Execute, new Entry { Object1 = camera, ViewId = view.Id, Object5 = target.Name, Data1 = new Vector4( plane.Normal.x, plane.Normal.y, plane.Normal.z, 0 ), Data2 = new Vector4( plane.Distance, 0, 0, 0 ) }, ref _reflectionSetups, reflectionSetup );
+		AddEntry( &Execute, new Entry { Object1 = camera, ViewId = view.Id, Object5 = target.Name, Data1 = new Vector4( plane.Normal.x, plane.Normal.y, plane.Normal.z, 0 ), Data2 = new Vector4( plane.Distance, 0, 0, 0 ) }, ReflectionSetupStore, reflectionSetup );
 		return view;
 	}
 
@@ -172,7 +197,7 @@ public sealed unsafe partial class CommandList
 			var camera = (CameraComponent)entry.Object1;
 			if ( !camera.IsValid() ) return;
 
-			var setup = commandList._refractionSetups[entry.Count];
+			var setup = commandList.PlayedRefractionSetup( entry );
 			var plane = new Plane( new Vector3( entry.Data1.x, entry.Data1.y, entry.Data1.z ), entry.Data2.x );
 
 			var rt = commandList.GetRenderTarget( (string)entry.Object5 );
@@ -213,7 +238,7 @@ public sealed unsafe partial class CommandList
 			commandList.state.views[entry.ViewId] = result;
 		}
 
-		AddEntry( &Execute, new Entry { Object1 = camera, ViewId = view.Id, Object5 = target.Name, Data1 = new Vector4( plane.Normal.x, plane.Normal.y, plane.Normal.z, 0 ), Data2 = new Vector4( plane.Distance, 0, 0, 0 ) }, ref _refractionSetups, refractionSetup );
+		AddEntry( &Execute, new Entry { Object1 = camera, ViewId = view.Id, Object5 = target.Name, Data1 = new Vector4( plane.Normal.x, plane.Normal.y, plane.Normal.z, 0 ), Data2 = new Vector4( plane.Distance, 0, 0, 0 ) }, RefractionSetupStore, refractionSetup );
 		return view;
 	}
 

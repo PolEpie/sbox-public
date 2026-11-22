@@ -3332,12 +3332,31 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	/// </summary>
 	public void BeginFrame()
 	{
+		BeginDeviceFrame();
+		BeginFrameServices();
+	}
+
+	/// <summary>
+	/// The device's half of <see cref="BeginFrame"/>: wait for the frame slot and recycle it (<see cref="Device.BeginFrame"/>).
+	/// It touches nothing of this backend's but the device, so it may run on a thread of its own while the thread that
+	/// drives frames goes on (the game's frame thread), as long as <see cref="BeginFrameServices"/> follows on that thread
+	/// before it records.
+	/// </summary>
+	public void BeginDeviceFrame()
+	{
 		// Before the device recycles lists: the last frame's still say where they were submitted
 		GraphMeasureReport.BeginFrame( Gpu );
 
 		using ( Zones.DeviceFrame.Start() )
 			Gpu.BeginFrame();
+	}
 
+	/// <summary>
+	/// The frame services' half of <see cref="BeginFrame"/>, after <see cref="BeginDeviceFrame"/>, on the thread that drives
+	/// frames: free what the frame before last held, deliver finished readbacks (their callbacks), stream textures.
+	/// </summary>
+	public void BeginFrameServices()
+	{
 		using ( Zones.FrameServices.Start() )
 		{
 			FreeRetiredVisibility();
