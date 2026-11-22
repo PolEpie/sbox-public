@@ -209,12 +209,18 @@ internal sealed class SpriteBatchSceneObject : SceneCustomObject
 
 	int _renderInstanceCount;
 	bool _pendingHasText, _renderHasText;
+	bool _pendingFacesVelocity;
 	ulong _renderFrame; // the text buffers the sprites' placements point into
 	bool _renderIsSorted;
 	bool _renderFiltered;
 	bool _renderAdditive;
 	bool _renderOpaque;
 	bool _renderRefraction;
+
+	// Whether the compute's results depend on the view drawing them, and whether it would leave the sprites as uploaded
+	bool _renderPerView;
+	bool _renderUnprocessed;
+	ulong _executedFrame;
 
 	public SpriteBatchSceneObject( Scene scene ) : base( scene.SceneWorld )
 	{
@@ -534,6 +540,7 @@ internal sealed class SpriteBatchSceneObject : SceneCustomObject
 		}
 
 		_pendingHasText = false;
+		_pendingFacesVelocity = false;
 
 		foreach ( var spriteGroup in SpriteGroups.Values )
 		{
@@ -544,6 +551,7 @@ internal sealed class SpriteBatchSceneObject : SceneCustomObject
 			_pendingHasText |= spriteGroup.Count > 0 && (spriteGroup.SharedSprites[spriteGroup.Offset].RenderFlags & (int)SpriteFlags.Text) != 0;
 			hasRefraction |= spriteGroup.Count > 0 && spriteGroup.SharedSprites[spriteGroup.Offset].NormalTextureHandle != 0;
 			hasLighting |= spriteGroup.Count > 0 && (spriteGroup.SharedSprites[spriteGroup.Offset].Lighting & 0xFF) != 0;
+			_pendingFacesVelocity |= spriteGroup.Count > 0 && spriteGroup.SharedSprites[spriteGroup.Offset].RotationOffset > -1;
 		}
 
 		HasLitSprites = hasLighting;
@@ -593,6 +601,26 @@ internal sealed class SpriteBatchSceneObject : SceneCustomObject
 		bool opaque = Opaque;
 		int bufferSize = CurrentBufferSize;
 		int totalInstances = spriteCount + splotCount;
+		bool didSort = sorted && totalInstances >= 2;
+
+		_renderInstanceCount = totalInstances;
+		_renderIsSorted = didSort;
+		_renderFiltered = filtered;
+		_renderAdditive = additive;
+		_renderOpaque = opaque;
+		_renderRefraction = Flags.WantsFrameBufferCopy;
+		_renderHasText = _pendingHasText;
+		_renderFrame = Application.FrameCount;
+
+		// The compute sorts by distance from the camera and turns sprites that face their velocity in the view. Without
+		// either its results are the same for every layer and view of a frame, and without motion blur's splots too it would
+		// copy the sprites as they are: they're drawn from where they're uploaded
+		_renderPerView = didSort || _pendingFacesVelocity;
+		_renderUnprocessed = !_renderPerView && splotCount == 0;
+		_executedFrame = 0;
+
+		if ( _renderUnprocessed )
+			return;
 
 		_commandList.SetBufferData( SpriteAtomicCounter, ZeroUint );
 
@@ -645,17 +673,6 @@ internal sealed class SpriteBatchSceneObject : SceneCustomObject
 				}
 			}
 		}
-
-		bool didSort = sorted && totalInstances >= 2;
-
-		_renderInstanceCount = totalInstances;
-		_renderIsSorted = didSort;
-		_renderFiltered = filtered;
-		_renderAdditive = additive;
-		_renderOpaque = opaque;
-		_renderRefraction = Flags.WantsFrameBufferCopy;
-		_renderHasText = _pendingHasText;
-		_renderFrame = Application.FrameCount;
 	}
 
 	public override void RenderSceneObject()
@@ -666,7 +683,14 @@ internal sealed class SpriteBatchSceneObject : SceneCustomObject
 			return;
 
 		Graphics.Attributes.Set( "CameraPosition", Graphics.CameraPosition );
-		_commandList.ExecuteOnRenderThread();
+
+		// A batch draws in several of a view's layers (translucent, bloom, a viewmodel's overlay): one upload and compute serves
+		// them all, unless the results are the view's
+		if ( _renderPerView || _executedFrame != Application.FrameCount )
+		{
+			_executedFrame = Application.FrameCount;
+			_commandList.ExecuteOnRenderThread();
+		}
 
 		var attributes = RenderAttributes.Pool.Get();
 		try
@@ -680,7 +704,7 @@ internal sealed class SpriteBatchSceneObject : SceneCustomObject
 			attributes.Set( "IsSorted", _renderIsSorted ? 1 : 0 );
 			attributes.Set( "SpriteCount", _renderInstanceCount );
 			attributes.Set( "Filtered", _renderFiltered );
-			attributes.Set( "Sprites", (GpuBuffer)SpriteBufferOut );
+			attributes.Set( "Sprites", (GpuBuffer)(_renderUnprocessed ? SpriteBuffer : SpriteBufferOut) );
 			attributes.Set( "SortLUT", (GpuBuffer)GPUSortingBuffer );
 			attributes.Set( "Vertices", (GpuBuffer)VertexBuffer );
 			if ( _renderHasText ) GpuFontText.Bind( attributes, _renderFrame );
