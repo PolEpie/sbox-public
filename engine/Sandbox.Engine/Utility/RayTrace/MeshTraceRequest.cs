@@ -210,6 +210,26 @@ public partial struct MeshTraceRequest
 		foreach ( var hit in hits ) into.Add( FromMap( r, hit ) );
 	}
 
+	// Map materials loaded on the main thread, for map hits traced on others
+	static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Material> mapMaterials = new( StringComparer.OrdinalIgnoreCase );
+	static readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> mapMaterialsQueued = new( StringComparer.OrdinalIgnoreCase );
+
+	/// <summary>
+	/// A map hit's material. Loading needs the main thread, and traces run on others too (a DDGI bake relocates its probes
+	/// in parallel while the main thread waits): there a material the main thread hasn't loaded yet is null, and its load is
+	/// queued for later hits.
+	/// </summary>
+	static Material MapMaterial( string path )
+	{
+		if ( string.IsNullOrEmpty( path ) ) return null;
+		if ( mapMaterials.TryGetValue( path, out var material ) ) return material;
+
+		if ( ThreadSafe.IsMainThread ) return mapMaterials[path] = Material.Load( path );
+
+		if ( mapMaterialsQueued.TryAdd( path, true ) ) MainThread.Queue( () => mapMaterials.TryAdd( path, Material.Load( path ) ) );
+		return null;
+	}
+
 	static Result FromMap( in MeshTraceInput r, in MapTrace.Hit hit )
 	{
 		var length = r.start.Distance( r.end );
@@ -222,7 +242,7 @@ public partial struct MeshTraceRequest
 			EndPosition = hit.Position,
 			HitPosition = hit.Position,
 			Normal = hit.Normal,
-			Material = string.IsNullOrEmpty( hit.Material ) ? null : Material.Load( hit.Material ),
+			Material = MapMaterial( hit.Material ),
 			Transform = hit.Transform,
 			HitTriangle = hit.Triangle,
 			HitTriangleUv = hit.Uv,

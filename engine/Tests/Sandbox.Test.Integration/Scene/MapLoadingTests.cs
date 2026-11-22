@@ -72,6 +72,41 @@ public class MapLoadingTests
 		}
 	}
 
+	/// <summary>
+	/// Map traces off the main thread (a DDGI bake relocates its probes in parallel while the main thread waits) hit the map
+	/// without loading anything there, and carry the material once the main thread has it.
+	/// </summary>
+	[TestMethod]
+	public void MapTracesOffTheMainThread()
+	{
+		var world = new SceneWorld();
+		try
+		{
+			var map = new SceneMap( world, "maps/dev/preview_flat.vmap" );
+			Assert.IsTrue( map.IsValid );
+			var center = map.Bounds.Center;
+			var from = center.WithZ( map.Bounds.Maxs.z + 100 );
+			var to = center.WithZ( map.Bounds.Mins.z - 100 );
+
+			var hits = new Sandbox.Engine.Utility.RayTrace.MeshTraceRequest.Result[16];
+			System.Threading.Tasks.Task.Run( () => System.Threading.Tasks.Parallel.For( 0, hits.Length, i =>
+				hits[i] = world.Trace.Ray( from + new Vector3( i, 0, 0 ), to + new Vector3( i, 0, 0 ) ).Run() ) ).Wait();
+			Assert.IsTrue( hits.All( x => x.Hit ), "every worker's trace hits the map" );
+
+			var onMain = world.Trace.Ray( from, to ).Run();
+			Assert.IsTrue( onMain.Hit );
+			Assert.IsNotNull( onMain.Material, "the main thread loads the hit's material" );
+
+			var later = System.Threading.Tasks.Task.Run( () => world.Trace.Ray( from, to ).Run() ).Result;
+			Assert.AreSame( onMain.Material, later.Material, "a worker's trace carries it once loaded" );
+			map.Delete();
+		}
+		finally
+		{
+			world.Delete();
+		}
+	}
+
 	[TestMethod]
 	public void MissingMapIsInvalid()
 	{
