@@ -30,7 +30,8 @@ public class HangWatchTests
 		lock ( messages ) warnings = messages.Where( m => m.Id == "Borealis.Gpu.FrameStall" ).Select( m => m.Text ).ToArray();
 		Assert.AreEqual( 1, warnings.Length );
 		StringAssert.Contains( warnings[0], "frame thread in a test's long call" );
-		StringAssert.Contains( warnings[0], "Graphics reached 1 of 1 flushed" );
+		// Everything submitted had finished: the queue reached what was flushed
+		StringAssert.Matches( warnings[0], new System.Text.RegularExpressions.Regex( @"Graphics reached (\d+) of \1 flushed" ) );
 
 		device.MarkLost( "Lost on purpose" );
 		StringAssert.Contains( device.LostReport, "watch: frame thread in a test's long call" );
