@@ -74,7 +74,11 @@ internal sealed partial class GameWindow
 	/// </summary>
 	internal void JoinRenderThread()
 	{
-		if ( borealis is not null && RenderBackend.Default is BorealisGpuRenderBackend { FrameAhead: true } backend ) backend.FollowFrame();
+		if ( borealis is null || RenderBackend.Default is not BorealisGpuRenderBackend backend ) return;
+		if ( backend.FrameAhead ) backend.FollowFrame();
+
+		// What the game wrote and painted while it drew, if an earlier join couldn't (a block was recording)
+		backend.WriteStagedNow();
 	}
 
 	/// <summary>Whether the render thread is drawing a frame handed to it: what the frame's end disposes of waits for it.</summary>

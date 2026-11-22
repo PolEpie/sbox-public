@@ -365,6 +365,9 @@ public partial class Scene : GameObject
 		if ( IsSuspended ) return;
 
 		using var _extractScope = _extractTimer.Start();
+
+		// The post processing the update built for each camera is what this frame draws; the next builds into the other set
+		foreach ( var cc in Cameras ) cc.TakePostProcess();
 		PreCameraRender();
 
 		var cameras = RentSortedCameras();

@@ -42,6 +42,18 @@ internal abstract class RenderBackend
 	/// </summary>
 	internal virtual Graphics.Scope BeginUpdateWork() => Graphics.Scope.CreateOn( this );
 
+	/// <summary>
+	/// Whether update-time work recorded on this thread (painting into a texture) runs later, through
+	/// <see cref="DeferUpdateWork"/>: on the main thread while a render thread draws a frame on this device (Borealis.Gpu).
+	/// </summary>
+	internal virtual bool DefersUpdateWork => false;
+
+	/// <summary>
+	/// Run <paramref name="work"/>, which opens update-time work of its own (<see cref="BeginUpdateWork"/>), once the frame the
+	/// render thread draws is drawn, in order with this thread's other writes to the device meanwhile.
+	/// </summary>
+	internal virtual void DeferUpdateWork( Action work ) => work();
+
 	/// <summary>A texture's bindless index on this device: its linear view; the sRGB view is the next.</summary>
 	public abstract int TextureIndex( Texture texture );
 

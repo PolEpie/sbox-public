@@ -956,13 +956,17 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 		if ( texture.Depth == 6 && RenderedInto?.Invoke( this, texture ) is BackendTexture rendered ) return rendered.Handle;
 
 		// One made already is looked up on any thread without waiting (a panel painting on the main thread asks for its
-		// textures' indices while the render thread draws). What workers made is tracked before the main thread uses it, and
-		// a texture made here: while the render thread draws the main thread waits for it first, before it takes the lock
-		// below that the render thread's textures take too
+		// textures' indices while the render thread draws). What workers made is tracked before the main thread records with
+		// it
 		var mainThread = ThreadSafe.IsMainThread;
-		if ( (!mainThread || workerTracks.IsEmpty) && textures.TryGetValue( texture, out var known ) ) return known.Handle;
-		if ( mainThread ) FromMain();
-		if ( mainThread && !workerTracks.IsEmpty ) TrackWorkerTextures();
+		var overlapping = mainThread && drawing && !ThreadSafe.IsRenderThread;
+		if ( (!mainThread || overlapping || workerTracks.IsEmpty) && textures.TryGetValue( texture, out var known ) ) return known.Handle;
+
+		// While the render thread draws, the main thread records nothing, so a made texture's layout tracking can wait for its
+		// next recording, and a texture made meanwhile is made as a worker makes one (below), without waiting for the drawing
+		var ownsContext = mainThread && !overlapping;
+		if ( ownsContext ) FromMain();
+		if ( ownsContext && !workerTracks.IsEmpty ) TrackWorkerTextures();
 
 		if ( textures.TryGetValue( texture, out var backing ) ) return backing.Handle;
 
@@ -971,10 +975,11 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 
 		// Made once, under a lock: a sprite batch's workers ask for their sprites' indices (Texture.Index) in parallel,
 		// while the main thread may be recording. A worker's writes go in a list of its own, sent with the next
-		// submission (Device.DeferUploads), never in the main thread's lists
+		// submission (Device.DeferUploads), never in the main thread's lists; the main thread's too while the render thread
+		// draws with them
 		lock ( textureOwners )
 		{
-			using var deferred = mainThread ? default : gpu.DeferUploads();
+			using var deferred = ownsContext ? default : gpu.DeferUploads();
 
 			// No description: a texture that failed to load, which Source 2 draws with its error texture (and without its
 			// device has no description of at all)
@@ -1034,9 +1039,15 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	/// </summary>
 	void Track( TextureHandle handle, ImageLayout layout )
 	{
-		if ( ThreadSafe.IsMainThread ) context.Track( handle, layout );
+		if ( ThreadSafe.IsMainThread && !Overlapping ) context.Track( handle, layout );
 		else workerTracks.Enqueue( (handle, layout) );
 	}
+
+	/// <summary>
+	/// The list a texture made on this thread writes into, if it has one of its own (<see cref="GpuDevice.DeferUploads"/>): a
+	/// worker's, or the main thread's while the render thread draws with the main thread's lists and context.
+	/// </summary>
+	GpuCommandList OwnUploads => (!ThreadSafe.IsMainThread || Overlapping) ? gpu.DeferredList : null;
 
 	void TrackWorkerTextures()
 	{
@@ -1412,7 +1423,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	/// </summary>
 	GpuCommandList UploadList()
 	{
-		if ( !ThreadSafe.IsMainThread && gpu.DeferredList is { } deferred ) return deferred;
+		if ( OwnUploads is { } deferred ) return deferred;
 		FromMain();
 
 		if ( list is not null )
@@ -1459,6 +1470,13 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	/// </summary>
 	public override bool Update( Texture texture, ReadOnlySpan<byte> data, int x, int y, int z, int width, int height, int depth )
 	{
+		// While the render thread draws, kept and written after it, in order with the main thread's buffer writes
+		if ( Overlapping )
+		{
+			StageTextureUpdate( texture, data, x, y, z, width, height, depth );
+			return true;
+		}
+
 		if ( ThreadSafe.IsMainThread ) FromMain();
 
 		// The engine wrote it: its copy is what's read from now on
@@ -1523,6 +1541,13 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	/// </summary>
 	public override bool Cleared( Texture texture, Color color )
 	{
+		// While the render thread draws, kept and cleared after it, in order with the main thread's other writes
+		if ( Overlapping )
+		{
+			StageTextureClear( texture, color );
+			return true;
+		}
+
 		if ( ThreadSafe.IsMainThread ) FromMain();
 		texture.DrawnByView = false;
 		if ( !textures.TryGetValue( texture, out var backing ) ) return true;
@@ -1564,7 +1589,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 		var value = new Num.Vector4( color.r, color.g, color.b, color.a );
 
 		// A worker's new texture: cleared in its own list, without the main thread's context
-		if ( !ThreadSafe.IsMainThread && gpu.DeferredList is { } deferred )
+		if ( OwnUploads is { } deferred )
 		{
 			deferred.Barrier( TextureBarrier.Transition( handle, ImageLayout.Undefined, ImageLayout.CopyDestination, PipelineStage.AllCommands, MemoryAccess.None, PipelineStage.Transfer, MemoryAccess.TransferWrite ) );
 			deferred.ClearTexture( handle, value );
