@@ -2386,7 +2386,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 			copy.Barrier( PipelineStage.AllCommands, MemoryAccess.MemoryWrite, PipelineStage.Transfer, MemoryAccess.TransferRead );
 			copy.CopyBuffer( handle, offset, readback, 0, data.Length );
 			copy.Barrier( PipelineStage.Transfer, MemoryAccess.TransferWrite, PipelineStage.Host, MemoryAccess.HostRead );
-			gpu.Wait( gpu.Submit( copy ) );
+			using ( RenderSync.Readback( "GpuBuffer.GetData" ) ) gpu.Wait( gpu.Submit( copy ) );
 			gpu.Map( readback )[..data.Length].CopyTo( data );
 		}
 		finally
@@ -2415,7 +2415,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 			context.Begin( copy );
 			context.CopyToBuffer( handle, readback, mip );
 			context.Finish();
-			gpu.Wait( gpu.Submit( copy ) );
+			using ( RenderSync.Readback( "Texture.GetPixels" ) ) gpu.Wait( gpu.Submit( copy ) );
 			return gpu.Map( readback )[..size].ToArray();
 		}
 		finally
@@ -2472,7 +2472,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 			context.Begin( copy );
 			context.CopyToBuffer( handle, readback );
 			context.Finish();
-			gpu.Wait( gpu.Submit( copy ) );
+			using ( RenderSync.Readback( "Texture.GetPixels" ) ) gpu.Wait( gpu.Submit( copy ) );
 
 			var bytes = gpu.Map( readback );
 			var pixels = new Color32[info.Width * info.Height];
