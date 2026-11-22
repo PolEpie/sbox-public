@@ -135,7 +135,7 @@ internal sealed partial class SceneBridge
 			list.CopyTextureToBuffer( handle, 0, 0, readback );
 			list.Barrier( Vk.TextureBarrier.Transition( handle, Vk.ImageLayout.CopySource, Vk.ImageLayout.ShaderRead, Vk.PipelineStage.Transfer, Vk.MemoryAccess.TransferRead, Vk.PipelineStage.AllCommands, Vk.MemoryAccess.MemoryRead ) );
 			list.Barrier( new Vk.BufferBarrier { Buffer = readback, SourceStage = Vk.PipelineStage.Transfer, SourceAccess = Vk.MemoryAccess.TransferWrite, DestinationStage = Vk.PipelineStage.Host, DestinationAccess = Vk.MemoryAccess.HostRead } );
-			gpu.Wait( gpu.Submit( list ) );
+			using ( RenderSync.Readback( "a bitmap render" ) ) gpu.Wait( gpu.Submit( list ) );
 			BackendDevice.SetLayout( texture, Vk.ImageLayout.ShaderRead );
 
 			var pixels = new Color32[info.Width * info.Height];

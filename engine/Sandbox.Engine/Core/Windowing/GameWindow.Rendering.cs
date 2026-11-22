@@ -30,11 +30,26 @@ internal sealed partial class GameWindow
 
 		using ( WindowPresentTiming.Scope() )
 		{
-			game.borealis.PresentFrame();
+			game.presented = game.borealis.PresentFrame();
 			game.UpdateBorealisGpuTitle();
 		}
 
 		return true;
+	}
+
+	// Whether this engine frame presented on Borealis.Gpu, so the next one's device frame starts ahead (HandOverFrame)
+	bool presented;
+
+	/// <summary>
+	/// At the end of the native frame, once mode changes are applied: when this frame presented on Borealis.Gpu, hand the
+	/// next frame's device frame start and the window's next acquire to the frame thread, so the wait for the GPU and the
+	/// swap chain is off the main thread while it ends this frame and runs the next one's game code.
+	/// </summary>
+	internal void HandOverFrame()
+	{
+		if ( !presented || borealis is null ) return;
+		presented = false;
+		if ( RenderBackend.Default is BorealisGpuRenderBackend backend ) backend.HandOverFrame( borealis );
 	}
 
 	internal void Render()

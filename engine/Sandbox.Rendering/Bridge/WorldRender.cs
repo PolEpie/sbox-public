@@ -121,7 +121,7 @@ internal sealed partial class WorldRender : ISceneWorldRender, IAttributeSource,
 
 	void Gone( SceneObject sceneObject, ulong frame )
 	{
-		if ( !ThreadSafe.IsMainThread || World.InRender )
+		if ( !ThreadSafe.IsMainThread || World.InRender || RenderSync.DeferWrites )
 		{
 			lock ( gate ) gone.Add( sceneObject );
 			return;
@@ -565,6 +565,9 @@ internal sealed partial class WorldRender : ISceneWorldRender, IAttributeSource,
 		{
 			// The matrices native skins with, straight into the object's own: a bone each, as many as its mesh's bind pose has
 			if ( (change & Pose) != 0 || meshChanged ) model.GetBoneWorldMatrices( mesh.PoseBoneMatrices( mesh.Mesh.BindPose.Length ) );
+
+			// The pose written now, or by the animation workers since the last frame, is the one drawn from here
+			mesh.TakePose();
 
 			// Native evaluates morph flex rules each frame, from the model's: only a new model or mesh changes whether it morphs
 			if ( meshChanged || (change & SceneObjectChange.Model) != 0 )

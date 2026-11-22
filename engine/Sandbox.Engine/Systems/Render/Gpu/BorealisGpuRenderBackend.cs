@@ -259,14 +259,19 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 		// Never inside a Borealis frame's recording (a block it lends): its lists would be left in the frame before
 		// A lost device is said and handled whatever was recording when it went
 		BorealisGpuDeviceLost.Check( gpu );
-		if ( !followsFrames || frame == Application.FrameCount || lendNext is not null ) return;
+		if ( !followsFrames || lendNext is not null ) return;
+
+		// Started ahead on the frame thread (HandOverFrame): joined, and finished here; that may be before this engine frame
+		// ends, when something records in its end
+		JoinFrameThread();
+		if ( frame >= Application.FrameCount ) return;
 		using var timing = FrameStartTiming.Scope();
 		frame = Application.FrameCount;
 		SubmitUploads();
 		FreeModelGeometry();
 		FreeCollectedBackings();
 		LimitAnisotropy();
-		BiasMips();
+		BiasMips( Application.FrameCount );
 
 		// Behind a loading screen nobody watches the frames: what a map loads is made and streamed with bigger budgets
 		services.Loading = GameLoading( Sandbox.Engine.GlobalContext.Game?.ActiveScene );
@@ -314,9 +319,9 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	/// The mip bias a temporal upscaler asked for within the last two frames, or none, as native drops its upscaler (and the
 	/// bias) once no view has used it for two frames; before anything records in the frame.
 	/// </summary>
-	void BiasMips()
+	void BiasMips( ulong frameCount )
 	{
-		var bias = mipBiasFrame > 0 && Application.FrameCount - mipBiasFrame <= 2 ? mipBias : 0.0f;
+		var bias = mipBiasFrame > 0 && frameCount - mipBiasFrame <= 2 ? mipBias : 0.0f;
 		gpu.SetGlobalMipBias( bias );
 	}
 
@@ -1335,13 +1340,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 			return list;
 		}
 
-		if ( uploads is null )
-		{
-			FollowFrame();
-			uploads = gpu.BeginCommandList( QueueType.Graphics, "Engine uploads" );
-			written.Clear();
-		}
-
+		if ( uploads is null ) BeginUploads();
 		return uploads;
 	}
 
@@ -2327,12 +2326,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 
 		// Outside one - a recording uploading its tables - copied once, into the upload memory of a list of their own that's
 		// submitted before the next block, which is what draws with them: writing now would submit and wait for each
-		if ( uploads is null )
-		{
-			FollowFrame();
-			uploads = gpu.BeginCommandList( QueueType.Graphics, "Engine uploads" );
-			written.Clear();
-		}
+		if ( uploads is null ) BeginUploads();
 
 		// A second write to a buffer waits for the first, in case they overlap
 		if ( !written.Add( handle ) )
@@ -2356,6 +2350,19 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	/// Submit the buffer writes made outside a block, visible to everything after them: before a block, a device frame,
 	/// a readback, or freeing a buffer they may write.
 	/// </summary>
+	/// <summary>
+	/// Begin the list of uploads submitted before the next block, in this engine frame's device frame. One started ahead on
+	/// the frame thread (<see cref="HandOverFrame"/>) isn't joined for it: uploads need the frame to have switched, not the
+	/// wait for the GPU after it, so the game's update-time writes (a painter's tables) don't wait for the GPU.
+	/// </summary>
+	void BeginUploads()
+	{
+		if ( FrameAhead ) WaitForAheadSwitch();
+		else FollowFrame();
+		uploads = gpu.BeginCommandList( QueueType.Graphics, "Engine uploads" );
+		written.Clear();
+	}
+
 	void SubmitUploads()
 	{
 		if ( uploads is null ) return;
@@ -2379,7 +2386,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 			copy.Barrier( PipelineStage.AllCommands, MemoryAccess.MemoryWrite, PipelineStage.Transfer, MemoryAccess.TransferRead );
 			copy.CopyBuffer( handle, offset, readback, 0, data.Length );
 			copy.Barrier( PipelineStage.Transfer, MemoryAccess.TransferWrite, PipelineStage.Host, MemoryAccess.HostRead );
-			gpu.Wait( gpu.Submit( copy ) );
+			using ( RenderSync.Readback( "GpuBuffer.GetData" ) ) gpu.Wait( gpu.Submit( copy ) );
 			gpu.Map( readback )[..data.Length].CopyTo( data );
 		}
 		finally
@@ -2408,7 +2415,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 			context.Begin( copy );
 			context.CopyToBuffer( handle, readback, mip );
 			context.Finish();
-			gpu.Wait( gpu.Submit( copy ) );
+			using ( RenderSync.Readback( "Texture.GetPixels" ) ) gpu.Wait( gpu.Submit( copy ) );
 			return gpu.Map( readback )[..size].ToArray();
 		}
 		finally
@@ -2465,7 +2472,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 			context.Begin( copy );
 			context.CopyToBuffer( handle, readback );
 			context.Finish();
-			gpu.Wait( gpu.Submit( copy ) );
+			using ( RenderSync.Readback( "Texture.GetPixels" ) ) gpu.Wait( gpu.Submit( copy ) );
 
 			var bytes = gpu.Map( readback );
 			var pixels = new Color32[info.Width * info.Height];
@@ -2493,6 +2500,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 
 	public void Dispose()
 	{
+		StopFrameThread();
 		Unregister( this );
 		SubmitUploads();
 		gpu.WaitIdle();

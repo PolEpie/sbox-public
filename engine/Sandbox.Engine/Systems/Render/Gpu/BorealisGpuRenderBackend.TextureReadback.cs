@@ -63,7 +63,7 @@ internal sealed partial class BorealisGpuRenderBackend
 			context.Begin( copy );
 			context.CopyToBuffer( handle, readback, mip, volume ? 0 : slice );
 			context.Finish();
-			gpu.Wait( gpu.Submit( copy ) );
+			using ( Sandbox.Rendering.RenderSync.Readback( "Texture.GetPixels" ) ) gpu.Wait( gpu.Submit( copy ) );
 
 			ReadOnlySpan<byte> bytes = gpu.Map( readback ).Slice( (int)(volume ? sliceBytes * slice : 0), (int)sliceBytes );
 
