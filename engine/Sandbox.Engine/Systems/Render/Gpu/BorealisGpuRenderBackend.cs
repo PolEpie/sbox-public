@@ -127,6 +127,8 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 			GpuAssistedDescriptorChecks = false,
 			Presentation = presentation,
 			ProgressMarkers = markers,
+			// The process's device notes frames that stop (where the frame thread waited, how far the queues got)
+			HangWatch = frames && Environment.GetEnvironmentVariable( "BOREALIS_HANGWATCH" ) != "0",
 			PipelineCacheFolder = pipelineCacheFolder,
 			Message = message,
 

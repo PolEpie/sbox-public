@@ -241,7 +241,7 @@ public sealed unsafe partial class Device
 			};
 
 			ulong buffer;
-			Vk.vkCreateBuffer( Vk.Device, &create, null, &buffer ).Check( "vkCreateBuffer" );
+			using ( Enter( "vkCreateBuffer" ) ) Vk.vkCreateBuffer( Vk.Device, &create, null, &buffer ).Check( "vkCreateBuffer" );
 
 			VkMemoryRequirements requirements;
 			Vk.vkGetBufferMemoryRequirements( Vk.Device, buffer, &requirements );
@@ -340,7 +340,7 @@ public sealed unsafe partial class Device
 				pQueueFamilyIndices = families,
 			};
 
-			Vk.vkCreateImage( Vk.Device, &create, null, &image ).Check( $"vkCreateImage ({desc.Name}, {desc.Format} {desc.Width}x{desc.Height})" );
+			using ( Enter( "vkCreateImage" ) ) Vk.vkCreateImage( Vk.Device, &create, null, &image ).Check( $"vkCreateImage ({desc.Name}, {desc.Format} {desc.Width}x{desc.Height})" );
 
 			VkMemoryRequirements requirements;
 			Vk.vkGetImageMemoryRequirements( Vk.Device, image, &requirements );
@@ -979,7 +979,7 @@ public sealed unsafe partial class Device
 		};
 
 		ulong pipeline;
-		Vk.vkCreateComputePipelines( Vk.Device, pipelineCache, 1, &create, null, &pipeline ).Check( $"vkCreateComputePipelines ({info.Name})" );
+		using ( Enter( "vkCreateComputePipelines" ) ) Vk.vkCreateComputePipelines( Vk.Device, pipelineCache, 1, &create, null, &pipeline ).Check( $"vkCreateComputePipelines ({info.Name})" );
 		return pipeline;
 	}
 

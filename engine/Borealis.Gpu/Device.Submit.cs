@@ -285,9 +285,11 @@ public sealed unsafe partial class Device
 	public void BeginFrame()
 	{
 		FrameStarts[(int)((FrameNumber + 1) & (FrameHistory - 1))] = System.Diagnostics.Stopwatch.GetTimestamp();
+		WatchFrame();
 		var carried = CarryRecording();
 		RememberEvent( "frame starts:", (long)FrameNumber + 1 );
 
+		var doing = Enter( "BeginFrame: flush" );
 		Flush();
 		frame.Graphics = graphicsQueue.Submitted;
 		frame.Compute = computeQueue.Submitted;
@@ -298,8 +300,12 @@ public sealed unsafe partial class Device
 		FrameNumber++;
 		frame = frames[FrameSlot];
 
+		doing.Dispose();
+		doing = Enter( "BeginFrame: wait for the frame slot" );
 		graphicsQueue.Wait( frame.Graphics );
 		computeQueue.Wait( frame.Compute );
+		doing.Dispose();
+		doing = Enter( "BeginFrame: recycle" );
 
 		var recycle = recycling;
 		lock ( frame.Lists )
@@ -319,12 +325,25 @@ public sealed unsafe partial class Device
 		}
 
 		recycle.Clear();
+		doing.Dispose();
+		doing = Enter( "BeginFrame: collect garbage" );
 		CollectGarbage();
+		doing.Dispose();
+		doing = Enter( "BeginFrame: trim spares" );
 		TrimSpares();
+		doing.Dispose();
+		doing = Enter( "BeginFrame: upload pages ahead" );
 		MakeUploadPagesAhead();
+		doing.Dispose();
+		doing = Enter( "BeginFrame: trim the allocator" );
 		Allocator.Trim( FrameNumber );
+		doing.Dispose();
+		doing = Enter( "BeginFrame: relocate" );
 		RelocateDraining();
+		doing.Dispose();
+		doing = Enter( "BeginFrame: memory budget" );
 		if ( FrameNumber % MemoryBudgetFrames == 0 ) RefreshMemoryBudget();
+		doing.Dispose();
 	}
 
 	// The frame's lists as BeginFrame recycles them, kept
@@ -561,7 +580,7 @@ public sealed unsafe partial class Device
 				pSignalSemaphoreInfos = signals,
 			};
 
-			Check( Vk.vkQueueSubmit2( queue.Handle, 1, &submit, 0 ), "vkQueueSubmit2" );
+			using ( Enter( "vkQueueSubmit2" ) ) Check( Vk.vkQueueSubmit2( queue.Handle, 1, &submit, 0 ), "vkQueueSubmit2" );
 			Interlocked.Increment( ref submissions );
 			queue.Pending.Clear();
 			Volatile.Write( ref queue.Flushed, value );
@@ -682,7 +701,7 @@ public sealed unsafe partial class Device
 			pSignalSemaphoreInfos = &signal,
 		};
 
-		Check( Vk.vkQueueSubmit2( queue.Handle, 1, &submit, 0 ), "vkQueueSubmit2" );
+		using ( Enter( "vkQueueSubmit2 (held lists)" ) ) Check( Vk.vkQueueSubmit2( queue.Handle, 1, &submit, 0 ), "vkQueueSubmit2" );
 		Interlocked.Increment( ref submissions );
 		queue.Pending.Clear();
 		Volatile.Write( ref queue.Flushed, value );

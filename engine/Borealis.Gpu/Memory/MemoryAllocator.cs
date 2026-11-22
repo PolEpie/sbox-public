@@ -1058,6 +1058,7 @@ internal sealed unsafe class MemoryAllocator : IDisposable
 		ulong memory;
 		var start = System.Diagnostics.Stopwatch.GetTimestamp();
 		using ( Owner is { } owner ? owner.AllocateMemoryZone() : default )
+		using ( Owner is { } watched ? watched.Enter( "vkAllocateMemory" ) : default )
 			vk.vkAllocateMemory( vk.Device, &info, null, &memory ).Check( "vkAllocateMemory" );
 		var ticks = System.Diagnostics.Stopwatch.GetTimestamp() - start;
 		System.Threading.Interlocked.Add( ref driverAllocationTicks, ticks );
@@ -1143,7 +1144,8 @@ internal sealed unsafe class MemoryAllocator : IDisposable
 	void FreeBlock( MemoryBlock block, bool counted = true )
 	{
 		// Freeing memory unmaps it
-		vk.vkFreeMemory( vk.Device, block.Memory, null );
+		using ( Owner is { } watched ? watched.Enter( "vkFreeMemory" ) : default )
+			vk.vkFreeMemory( vk.Device, block.Memory, null );
 		if ( !counted ) return;
 		Reserved -= block.Size;
 		heapReserved[properties.Type( block.TypeIndex ).heapIndex] -= (long)block.Size;

@@ -280,6 +280,7 @@ public sealed unsafe partial class Device : IDisposable
 			CreateBindlessDefaults();
 			CreateIndirectCounts( driver.driverID, features.drawIndirectCount );
 			LoadPartManifest( options );
+			if ( options.HangWatch ) StartWatch();
 		}
 		catch
 		{
@@ -830,6 +831,7 @@ public sealed unsafe partial class Device : IDisposable
 	/// </summary>
 	public void WaitIdle()
 	{
+		using var _ = Enter( "WaitIdle" );
 		Flush();
 		WaitFlushed();
 	}
@@ -853,6 +855,7 @@ public sealed unsafe partial class Device : IDisposable
 	{
 		if ( disposed ) return;
 		disposed = true;
+		StopWatch();
 
 		// Upload pages being made ahead finish first: they allocate on this device
 		while ( Volatile.Read( ref makingUploadPages ) != 0 ) Thread.Sleep( 1 );
