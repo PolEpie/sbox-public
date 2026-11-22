@@ -419,8 +419,8 @@ public sealed partial class CommandList
 
 			lock ( list._lock )
 			{
-				entry = list._entries.Count;
 				list.AddEntry( &Execute, new Entry { Object5 = token, Object2 = this, Data1 = new Vector4( (int)downsampleMethod, maxMips, 0, 0 ) } );
+				entry = list._recorded.Entries.Count - 1;
 			}
 
 			return new RenderTargetHandle { Name = token };
@@ -434,7 +434,8 @@ public sealed partial class CommandList
 		{
 			lock ( list._lock )
 			{
-				ref var grab = ref CollectionsMarshal.AsSpan( list._entries )[entry];
+				list.Writing();
+				ref var grab = ref CollectionsMarshal.AsSpan( list._recorded.Entries )[entry];
 				grab.Data1.y = Math.Max( grab.Data1.y, mips );
 			}
 		}

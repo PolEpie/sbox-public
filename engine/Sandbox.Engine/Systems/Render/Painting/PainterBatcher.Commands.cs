@@ -163,8 +163,12 @@ internal partial class PainterBatcher
 
 	internal void BeginExecute()
 	{
-		foreach ( var usage in _textures )
+		// Over the list's storage as it is now: on the render thread the main thread may be painting the next frame into it
+		var textures = System.Runtime.InteropServices.CollectionsMarshal.AsSpan( _textures );
+		for ( int i = 0; i < textures.Length; i++ )
 		{
+			var usage = textures[i];
+			if ( usage.Texture is null ) continue;
 			if ( usage.Texture.ParentObject is VideoPlayer player )
 				player.TrackPresentation( usage.Presented );
 			if ( usage.Presented ) usage.Texture.MarkUsed();

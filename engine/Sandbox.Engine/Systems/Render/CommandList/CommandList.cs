@@ -83,13 +83,106 @@ public sealed unsafe partial class CommandList
 	}
 
 	/// <summary>
-	/// An ordered list of entries that will execute on the render thread. All access (record and
-	/// execute) is serialized by <see cref="_lock"/> - recording and executing the same list from
-	/// two threads at once is caller misuse, but the lock guarantees it can't crash or corrupt state.
+	/// What a list has recorded: its entries in order and the data they carry. A list keeps one, and a second while a render
+	/// thread's frame may replay it (<see cref="Writing"/>).
 	/// </summary>
-	readonly List<Entry> _entries = new List<Entry>( 8 );
+	sealed class Recorded
+	{
+		public readonly List<Entry> Entries = new List<Entry>( 8 );
 
+		// Struct payloads too big for an Entry, written here instead of boxed. Reused across Reset.
+		public byte[] Payload = [];
+		public int PayloadUsed;
 
+		// Struct payloads that hold references (view setups), kept in typed lists instead of boxed. Cleared on Reset.
+		public List<ViewSetup> ViewSetups;
+		public List<ReflectionSetup> ReflectionSetups;
+		public List<RefractionSetup> RefractionSetups;
+		public List<RendererSetup> RendererSetups;
+
+		public void Clear()
+		{
+			Entries.Clear();
+			PayloadUsed = 0;
+			ViewSetups?.Clear();
+			ReflectionSetups?.Clear();
+			RefractionSetups?.Clear();
+			RendererSetups?.Clear();
+		}
+
+		/// <summary>Become a copy of <paramref name="other"/>, keeping this set's storage: nothing allocates once it's grown.</summary>
+		public void CopyFrom( Recorded other )
+		{
+			Clear();
+			Entries.AddRange( other.Entries );
+			if ( Payload.Length < other.PayloadUsed ) Payload = new byte[other.Payload.Length];
+			other.Payload.AsSpan( 0, other.PayloadUsed ).CopyTo( Payload );
+			PayloadUsed = other.PayloadUsed;
+			Copy( other.ViewSetups, ref ViewSetups );
+			Copy( other.ReflectionSetups, ref ReflectionSetups );
+			Copy( other.RefractionSetups, ref RefractionSetups );
+			Copy( other.RendererSetups, ref RendererSetups );
+		}
+
+		static void Copy<T>( List<T> from, ref List<T> to )
+		{
+			if ( from is null || from.Count == 0 ) return;
+			to ??= new List<T>( from.Count );
+			to.AddRange( from );
+		}
+	}
+
+	/// <summary>
+	/// An ordered list of entries that will execute on the render thread, and what they carry. Recording and resetting are
+	/// serialized by <see cref="_lock"/>; a replay reads the set it took under it (<see cref="Playback"/>).
+	/// </summary>
+	Recorded _recorded = new();
+
+	/// <summary>
+	/// What the render thread's frame replays while the main thread records the next frame into <see cref="_recorded"/>: the
+	/// list as it was when the frame was handed over (<see cref="RenderSync.Epoch"/> <see cref="_splitEpoch"/>). Null until
+	/// the main thread first records into a list a render thread's frame may replay.
+	/// </summary>
+	Recorded _held;
+	long _splitEpoch = -1;
+
+	// What the entries executing now read their payloads and setups from: the set being replayed
+	Recorded _playing;
+
+	/// <summary>
+	/// Called under <see cref="_lock"/> before anything changes what's recorded. While a render thread's frame may be replaying
+	/// the list (<see cref="RenderSync.Overlapping"/>), the main thread's first change since that frame was handed over keeps
+	/// the recorded set for the frame and goes on in the other, as a copy of it or, when <paramref name="clearing"/>, empty: the
+	/// frame replays the list as it was handed over, as a frame replays a list on the main thread before the game records the
+	/// next one. A list the game leaves alone is never copied. Nothing in serial mode, or on the render thread.
+	/// </summary>
+	void Writing( bool clearing = false )
+	{
+		if ( !RenderSync.Overlapping || RenderSync.OnRenderThread ) return;
+		var epoch = RenderSync.Epoch;
+		if ( _splitEpoch == epoch ) return;
+		_splitEpoch = epoch;
+
+		var held = _recorded;
+		_recorded = _held ?? new Recorded();
+		_held = held;
+		if ( clearing ) _recorded.Clear();
+		else _recorded.CopyFrom( held );
+		RenderSync.CountListSplit();
+	}
+
+	/// <summary>
+	/// The set a replay on this thread reads: on the render thread, the list as its frame was handed over (the held set once the
+	/// main thread has recorded since); anywhere else, what's recorded now.
+	/// </summary>
+	Recorded Playback()
+	{
+		lock ( _lock )
+		{
+			if ( _held is not null && _splitEpoch == RenderSync.Epoch && RenderSync.OnRenderThread ) return _held;
+			return _recorded;
+		}
+	}
 
 	[System.Runtime.CompilerServices.MethodImpl( System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining )]
 	void AddEntry( delegate*< ref Entry, CommandList, void > execute, Entry data )
@@ -98,13 +191,10 @@ public sealed unsafe partial class CommandList
 
 		lock ( _lock )
 		{
-			_entries.Add( data );
+			Writing();
+			_recorded.Entries.Add( data );
 		}
 	}
-
-	// Struct payloads too big for an Entry, written here instead of boxed. Reused across Reset.
-	byte[] _payload = [];
-	int _payloadUsed;
 
 	/// <summary>
 	/// Add an entry with a struct payload, read back with <see cref="ReadPayload{T}"/>. Uses <see cref="Entry.Count"/>.
@@ -115,41 +205,50 @@ public sealed unsafe partial class CommandList
 
 		lock ( _lock )
 		{
+			Writing();
+			var recorded = _recorded;
 			var size = Unsafe.SizeOf<T>();
-			if ( _payloadUsed + size > _payload.Length )
-				Array.Resize( ref _payload, Math.Max( Math.Max( _payload.Length * 2, 256 ), _payloadUsed + size ) );
+			if ( recorded.PayloadUsed + size > recorded.Payload.Length )
+				Array.Resize( ref recorded.Payload, Math.Max( Math.Max( recorded.Payload.Length * 2, 256 ), recorded.PayloadUsed + size ) );
 
-			MemoryMarshal.Write( _payload.AsSpan( _payloadUsed ), in payload );
-			data.Count = _payloadUsed;
-			_payloadUsed += size;
-			_entries.Add( data );
+			MemoryMarshal.Write( recorded.Payload.AsSpan( recorded.PayloadUsed ), in payload );
+			data.Count = recorded.PayloadUsed;
+			recorded.PayloadUsed += size;
+			recorded.Entries.Add( data );
 		}
 	}
 
-	T ReadPayload<T>( in Entry entry ) where T : unmanaged => MemoryMarshal.Read<T>( _payload.AsSpan( entry.Count ) );
+	// Read while the entry executes, from the set being replayed
+	T ReadPayload<T>( in Entry entry ) where T : unmanaged => MemoryMarshal.Read<T>( (_playing ?? _recorded).Payload.AsSpan( entry.Count ) );
 
-	// Struct payloads that hold references (view setups), kept in typed lists instead of boxed. Cleared on Reset.
-	List<ViewSetup> _viewSetups;
-	List<ReflectionSetup> _reflectionSetups;
-	List<RefractionSetup> _refractionSetups;
-	List<RendererSetup> _rendererSetups;
+	// A setup payload of an executing entry, from the set being replayed
+	ViewSetup PlayedViewSetup( in Entry entry ) => (_playing ?? _recorded).ViewSetups[entry.Count];
+	ReflectionSetup PlayedReflectionSetup( in Entry entry ) => (_playing ?? _recorded).ReflectionSetups[entry.Count];
+	RefractionSetup PlayedRefractionSetup( in Entry entry ) => (_playing ?? _recorded).RefractionSetups[entry.Count];
+	RendererSetup PlayedRendererSetup( in Entry entry ) => (_playing ?? _recorded).RendererSetups[entry.Count];
 
 	/// <summary>
-	/// Add an entry with a struct payload that holds references, kept in <paramref name="store"/> (made the first time) at
-	/// <see cref="Entry.Count"/>.
+	/// Add an entry with a struct payload that holds references, kept in the store <paramref name="store"/> picks from the
+	/// recorded set (made the first time) at <see cref="Entry.Count"/>.
 	/// </summary>
-	void AddEntry<T>( delegate*< ref Entry, CommandList, void > execute, Entry data, ref List<T> store, in T payload ) where T : struct
+	void AddEntry<T>( delegate*< ref Entry, CommandList, void > execute, Entry data, Func<Recorded, List<T>> store, in T payload ) where T : struct
 	{
 		data.Execute = execute;
 
 		lock ( _lock )
 		{
-			store ??= new List<T>( 2 );
-			data.Count = store.Count;
-			store.Add( payload );
-			_entries.Add( data );
+			Writing();
+			var list = store( _recorded );
+			data.Count = list.Count;
+			list.Add( payload );
+			_recorded.Entries.Add( data );
 		}
 	}
+
+	static readonly Func<Recorded, List<ViewSetup>> ViewSetupStore = static r => r.ViewSetups ??= new List<ViewSetup>( 2 );
+	static readonly Func<Recorded, List<ReflectionSetup>> ReflectionSetupStore = static r => r.ReflectionSetups ??= new List<ReflectionSetup>( 2 );
+	static readonly Func<Recorded, List<RefractionSetup>> RefractionSetupStore = static r => r.RefractionSetups ??= new List<RefractionSetup>( 2 );
+	static readonly Func<Recorded, List<RendererSetup>> RendererSetupStore = static r => r.RendererSetups ??= new List<RendererSetup>( 2 );
 
 	[Obsolete]
 	RenderAttributes attributes => Graphics.Attributes;
@@ -205,6 +304,7 @@ public sealed unsafe partial class CommandList
 		// another thread is mid-execute would corrupt them. The lock makes that safe.
 		lock ( _lock )
 		{
+			Writing( clearing: true );
 			if ( _resources is not null )
 			{
 				foreach ( var resource in _resources )
@@ -216,12 +316,7 @@ public sealed unsafe partial class CommandList
 			drawAttributes?.Clear( false );
 			managedDrawAttributes?.Clear( false );
 			currentDrawAttributes = null;
-			_entries.Clear();
-			_payloadUsed = 0;
-			_viewSetups?.Clear();
-			_reflectionSetups?.Clear();
-			_refractionSetups?.Clear();
-			_rendererSetups?.Clear();
+			_recorded.Clear();
 		}
 	}
 
@@ -526,22 +621,29 @@ public sealed unsafe partial class CommandList
 			var previousState = other.state;
 			other.state = commandList.state;
 
-			// Lock the inserted list while we iterate it, so it can't be recorded/reset out from
-			// under us on another thread.
-			lock ( other._lock )
+			// The set this thread replays (the list as the render thread's frame was handed over, there), which recording
+			// leaves alone meanwhile; one replay of a list at a time
+			var played = other.Playback();
+			lock ( other._playLock )
 			{
-				// Inserted lists need the same resource preparation as direct execution.
-				// In particular, Painter must invalidate its previous execution's GPU copy.
-				if ( other._resources is not null )
+				var previousPlaying = other._playing;
+				other._playing = played;
+				try
 				{
-					foreach ( var resource in other._resources )
-						resource.BeginExecute();
-				}
+					// Inserted lists need the same resource preparation as direct execution.
+					// In particular, Painter must invalidate its previous execution's GPU copy.
+					other.BeginResources();
 
-				for ( int i = 0; i < other._entries.Count; i++ )
+					var entries = CollectionsMarshal.AsSpan( played.Entries );
+					for ( int i = 0; i < entries.Length; i++ )
+					{
+						var e = entries[i];
+						e.Execute( ref e, other );
+					}
+				}
+				finally
 				{
-					var e = other._entries[i];
-					e.Execute( ref e, other );
+					other._playing = previousPlaying;
 				}
 			}
 
@@ -560,7 +662,7 @@ public sealed unsafe partial class CommandList
 			return;
 
 		// One execution at a time: the render-target stack is per-list state.
-		lock ( _lock )
+		lock ( _playLock )
 		{
 			var listScope = OpenScopeFor( _sampler );
 
