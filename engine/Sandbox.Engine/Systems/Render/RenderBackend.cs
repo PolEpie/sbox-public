@@ -35,6 +35,13 @@ internal abstract class RenderBackend
 	/// <summary>Submit what the block recorded.</summary>
 	public abstract void EndBlock();
 
+	/// <summary>
+	/// A block for work the game asks for outside one, which runs at once on Source 2's device (a compute dispatch, a texture
+	/// copy, mips, painting into a texture): a block of its own, submitted on disposal, unless the device records it with
+	/// what it uploads before the next block (Borealis.Gpu).
+	/// </summary>
+	internal virtual Graphics.Scope BeginUpdateWork() => Graphics.Scope.CreateOn( this );
+
 	/// <summary>A texture's bindless index on this device: its linear view; the sRGB view is the next.</summary>
 	public abstract int TextureIndex( Texture texture );
 

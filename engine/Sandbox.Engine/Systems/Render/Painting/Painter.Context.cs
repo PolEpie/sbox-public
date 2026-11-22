@@ -158,7 +158,8 @@ public readonly ref partial struct Painter
 
 		void CommandList.IResource.BeginExecute()
 		{
-			for ( var context = this; context is not null; context = context._nested )
+			// The render thread replays the list as its frame was handed over, while the main thread may paint the next one
+			for ( var context = this; context is not null && !RenderSync.OnRenderThread; context = context._nested )
 			{
 				if ( context.IsPainting )
 					throw new InvalidOperationException( "Finish painting before executing the command list." );

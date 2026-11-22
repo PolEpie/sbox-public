@@ -37,11 +37,13 @@ public sealed partial class SceneModel : SceneObject
 
 			// A plain mesh object, as SceneObject's: it animates on its own instance, and native only keeps its draw state,
 			// bounds and render meshes for traces
-			MeshSystem.CreateSceneObject( model.native, transform, null, flags, typeFlags, sceneWorld, 0x1 );
+			if ( MakesNativeTwin ) MeshSystem.CreateSceneObject( model.native, transform, null, flags, typeFlags, sceneWorld, 0x1 );
+			else MakeWithoutTwin( sceneWorld, model );
+			_keptModel = model;
 			StartResolvingDraws( model );
 			FlagsAtCreation( model, flags );
 
-			if ( native.IsNull )
+			if ( MakesNativeTwin && native.IsNull )
 			{
 				Log.Warning( "SceneModel: Didn't get a valid native pointer" );
 				throw new System.ArgumentException( "Error creating AnimSceneObject - possible invalid model?" );
@@ -67,11 +69,11 @@ public sealed partial class SceneModel : SceneObject
 			animNative = new SceneModelAnimation( (NativeEngine.CSceneAnimatableObject)ptr, default, this );
 	}
 
-	internal override void OnNativeDestroy()
+	internal override void Destroyed()
 	{
 		DestroyAnimationInstance();
 		animNative = default;
-		base.OnNativeDestroy();
+		base.Destroyed();
 	}
 
 	public float PlaybackRate

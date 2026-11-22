@@ -79,6 +79,9 @@ internal static class EngineLoop
 			try
 			{
 				GameWindow.Current?.ApplyPendingMode();
+
+				// The next frame's device frame starts on the frame thread from here, while this one ends
+				GameWindow.Current?.HandOverFrame();
 			}
 			catch ( System.Exception e )
 			{
@@ -296,12 +299,44 @@ internal static class EngineLoop
 		Project.Tick();
 
 		//
-		// Free anything that needs to be disposed of at end of frame
-		// 
-		DrainFrameEndDisposables();
+		// Free anything that needs to be disposed of at end of frame, and render targets: once the render thread has drawn
+		// the frame handed to it, when it draws one
+		//
+		if ( GameWindow.Current?.DrawingOnRenderThread == true ) DeferFrameEndDisposals();
+		else
+		{
+			DrainFrameEndDisposables();
+			RenderTarget.EndOfFrame();
+		}
+	}
 
-		// Free render targets
-		RenderTarget.EndOfFrame();
+	// What was queued to be disposed of before a frame was handed to the render thread, disposed once it's drawn
+	static readonly List<IDisposable> handedOverDisposals = new();
+	static bool handedOverTargets;
+
+	static void DeferFrameEndDisposals()
+	{
+		while ( FrameEndDisposables.Reader.TryRead( out var disposable ) ) handedOverDisposals.Add( disposable );
+		handedOverTargets = true;
+	}
+
+	/// <summary>
+	/// The render thread has drawn the frame handed to it (the main thread joined it): what that frame's end left to dispose of
+	/// goes now, and its render targets return to the pool.
+	/// </summary>
+	internal static void RenderThreadFrameDone()
+	{
+		if ( handedOverDisposals.Count > 0 )
+		{
+			foreach ( var disposable in handedOverDisposals ) disposable.Dispose();
+			handedOverDisposals.Clear();
+		}
+
+		if ( handedOverTargets )
+		{
+			handedOverTargets = false;
+			RenderTarget.EndOfFrame();
+		}
 	}
 
 
@@ -341,6 +376,9 @@ internal static class EngineLoop
 
 		using var _outputScope = _clientOutput.Start();
 
+		// The render thread has finished the last frame before anything here touches the render side or the device
+		if ( !Application.IsEditor ) GameWindow.Current?.JoinRenderThread();
+
 		// The frame's scene renderer, picked once, so a frame never mixes renderers
 		Rendering.SceneRenderer.BeginFrame();
 
@@ -350,6 +388,9 @@ internal static class EngineLoop
 			: RealTime.Now;
 
 		CSceneSystem.SetNextRenderTime( renderTime );
+
+		// The sync point: the game's changes since the last frame are written into the worlds every view of this one draws
+		if ( !Application.IsEditor ) Rendering.RenderSync.Run();
 
 		// Flush envmaps in their own view scope before we do any view rendering
 		Scene.RenderAllEnvmaps();
@@ -364,6 +405,9 @@ internal static class EngineLoop
 
 			using ( _toolsRender.Start() )
 				IToolsDll.Current?.OnRender();
+
+			// The frame's end for deleted scene objects (the game window's Render runs them in the game)
+			SceneWorld.RunEndOfFrameDeletes();
 			return;
 		}
 

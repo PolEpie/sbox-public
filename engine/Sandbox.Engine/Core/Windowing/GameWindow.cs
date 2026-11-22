@@ -86,7 +86,18 @@ internal sealed partial class GameWindow : IDisposable
 
 	void AttachSwapChain( VideoMode mode )
 	{
-		if ( RenderBackend.Default is BorealisGpuRenderBackend device ) borealis = new BorealisGpuWindow( device, window.Handle, mode.VSync ) { Samples = SampleCount( mode.Multisample ) };
+		if ( RenderBackend.Default is BorealisGpuRenderBackend device )
+		{
+			borealis = new BorealisGpuWindow( device, window.Handle, mode.VSync ) { Samples = SampleCount( mode.Multisample ) };
+
+			// Scene changes are written at the sync point, unless the game runs serially
+			// and a frame's drawing runs on the render thread while the main thread records the next one
+			if ( BorealisGpuFrameThread.Enabled )
+			{
+				Rendering.RenderSync.DeferWrites = true;
+				Rendering.RenderSync.Overlapping = BorealisGpuFrameThread.Draws;
+			}
+		}
 		else window.CreateSwapChain( "GameWindow", mode.Multisample, mode.VSync, mainWindow: true );
 
 		GameWindowNative.Attach( window.Handle, window.SwapChain );
@@ -171,6 +182,9 @@ internal sealed partial class GameWindow : IDisposable
 	{
 		if ( pendingMode is not { } video ) return;
 		ThreadSafe.AssertIsMainThread();
+
+		// The swap chain is the render thread's until it has drawn the frame handed to it
+		JoinRenderThread();
 		if ( (window.Flags & Sdl.WindowFlags.Minimized) != 0 ) return;
 		var size = window.PixelSize;
 		if ( size.x < 1 || size.y < 1 ) return;

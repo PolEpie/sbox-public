@@ -23,6 +23,7 @@ internal sealed partial class BorealisGpuRenderBackend
 	/// </summary>
 	public override unsafe bool ReadPixels( Texture texture, NativeRect source, int slice, int mip, NativeRect destination, IntPtr data, ImageFormat format, int stride )
 	{
+		FromMain();
 		if ( list is not null ) return false;
 		if ( source.w != destination.w || source.h != destination.h || source.w <= 0 || source.h <= 0 ) return false;
 
@@ -63,7 +64,7 @@ internal sealed partial class BorealisGpuRenderBackend
 			context.Begin( copy );
 			context.CopyToBuffer( handle, readback, mip, volume ? 0 : slice );
 			context.Finish();
-			gpu.Wait( gpu.Submit( copy ) );
+			using ( Sandbox.Rendering.RenderSync.Readback( "Texture.GetPixels" ) ) gpu.Wait( gpu.Submit( copy ) );
 
 			ReadOnlySpan<byte> bytes = gpu.Map( readback ).Slice( (int)(volume ? sliceBytes * slice : 0), (int)sliceBytes );
 

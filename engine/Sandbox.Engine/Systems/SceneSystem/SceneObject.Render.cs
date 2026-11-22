@@ -157,10 +157,14 @@ public partial class SceneObject
 
 	/// <summary>
 	/// Write a change straight into its own render object if it can: one that owns it, made already, on the main thread, outside
-	/// a render of a world holding it. Otherwise its world's renderer writes it when it next prepares a frame.
+	/// a render of a world holding it, while changes aren't deferred to the sync point (<see cref="Rendering.RenderSync.DeferWrites"/>).
+	/// Otherwise its world's renderer writes it when it next prepares a frame.
 	/// </summary>
 	bool WroteRender( Rendering.SceneObjectChange change, Rendering.ISceneWorldRender render )
 	{
+		// Everything waits for the sync point while the frame's render state is handed over there (RenderSync)
+		if ( Rendering.RenderSync.DeferWrites ) return false;
+
 		if ( LightsWorld )
 		{
 			if ( render.World.InRender || !ThreadSafe.IsMainThread ) return false;

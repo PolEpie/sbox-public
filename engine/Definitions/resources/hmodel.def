@@ -266,6 +266,11 @@ native class CModel as NativeEngine.IModel
 		return self->MeshTrace( input, *output );
 	}
 
+	inline bool MeshTraceAll( MeshTraceInput input, CUtlVectorMeshTraceOutput results )
+	{
+		return self->MeshTraceAll( input, results );
+	}
+
 	HAnimationGraph GetAnimationGraph();
 	HAnimGraph2 GetAnimationGraph2();
 	stable string GetAnimationGraphName();
