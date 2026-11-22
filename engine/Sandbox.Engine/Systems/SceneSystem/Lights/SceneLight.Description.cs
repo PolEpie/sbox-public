@@ -31,7 +31,7 @@ public partial class SceneLight
 	}
 
 	// MATERIAL_LIGHT_* and LIGHTTYPE_* in native's lightdesc.h
-	internal const int TypePoint = 1, TypeDirectional = 2, TypeSpot = 3;
+	internal const int TypePoint = 1, TypeDirectional = 2, TypeSpot = 3, TypeEnvironmentProbe = 5;
 	internal const uint FlagMixedShadows = 16, FlagBaked = 32;
 	const uint HasAttenuation0 = 1, HasAttenuation1 = 2, HasAttenuation2 = 4, DerivedValuesCalculated = 8;
 
@@ -42,6 +42,7 @@ public partial class SceneLight
 	/// The light's description. The first time anything asks it's read from the native light, which has what it was made
 	/// with by then (native's defaults, or a map's settings); from then on managed code owns it, and the native light is
 	/// written only while something reads it (<see cref="SceneObject.WritesNative"/>), apart from what its bounds come from.
+	/// A light made without a twin starts with native's defaults (<see cref="NewDescription"/>).
 	/// </summary>
 	internal ref readonly LightDescription Description
 	{
@@ -96,11 +97,17 @@ public partial class SceneLight
 	/// <summary>
 	/// What native works out from the description when one of its bounds-affecting values changes
 	/// (<c>LightDesc_t::RecalculateDerivedValues</c> with no truncation tolerance): the attenuation flags, the cone cosines, a
-	/// directional light's far-away position and the falloff truncation. The bounds stay the native light's.
+	/// directional light's far-away position and the falloff truncation. The bounds stay the native light's; a light without
+	/// one works them out here as native's <c>UpdateBounds</c> would.
 	/// </summary>
 	void Recalculate()
 	{
-		ref var d = ref desc;
+		RecalculateDerivedValues( ref desc );
+		if ( !HasLight && described ) KeepBounds( DescriptionBounds( desc ) );
+	}
+
+	static void RecalculateDerivedValues( ref LightDescription d )
+	{
 		d.Flags &= ~(HasAttenuation0 | HasAttenuation1 | HasAttenuation2);
 		d.Flags |= DerivedValuesCalculated;
 		if ( d.Attenuation0 != 0 ) d.Flags |= HasAttenuation0;
@@ -133,6 +140,8 @@ public partial class SceneLight
 		d.Phi = phi;
 		Recalculate();
 
+		if ( !HasLight ) return;
+
 		if ( WritesNative )
 		{
 			lightNative.SetTheta( theta );
@@ -150,7 +159,7 @@ public partial class SceneLight
 		d.ShadowCascadeCount = Math.Clamp( count, 0, 4 );
 		d.ShadowCascadeSplitRatio = splitRatio;
 		d.CascadeDistanceScale = distanceScale;
-		if ( !WritesNative ) return;
+		if ( !WritesLight ) return;
 		lightNative.SetShadowCascades( count );
 		lightNative.SetShadowCascadeSplitRatio( splitRatio );
 		lightNative.SetCascadeDistanceScale( distanceScale );
@@ -165,7 +174,7 @@ public partial class SceneLight
 		d.Direction = NormalizedSafe( forward, new Vector3( 1, 0, 0 ) );
 		d.Up = NormalizedSafe( rotation.Up, new Vector3( 0, 0, 1 ) );
 		Recalculate();
-		lightNative.SetWorldDirection( rotation );
+		if ( HasLight ) lightNative.SetWorldDirection( rotation );
 		NotifyChanged( Rendering.SceneObjectChange.Settings );
 	}
 
@@ -213,7 +222,7 @@ public partial class SceneLight
 		if ( recalculate ) Recalculate();
 		if ( data.Cookie is not null ) _lightCookie = data.Cookie;
 
-		if ( WritesNative )
+		if ( WritesLight )
 		{
 			var light = lightNative;
 			light.SetLightFlags( d.Flags );
@@ -232,5 +241,132 @@ public partial class SceneLight
 		}
 
 		NotifyChanged( Rendering.SceneObjectChange.Settings );
+	}
+
+	/// <summary>
+	/// The description native makes a light of <paramref name="type"/> with, for one made without a twin: <c>LightDesc_t::Clear</c>,
+	/// then what <c>g_pSceneSystem</c>'s <c>CreatePointLight</c>, <c>CreateSpotLight</c>, <c>CreateDirectionalLight</c> (towards
+	/// <paramref name="direction"/>) and <c>CreateEnvMap</c> do to it: <c>InitPoint</c>, <c>InitSpot</c> or <c>InitDirectional</c>
+	/// with their colour, cone and constant attenuation (derived values worked out, then the constant attenuation cleared again
+	/// for point and spot lights), three cascades for a sun, <c>InitEnvironmentProbe</c> with a 512 range for a cubemap.
+	/// </summary>
+	internal static LightDescription NewDescription( int type, Vector3 direction = default )
+	{
+		var d = new LightDescription
+		{
+			Type = type,
+			CastShadows = 1,
+			ShadowCascadeCount = 1,
+			ShadowCascadeSplitRatio = 0.91f,
+			CascadeDistanceScale = 1.0f,
+			UsesIndexedBakedLighting = 1,
+			BakeLightIndex = -1,
+			BakeLightIndexScale = 1.0f,
+			FogContributionStrength = 1.0f,
+			RenderDiffuse = 1,
+			RenderSpecular = 1,
+			RenderTransmissive = 1,
+			NearClipPlane = 1.0f,
+		};
+
+		if ( type == TypeEnvironmentProbe )
+		{
+			// InitEnvironmentProbe sets no attenuation; RecalculateDerivedValues with the default tolerance leaves its range
+			d.Range = 512.0f;
+			RecalculateDerivedValues( ref d );
+			return d;
+		}
+
+		d.Color = new Vector3( 100, 0, 100 );
+		d.Attenuation0 = 1.0f;
+
+		if ( type == TypeSpot )
+		{
+			d.Direction = new Vector3( 1, 0, 0 ); // towards ( 10, 0, 0 ) from the origin
+			d.Falloff = 5.0f;
+			d.Theta = 15.0f;
+			d.Phi = 30.0f;
+		}
+		else if ( type == TypeDirectional )
+		{
+			d.Direction = direction;
+		}
+
+		// With the constant attenuation on, the default truncation tolerance doesn't shorten the range
+		RecalculateDerivedValues( ref d );
+
+		if ( type == TypeDirectional ) d.ShadowCascadeCount = 3;
+		else d.Attenuation0 = 0.0f;
+
+		return d;
+	}
+
+	/// <summary>
+	/// <c>LightDesc_t::RecalculateDerivedValues</c>'s bounds: a sphere's box for a point light or cubemap (grown by the light
+	/// source's size), the cone's box clipped to its range's for a spot light, half the float range every way for a sun.
+	/// </summary>
+	internal static BBox DescriptionBounds( in LightDescription d )
+	{
+		switch ( d.Type )
+		{
+			case TypePoint:
+			case TypeEnvironmentProbe:
+				{
+					var size = new Vector3( d.Range + d.LightSourceDim0 );
+					var line = d.Direction * d.LightSourceDim1;
+					line = new Vector3( MathF.Abs( line.x ), MathF.Abs( line.y ), MathF.Abs( line.z ) );
+					return new BBox( d.Position - size - line, d.Position + size + line );
+				}
+
+			case TypeSpot:
+				{
+					VectorVectorsFLU( d.Direction, out var left, out var up );
+					var (sinPhi, cosPhi) = MathF.SinCos( d.Phi * (MathF.PI / 180.0f) );
+					var extents = d.Range * sinPhi;
+					var mid = d.Position + d.Direction * d.Range * cosPhi;
+					var far = d.Position + d.Direction * d.Range;
+
+					var mins = d.Position;
+					var maxs = d.Position;
+					if ( d.Shape == 0 )
+					{
+						mins -= new Vector3( d.LightSourceDim0 );
+						maxs += new Vector3( d.LightSourceDim0 );
+					}
+
+					for ( int c = 0; c < 2; c++ )
+					{
+						var centre = c == 0 ? mid : far;
+						for ( int i = 0; i < 4; i++ )
+						{
+							var point = centre + left * ((i & 1) == 0 ? -extents : extents) + up * ((i & 2) == 0 ? -extents : extents);
+							mins = Vector3.Min( point, mins );
+							maxs = Vector3.Max( point, maxs );
+						}
+					}
+
+					var radius = new Vector3( d.Range );
+					return new BBox( Vector3.Max( mins, d.Position - radius ), Vector3.Min( maxs, d.Position + radius ) );
+				}
+
+			case TypeDirectional:
+				return new BBox( new Vector3( -float.MaxValue / 2 ), new Vector3( float.MaxValue / 2 ) );
+		}
+
+		return new BBox( d.Position, d.Position );
+	}
+
+	/// <summary>Native's <c>VectorVectorsFLU</c>: left and up for a forward direction, z up unless it points straight up or down.</summary>
+	static void VectorVectorsFLU( Vector3 forward, out Vector3 left, out Vector3 up )
+	{
+		if ( MathF.Abs( forward.x ) < 1e-3f && MathF.Abs( forward.y ) < 1e-3f )
+		{
+			left = new Vector3( 0, 1, 0 );
+			up = new Vector3( -forward.z, 0, 0 );
+			return;
+		}
+
+		left = Vector3.Cross( new Vector3( 0, 0, 1 ), forward ).Normal;
+		up = Vector3.Cross( forward, left ).Normal;
 	}
 }

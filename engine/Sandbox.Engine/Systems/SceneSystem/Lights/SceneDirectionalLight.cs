@@ -28,7 +28,8 @@ public sealed class SceneDirectionalLight : SceneLight
 
 		using ( var h = IHandle.MakeNextHandle( this ) )
 		{
-			CSceneSystem.CreateDirectionalLight( sceneWorld, rotation.Backward );
+			if ( MakesNativeTwin ) CSceneSystem.CreateDirectionalLight( sceneWorld, rotation.Backward );
+			else MakeLightWithoutTwin( sceneWorld, NewDescription( TypeDirectional, rotation.Backward ) );
 		}
 
 		LightColor = color;

@@ -142,7 +142,9 @@ internal sealed partial class BackendContext
 		CloseScope();
 
 		skinningDrawer ??= new ShaderDrawer( device );
-		var atlas = device.Morphs.Texture;
+
+		// Placed and made as tall as they need, before any skinning dispatch binds it
+		var atlas = device.Morphs.Fit();
 
 		// A list recorded beside others that hasn't used the atlas yet needs it as a target at its start, unless the plan says
 		// where the lists before leave it

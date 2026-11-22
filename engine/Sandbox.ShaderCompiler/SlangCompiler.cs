@@ -82,10 +82,10 @@ public sealed partial class SlangCompiler
 	/// defines and passes, the generated instance and GPU-driven files, the source rewrites, reflection. A change to the
 	/// generated text alone fails <c>GeneratedCodeNeedsAVersion</c> until <see cref="GeneratedFingerprint"/> is updated here too.
 	/// </summary>
-	public const int Version = 15;
+	public const int Version = 16;
 
 	/// <summary>The <see cref="Fingerprint"/> of the generated code <see cref="Version"/> was raised for.</summary>
-	internal const string GeneratedFingerprint = "04A4239B0B546176";
+	internal const string GeneratedFingerprint = "E1142E2E345675EC";
 
 	/// <summary>
 	/// A hash of what the compiler generates for fixed inputs (the Slang command lines, instance and GPU-driven files and
@@ -125,6 +125,7 @@ public sealed partial class SlangCompiler
 			+ "struct V\n{\n\tfloat2 A;\n\tnointerpolation uint B;\n};\n[Material] public struct Staged : IVertexStageSurface\n{\n\ttypealias Varyings = V;\n\tfloat X;\n};\n";
 		text.Append( VfxIncludes.Rewrite( sample, new() ) ).Append( MaterialSource.Rewrite( sample, out _ ) );
 		foreach ( var header in SlangHeaders.Replaced.Keys.Order( StringComparer.OrdinalIgnoreCase ) ) text.Append( VfxIncludes.Rewrite( $"#include \"{header}\"\n", new() ) );
+		text.Append( ForwardNormalsEntry( "[shader( \"pixel\" )] float4 MainPs( PixelInput i, bool front : SV_IsFrontFace ) : SV_Target0 { return ShadingModelStandard::Shade( i, m ); }\n" ) );
 		return Convert.ToHexString( System.Security.Cryptography.SHA256.HashData( Encoding.UTF8.GetBytes( text.ToString() ) ) )[..16];
 	}
 

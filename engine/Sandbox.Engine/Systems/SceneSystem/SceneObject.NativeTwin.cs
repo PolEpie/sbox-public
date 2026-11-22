@@ -18,7 +18,11 @@ public partial class SceneObject
 	/// triangles only in tools mode anyway); the editor and Hammer keep twins. Headless processes (tests, servers) keep them
 	/// too. Objects native code makes (tool previews) always have their native object.
 	/// </summary>
-	internal static bool MakesNativeTwin => MakesNativeTwinOverride ?? (!Rendering.ManagedSceneRendering.Enabled || Application.IsEditor);
+	internal static bool MakesNativeTwin => MakesNativeTwinOverride ?? (!Rendering.ManagedSceneRendering.Enabled || Application.IsEditor || KeepsTwinsBySwitch);
+
+	/// <summary><c>-scene-native-twins</c>: keep twins in the game as well, to compare the cost of making and writing them.</summary>
+	static bool KeepsTwinsBySwitch => _keepsTwinsBySwitch ??= Sandbox.Utility.CommandLine.HasSwitch( "-scene-native-twins" );
+	static bool? _keepsTwinsBySwitch;
 
 	/// <summary>Tests set <see cref="MakesNativeTwin"/> either way; null follows the process.</summary>
 	internal static bool? MakesNativeTwinOverride { get; set; }

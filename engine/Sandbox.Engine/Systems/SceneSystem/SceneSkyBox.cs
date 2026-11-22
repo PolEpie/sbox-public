@@ -56,7 +56,14 @@ public class SceneSkyBox : SceneObject
 
 		using ( var h = IHandle.MakeNextHandle( this ) )
 		{
-			CManagedSceneObject.Create( world );
+			if ( MakesNativeTwin ) CManagedSceneObject.Create( world );
+			else
+			{
+				// Nothing reads the plain twin it would have: in its world and its world's skies without one
+				MakeWithoutTwin( world, null, SceneCustomObject.TwinlessFlags );
+				KeepFixedBounds( false );
+				AddToSkies();
+			}
 		}
 
 		ChangeFlags( Rendering.SceneObjectFlags.None, ~InternalFlags );
@@ -69,19 +76,29 @@ public class SceneSkyBox : SceneObject
 		// A sky managed code made has a plain twin (managed is set before it's made)
 		skyboxNative = managed ? default : (CSceneSkyBoxObject)ptr;
 
+		AddToSkies();
+	}
+
+	void AddToSkies()
+	{
 		lock ( World.Skies )
 		{
 			World.Skies.Add( this );
 		}
 	}
 
-	internal override void OnNativeDestroy()
+	internal override void Destroyed()
 	{
 		lock ( World.Skies )
 		{
 			World.Skies.Remove( this );
 		}
 
+		base.Destroyed();
+	}
+
+	internal override void OnNativeDestroy()
+	{
 		skyboxNative = default;
 		base.OnNativeDestroy();
 	}

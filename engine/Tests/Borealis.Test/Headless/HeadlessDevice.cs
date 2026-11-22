@@ -120,6 +120,14 @@ internal sealed class HeadlessDevice : GpuDevice
 
 	internal override bool DrawsAggregatesResident => ResidentAggregates;
 
+	/// <summary>
+	/// Whether it claims to stream textures (<see cref="GpuDevice.StreamsTextures"/>), so what draws without a size of its own
+	/// gives one through <see cref="AddTextureSizes"/>. Off by default; a test that turns it on is <c>[DoNotParallelize]</c>.
+	/// </summary>
+	public bool StreamTextures { get; set; }
+
+	internal override bool StreamsTextures => StreamTextures;
+
 	public override int AllocateVertexCache( int vertices ) => Interlocked.Add( ref vertexCache, vertices ) - vertices;
 
 	public override Vector4 MorphSubrect( int handle ) => default;

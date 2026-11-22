@@ -29,7 +29,13 @@ internal class SceneLightProbe : SceneObject
 
 		using ( var h = IHandle.MakeNextHandle( this ) )
 		{
-			CSceneSystem.CreateLightProbeVolume( sceneWorld );
+			if ( MakesNativeTwin ) CSceneSystem.CreateLightProbeVolume( sceneWorld );
+			else
+			{
+				// As CLightProbeVolumeObjectDesc::Create: its flags, and no bounds until they're set
+				MakeWithoutTwin( sceneWorld, null, Rendering.SceneObjectFlags.IsLightVolume | Rendering.SceneObjectFlags.IsLight | Rendering.SceneObjectFlags.IsIndirectLight );
+				KeepFixedBounds( false );
+			}
 		}
 
 		probeTexture = texture;
@@ -37,24 +43,35 @@ internal class SceneLightProbe : SceneObject
 		this.scalarsTexture = scalarsTexture;
 		made = (bounds.Mins, bounds.Maxs, handshake, renderPriority);
 
-		lightProbeVolume.m_vBoxMins = bounds.Mins;
-		lightProbeVolume.m_vBoxMaxs = bounds.Maxs;
-		lightProbeVolume.m_nHandshake = handshake;
-		lightProbeVolume.m_nRenderPriority = renderPriority;
+		// The native twin gets its settings and constants only if there is one: Borealis reads them from here
+		if ( !lightProbeVolume.IsNull )
+		{
+			lightProbeVolume.m_vBoxMins = bounds.Mins;
+			lightProbeVolume.m_vBoxMaxs = bounds.Maxs;
+			lightProbeVolume.m_nHandshake = handshake;
+			lightProbeVolume.m_nRenderPriority = renderPriority;
 
-		if ( texture != null )
-			lightProbeVolume.m_hLightProbeTexture = texture.native;
+			if ( texture != null )
+				lightProbeVolume.m_hLightProbeTexture = texture.native;
 
-		if ( indicesTexture != null )
-			lightProbeVolume.m_hLightProbeDirectLightIndicesTexture = indicesTexture.native;
+			if ( indicesTexture != null )
+				lightProbeVolume.m_hLightProbeDirectLightIndicesTexture = indicesTexture.native;
 
-		if ( scalarsTexture != null )
-			lightProbeVolume.m_hLightProbeDirectLightScalarsTexture = scalarsTexture.native;
+			if ( scalarsTexture != null )
+				lightProbeVolume.m_hLightProbeDirectLightScalarsTexture = scalarsTexture.native;
+		}
 
 		LocalBounds = bounds;
 		Transform = transform;
 
 		RenderingEnabled = true;
+
+		if ( lightProbeVolume.IsNull )
+		{
+			// CreateConstants' bounds: its box where it's placed (later moves leave them, as native's do)
+			KeepBounds( TransformBounds( Transform, bounds ) );
+			return;
+		}
 
 		lightProbeVolume.CreateConstants();
 
