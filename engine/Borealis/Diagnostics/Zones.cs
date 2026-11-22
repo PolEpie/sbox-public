@@ -59,6 +59,8 @@ internal static class Zones
 	public static readonly Zone WorldWrite = new( "Borealis World Write", Color.Cyan );
 	public static readonly Zone ObjectWrite = new( "Borealis Object Write", Color.Cyan );
 	public static readonly Zone WorldLighting = new( "Borealis World Lighting", Color.Cyan );
+	public static readonly Zone ChildView = new( "Borealis Child View", Color.Blue );
+	public static readonly Zone DrawCallbacks = new( "Borealis Draw Callbacks", Color.White );
 
 	/// <summary>Sandbox.ShaderCompiler's phases (<c>CompilePhase</c>), by value.</summary>
 	public static readonly Zone[] Slang =
