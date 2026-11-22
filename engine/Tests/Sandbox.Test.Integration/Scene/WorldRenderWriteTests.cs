@@ -259,6 +259,75 @@ public class WorldRenderWriteTests
 	}
 
 	/// <summary>
+	/// The sync point (<see cref="RenderSync.Run"/>) writes every live world with changes waiting, one no view prepares again
+	/// this frame (a skybox's or an extra world, drawn inside another's view) as much as the one the window shows; a world no view
+	/// has drawn yet is left to its first, and a view's prepare after the sync point finds nothing to do.
+	/// </summary>
+	[TestMethod]
+	public void TheSyncPointWritesEveryWorldWithChanges()
+	{
+		typeof( ThreadSafe ).GetMethod( "MarkMainThread", Any ).Invoke( null, null );
+
+		var shown = new SceneWorld();
+		var inside = new SceneWorld();
+		var unseen = new SceneWorld();
+		var camera = new SceneCamera { World = shown };
+		var insideCamera = new SceneCamera { World = inside };
+		var shownRender = (System.IDisposable)System.Activator.CreateInstance( RenderType, [shown] );
+		var insideRender = (System.IDisposable)System.Activator.CreateInstance( RenderType, [inside] );
+		var unseenRender = (System.IDisposable)System.Activator.CreateInstance( RenderType, [unseen] );
+		var deferred = RenderSync.DeferWrites;
+		try
+		{
+			var box = new SceneObject( shown, Model.Load( "models/dev/box.vmdl" ) );
+			var sky = new SceneObject( inside, Model.Load( "models/dev/box.vmdl" ) );
+			var never = new SceneObject( unseen, Model.Load( "models/dev/box.vmdl" ) );
+
+			var prepare = RenderType.GetMethod( "Prepare", Any );
+			var find = RenderType.GetMethod( "Find", Any );
+			var pending = RenderType.GetProperty( "PendingChanges", Any );
+			prepare.Invoke( shownRender, [camera, false] );
+			prepare.Invoke( insideRender, [insideCamera, false] );
+			var boxObject = (Borealis.MeshObject)find.Invoke( shownRender, [box] );
+			var skyObject = (Borealis.MeshObject)find.Invoke( insideRender, [sky] );
+			Assert.IsTrue( RenderSync.Worlds >= 3, "each world's renderer is registered" );
+
+			RenderSync.DeferWrites = true;
+			var moved = new Vector3( 10, 20, 30 );
+			box.Position = moved;
+			sky.Position = moved;
+			never.Position = moved;
+			Assert.AreNotEqual( moved, skyObject.Transform.Position, "waits for the sync point" );
+
+			var syncs = RenderSync.Syncs;
+			RenderSync.Run();
+			Assert.AreEqual( syncs + 1, RenderSync.Syncs, "ran" );
+			Assert.AreEqual( moved, boxObject.Transform.Position, "the shown world is written" );
+			Assert.AreEqual( moved, skyObject.Transform.Position, "a world drawn inside another's view is written there too" );
+			Assert.AreEqual( 0, (int)pending.GetValue( insideRender ), "nothing waits in it" );
+			Assert.IsTrue( (int)pending.GetValue( unseenRender ) > 0, "a world no view has drawn waits for its first" );
+
+			// A view after the sync point finds the world ready, and writes what changed after it
+			prepare.Invoke( shownRender, [camera, false] );
+			box.Position = moved * 2;
+			prepare.Invoke( shownRender, [camera, false] );
+			Assert.AreEqual( moved * 2, boxObject.Transform.Position, "a change after the sync point is written by the next prepare" );
+		}
+		finally
+		{
+			RenderSync.DeferWrites = deferred;
+			unseenRender.Dispose();
+			insideRender.Dispose();
+			shownRender.Dispose();
+			insideCamera.Dispose();
+			camera.Dispose();
+			unseen.Delete();
+			inside.Delete();
+			shown.Delete();
+		}
+	}
+
+	/// <summary>
 	/// What lights the world rather than drawing in it writes straight there too: a sun's change waits for nothing but the next
 	/// view to light with it, a probe volume's goes into its volume.
 	/// </summary>

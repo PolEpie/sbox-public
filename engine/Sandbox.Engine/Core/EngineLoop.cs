@@ -354,6 +354,9 @@ internal static class EngineLoop
 
 		CSceneSystem.SetNextRenderTime( renderTime );
 
+		// The sync point: the game's changes since the last frame are written into the worlds every view of this one draws
+		if ( !Application.IsEditor ) Rendering.RenderSync.Run();
+
 		// Flush envmaps in their own view scope before we do any view rendering
 		Scene.RenderAllEnvmaps();
 

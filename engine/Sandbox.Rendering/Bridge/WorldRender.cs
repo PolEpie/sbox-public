@@ -83,6 +83,8 @@ internal sealed partial class WorldRender : ISceneWorldRender, IAttributeSource,
 			source.Render = this;
 			lock ( gate ) made.AddRange( source.InternalSceneObjects );
 		}
+
+		RenderSync.Register( this );
 	}
 
 	/// <summary>
@@ -139,6 +141,7 @@ internal sealed partial class WorldRender : ISceneWorldRender, IAttributeSource,
 	/// </summary>
 	public void Dispose()
 	{
+		RenderSync.Unregister( this );
 		lock ( source.InternalSceneObjects )
 		{
 			if ( source.Render == this ) source.Render = null;
@@ -212,6 +215,9 @@ internal sealed partial class WorldRender : ISceneWorldRender, IAttributeSource,
 	/// </summary>
 	public void PrepareFrame()
 	{
+		// Written at this frame's sync point, with nothing waiting since: a view of it finds it ready
+		if ( syncedFrame == Application.FrameCount && !Waiting ) return;
+
 		using var zone = Borealis.Zones.WorldPrepare.Start();
 		HasPrepared = true;
 
@@ -263,6 +269,31 @@ internal sealed partial class WorldRender : ISceneWorldRender, IAttributeSource,
 		}
 
 		SweepCaches( frame );
+	}
+
+	// The frame the sync point last wrote the world in (Sync)
+	ulong syncedFrame;
+
+	// Whether anything waits for the world's next frame: objects made, gone or changed since, lights deleted in an earlier frame
+	bool Waiting
+	{
+		get
+		{
+			if ( lingering.Count > 0 ) return true;
+			lock ( gate ) return made.Count + gone.Count + later.Count > 0;
+		}
+	}
+
+	/// <summary>
+	/// At the sync point (<see cref="RenderSync.Run"/>): write what waits for the world's next frame, if anything does, so every
+	/// view of the frame - a child view's or a skybox's world too - draws it written. A world no view has drawn yet is left to
+	/// its first (a loading scene's is prepared ahead with loading budgets, <see cref="SceneBridge.BeginFrame"/>).
+	/// </summary>
+	public void Sync()
+	{
+		if ( !HasPrepared || !Waiting ) return;
+		PrepareFrame();
+		syncedFrame = Application.FrameCount;
 	}
 
 	/// <summary>
