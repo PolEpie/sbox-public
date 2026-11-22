@@ -22,10 +22,10 @@ internal sealed class BorealisGpuFrameThread : IDisposable
 
 	/// <summary>
 	/// Whether the thread also draws the game window's frames (the render thread, docs/reference/borealis-render-thread.md):
-	/// with <c>-renderthread</c> or <c>BOREALIS_RENDERTHREAD=draw</c>, and the frame thread on. Off by default: it loses the
-	/// device in the game window (the report of the card that made it says what's known).
+	/// on with the frame thread, unless <c>-framethread</c> or <c>BOREALIS_RENDERTHREAD=frame</c> keeps the drawing on the main
+	/// thread with only the device frame's start on this one. <c>-renderthread</c> is accepted as before.
 	/// </summary>
-	internal static readonly bool Draws = Enabled && (CommandLine.HasSwitch( "-renderthread" ) || System.Environment.GetEnvironmentVariable( "BOREALIS_RENDERTHREAD" ) == "draw");
+	internal static readonly bool Draws = Enabled && !CommandLine.HasSwitch( "-framethread" ) && System.Environment.GetEnvironmentVariable( "BOREALIS_RENDERTHREAD" ) != "frame";
 
 	/// <summary>The longest <see cref="Dispose"/> waits for the thread; one still busy is left to the process's exit.</summary>
 	internal static readonly TimeSpan StopTimeout = TimeSpan.FromSeconds( 2 );
