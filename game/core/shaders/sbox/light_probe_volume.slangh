@@ -13,12 +13,14 @@
 #include "common/classes/Bindless.hlsl"
 
 #ifdef SURFACE_GPU_DRIVEN
-// A GPU-driven surface pass loads them per draw from its lighting record (sbox/surface_passes.slangh)
-static float4x3 MatLightProbeVolumeWorldToLocal;
-static float4 LightProbeVolumeLayer0TextureMin;
-static float4 LightProbeVolumeLayer0TextureMax;
-static float4 LightProbeVolumeColor;
-static int4 LightProbeVolumeTextureIndices;
+#include "borealis_records.fxc"
+// A GPU-driven surface pass reads them from its draw's lighting record where they're used (SurfaceLightingWords,
+// sbox/surface_passes.slangh), as the lightmap's constants are
+#define MatLightProbeVolumeWorldToLocal SurfaceLightProbeVolumeWorldToLocal()
+#define LightProbeVolumeLayer0TextureMin asfloat( SurfaceLightingWords( LightingRecord_ProbeVolumeLayer0TextureMin ) )
+#define LightProbeVolumeLayer0TextureMax asfloat( SurfaceLightingWords( LightingRecord_ProbeVolumeLayer0TextureMax ) )
+#define LightProbeVolumeColor asfloat( SurfaceLightingWords( LightingRecord_ProbeVolumeColor ) )
+#define LightProbeVolumeTextureIndices asint( SurfaceLightingWords( LightingRecord_ProbeVolumeTextureIndices ) )
 #else
 cbuffer PerBatchLightProbeVolumeConstantBuffer_t : register( b2 )
 {
