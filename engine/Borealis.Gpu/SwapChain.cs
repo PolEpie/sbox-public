@@ -42,9 +42,18 @@ public sealed unsafe class SwapChain : IDisposable
 	ulong swapchain;
 	TextureHandle[] images = [];
 	ulong[] presentSemaphores = [];
-	readonly ulong[] acquireSemaphores;
+	readonly List<AcquireSemaphore> acquireSemaphores = new();
 	uint imageIndex;
 	int acquireSlot = -1;
+
+	// A semaphore an acquire signals: free again once the submission that waited for it is done (WaitedBy), or if no
+	// acquire used it yet; Pending while an acquire signalled it and nothing waited for it yet
+	sealed class AcquireSemaphore
+	{
+		public ulong Handle;
+		public SyncPoint WaitedBy;
+		public bool Pending;
+	}
 	bool outOfDate;
 	bool disposed;
 
@@ -84,7 +93,35 @@ public sealed unsafe class SwapChain : IDisposable
 
 	/// <inheritdoc cref="PresentsWithoutSubmit"/>
 	public int RepeatedSubmits { get; internal set; }
-	internal ulong AcquireSemaphore => acquireSemaphores[acquireSlot];
+	internal ulong AcquireSemaphoreHandle => acquireSemaphores[acquireSlot].Handle;
+
+	/// <summary>Acquire semaphores made so far, for the tests: one more each time every one was still in use.</summary>
+	internal int AcquireSemaphoreCount => acquireSemaphores.Count;
+
+	/// <summary>
+	/// The submission naming this swap chain (<see cref="Device.Submit"/>) waits for the acquire's semaphore: it's free for
+	/// another acquire once <paramref name="point"/> is done.
+	/// </summary>
+	internal void AcquireWaited( SyncPoint point )
+	{
+		var semaphore = acquireSemaphores[acquireSlot];
+		semaphore.WaitedBy = point;
+		semaphore.Pending = false;
+	}
+
+	// A semaphore no acquire signalled that nothing waits for yet, else a new one. Acquires aren't tied to frames: one per
+	// device frame or several in a frame (a window presenting its last frame again while the game is busy, a resize) alike
+	int FreeAcquireSemaphore()
+	{
+		for ( int i = 0; i < acquireSemaphores.Count; i++ )
+		{
+			var semaphore = acquireSemaphores[i];
+			if ( !semaphore.Pending && (!semaphore.WaitedBy.IsValid || device.IsComplete( semaphore.WaitedBy )) ) return i;
+		}
+
+		acquireSemaphores.Add( new AcquireSemaphore { Handle = CreateSemaphore() } );
+		return acquireSemaphores.Count - 1;
+	}
 	internal ulong PresentSemaphore => presentSemaphores[imageIndex];
 
 	internal SwapChain( Device device, in SwapChainInfo info )
@@ -103,8 +140,7 @@ public sealed unsafe class SwapChain : IDisposable
 			device.Instance.vkGetPhysicalDeviceSurfaceSupportKHR( device.PhysicalDevice, queue.Family, surface, &supported ).Check( "vkGetPhysicalDeviceSurfaceSupportKHR" );
 			if ( supported == 0 ) throw new GpuException( "The graphics queue can't present to this window" );
 
-			acquireSemaphores = new ulong[device.FramesInFlight];
-			for ( int i = 0; i < acquireSemaphores.Length; i++ ) acquireSemaphores[i] = CreateSemaphore();
+			for ( int i = 0; i < device.FramesInFlight; i++ ) acquireSemaphores.Add( new AcquireSemaphore { Handle = CreateSemaphore() } );
 
 			Create( info.Width, info.Height );
 		}
@@ -255,6 +291,16 @@ public sealed unsafe class SwapChain : IDisposable
 
 	void Release()
 	{
+		// An image acquired and never submitted for leaves its semaphore signalled, which no acquire may use again: it's
+		// made anew (the GPU is idle here)
+		if ( Current.IsValid && acquireSlot >= 0 && acquireSemaphores[acquireSlot] is { Pending: true } signalled )
+		{
+			vk.vkDestroySemaphore( vk.Device, signalled.Handle, null );
+			signalled.Handle = CreateSemaphore();
+			signalled.Pending = false;
+			signalled.WaitedBy = default;
+		}
+
 		foreach ( var image in images ) device.RemoveExternalTexture( image );
 		foreach ( var semaphore in presentSemaphores ) vk.vkDestroySemaphore( vk.Device, semaphore, null );
 		images = [];
@@ -303,7 +349,7 @@ public sealed unsafe class SwapChain : IDisposable
 			if ( images.Length == 0 ) return false;
 
 			device.ThrowIfLost( "vkAcquireNextImageKHR" );
-			acquireSlot = device.FrameSlot;
+			acquireSlot = FreeAcquireSemaphore();
 			uint index;
 			var result = AcquireNext( &index );
 
@@ -316,6 +362,7 @@ public sealed unsafe class SwapChain : IDisposable
 			if ( result == VkResult.Suboptimal ) outOfDate = true;
 			else device.Check( result, "vkAcquireNextImageKHR" );
 
+			acquireSemaphores[acquireSlot].Pending = true;
 			imageIndex = index;
 			Current = image = images[index];
 			SubmitsForImage = 0;
@@ -473,7 +520,7 @@ public sealed unsafe class SwapChain : IDisposable
 		using var _ = device.Enter( "vkAcquireNextImageKHR" );
 		while ( true )
 		{
-			var result = vk.vkAcquireNextImageKHR( vk.Device, swapchain, 500_000_000, acquireSemaphores[acquireSlot], 0, index );
+			var result = vk.vkAcquireNextImageKHR( vk.Device, swapchain, 500_000_000, acquireSemaphores[acquireSlot].Handle, 0, index );
 			if ( result is not (VkResult.Timeout or VkResult.NotReady) ) return result;
 
 			var waited = System.Diagnostics.Stopwatch.GetElapsedTime( start ).TotalSeconds;
@@ -509,7 +556,7 @@ public sealed unsafe class SwapChain : IDisposable
 
 		device.WaitIdle();
 		Release();
-		foreach ( var semaphore in acquireSemaphores ) vk.vkDestroySemaphore( vk.Device, semaphore, null );
+		foreach ( var semaphore in acquireSemaphores ) vk.vkDestroySemaphore( vk.Device, semaphore.Handle, null );
 		if ( swapchain != 0 ) vk.vkDestroySwapchainKHR( vk.Device, swapchain, null );
 		device.Instance.vkDestroySurfaceKHR( device.Instance.Instance, surface, null );
 		device.Unregister( this );

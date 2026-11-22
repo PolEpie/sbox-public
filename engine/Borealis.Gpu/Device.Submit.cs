@@ -596,7 +596,7 @@ public sealed unsafe partial class Device
 			if ( !swapChain.HasImage ) throw new InvalidOperationException( "The swap chain has no acquired image to submit for" );
 			swapChain.SubmitsForImage++;
 			RememberEvent( "submitting for a swap chain image, list marker slot:", list.MarkerSlot );
-			waitInfos[waitCount++] = new VkSemaphoreSubmitInfo { sType = VkStructureType.SemaphoreSubmitInfo, semaphore = swapChain.AcquireSemaphore, stageMask = Vulkan.Vk.Stage2AllCommands };
+			waitInfos[waitCount++] = new VkSemaphoreSubmitInfo { sType = VkStructureType.SemaphoreSubmitInfo, semaphore = swapChain.AcquireSemaphoreHandle, stageMask = Vulkan.Vk.Stage2AllCommands };
 			signals[signalCount++] = new VkSemaphoreSubmitInfo { sType = VkStructureType.SemaphoreSubmitInfo, semaphore = swapChain.PresentSemaphore, stageMask = Vulkan.Vk.Stage2AllCommands };
 		}
 
@@ -607,6 +607,7 @@ public sealed unsafe partial class Device
 			PairScopes( queue, list );
 
 			var value = queue.Next();
+			swapChain?.AcquireWaited( new SyncPoint( list.Queue, value ) );
 			Remember( queue, value, list, queue.Pending.Count );
 			signals[0] = new VkSemaphoreSubmitInfo { sType = VkStructureType.SemaphoreSubmitInfo, semaphore = queue.Timeline, value = value, stageMask = Vulkan.Vk.Stage2AllCommands };
 
