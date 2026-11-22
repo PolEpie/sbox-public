@@ -1,4 +1,5 @@
 using Borealis.Gpu;
+using Borealis.Source2.Shaders;
 using System.Runtime.InteropServices;
 
 namespace Borealis.Backend;
@@ -20,6 +21,29 @@ internal sealed partial class BackendContext
 
 	/// <summary>The vertex-cache draw being recorded, whose geometry and vertex ids <see cref="Draw"/> binds instead.</summary>
 	VertexCacheDraw? cacheDraw;
+
+
+	/// <summary>The attribute ids a skinning dispatch sets, found once: setting by id hashes no names.</summary>
+	static class SkinningIds
+	{
+		public static readonly int BoneIdxBits = AttributeIds.Of( "BoneIdxBits" );
+		public static readonly int BoneIdxOffset = AttributeIds.Of( "BoneIdxOffset" );
+		public static readonly int BoneWeightOffset = AttributeIds.Of( "BoneWeightOffset" );
+		public static readonly int CompositeMorphTextureAtlas = AttributeIds.Of( "CompositeMorphTextureAtlas" );
+		public static readonly int DeformationAnchors = AttributeIds.Of( "DeformationAnchors" );
+		public static readonly int DeformationVolumes = AttributeIds.Of( "DeformationVolumes" );
+		public static readonly int InputVB = AttributeIds.Of( "InputVB" );
+		public static readonly int InstanceCount = AttributeIds.Of( "InstanceCount" );
+		public static readonly int Instances_t = AttributeIds.Of( "Instances_t" );
+		public static readonly int MorphTextureAtlasWidth = AttributeIds.Of( "MorphTextureAtlasWidth" );
+		public static readonly int NormalOffset = AttributeIds.Of( "NormalOffset" );
+		public static readonly int OutputVB = AttributeIds.Of( "OutputVB" );
+		public static readonly int TangentSpaceOffset = AttributeIds.Of( "TangentSpaceOffset" );
+		public static readonly int UncompressedTangentFrame = AttributeIds.Of( "UncompressedTangentFrame" );
+		public static readonly int VertexCount = AttributeIds.Of( "VertexCount" );
+		public static readonly int VertexSize = AttributeIds.Of( "VertexSize" );
+		public static readonly int g_TransformBuffer = AttributeIds.Of( "g_TransformBuffer" );
+	}
 
 	ShaderDrawer skinningDrawer;
 	ShaderAttributes skinningAttributes;
@@ -52,32 +76,32 @@ internal sealed partial class BackendContext
 				var count = Math.Min( slots.Length - first, MaxSkinningInstances );
 
 				attributes.Clear();
-				attributes.Set( "InstanceCount", count );
-				attributes.Set( "g_TransformBuffer", transformBuffer.Handle );
-				attributes.Set( "OutputVB", device.VertexCacheBuffer );
-				attributes.Set( "VertexCount", vb.VertexCount );
+				attributes.SetById( SkinningIds.InstanceCount, count );
+				attributes.SetById( SkinningIds.g_TransformBuffer, transformBuffer.Handle );
+				attributes.SetById( SkinningIds.OutputVB, device.VertexCacheBuffer );
+				attributes.SetById( SkinningIds.VertexCount, vb.VertexCount );
 				attributes.SetCombo( "D_MORPH", morph ? 1 : 0 );
 				if ( morph )
 				{
-					attributes.Set( "CompositeMorphTextureAtlas", device.Morphs.Texture.Handle );
-					attributes.Set( "MorphTextureAtlasWidth", MorphAtlas.Width );
+					attributes.SetById( SkinningIds.CompositeMorphTextureAtlas, device.Morphs.Texture.Handle );
+					attributes.SetById( SkinningIds.MorphTextureAtlasWidth, MorphAtlas.Width );
 				}
 
 				attributes.SetCombo( "D_DEFORMATION_VOLUME", deformed ? 1 : 0 );
 				if ( deformed )
 				{
-					attributes.Set( "DeformationVolumes", ((BackendBuffer)volumes.Resource).Handle );
-					attributes.Set( "DeformationAnchors", ((BackendBuffer)anchors.Resource).Handle );
+					attributes.SetById( SkinningIds.DeformationVolumes, ((BackendBuffer)volumes.Resource).Handle );
+					attributes.SetById( SkinningIds.DeformationAnchors, ((BackendBuffer)anchors.Resource).Handle );
 				}
 
-				attributes.Set( "InputVB", vb.Buffer );
-				attributes.Set( "VertexSize", vb.Stride );
-				attributes.Set( "BoneIdxOffset", vb.BoneIndexOffset );
-				attributes.Set( "BoneIdxBits", vb.BoneIndexBits );
-				attributes.Set( "BoneWeightOffset", vb.BoneWeightOffset );
-				attributes.Set( "NormalOffset", vb.NormalOffset );
-				attributes.Set( "TangentSpaceOffset", vb.TangentOffset );
-				attributes.Set( "UncompressedTangentFrame", vb.CompressedTangentFrame ? 0 : 1 );
+				attributes.SetById( SkinningIds.InputVB, vb.Buffer );
+				attributes.SetById( SkinningIds.VertexSize, vb.Stride );
+				attributes.SetById( SkinningIds.BoneIdxOffset, vb.BoneIndexOffset );
+				attributes.SetById( SkinningIds.BoneIdxBits, vb.BoneIndexBits );
+				attributes.SetById( SkinningIds.BoneWeightOffset, vb.BoneWeightOffset );
+				attributes.SetById( SkinningIds.NormalOffset, vb.NormalOffset );
+				attributes.SetById( SkinningIds.TangentSpaceOffset, vb.TangentOffset );
+				attributes.SetById( SkinningIds.UncompressedTangentFrame, vb.CompressedTangentFrame ? 0 : 1 );
 
 				// InstanceParams_t, as native fills it
 				instances.AsSpan().Clear();
@@ -97,7 +121,7 @@ internal sealed partial class BackendContext
 					}
 				}
 
-				attributes.SetData( "Instances_t", instances );
+				attributes.SetById( SkinningIds.Instances_t, instances );
 				if ( !skinningDrawer.Dispatch( r.List, shader, attributes, vb.VertexCount, count, 1 ) ) return false;
 			}
 		}

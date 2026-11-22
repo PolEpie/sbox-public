@@ -190,6 +190,75 @@ public class GraphicsContextTests : GpuTest
 		Device.Destroy( normals );
 	}
 
+	/// <summary>
+	/// A dispatch moves only the textures it can touch: those it binds, and those it can reach through the bindless set. A
+	/// texture among its attributes that it neither binds nor reaches (a view's block attributes are under every dispatch's)
+	/// keeps its layout, with no barrier. cs_terrain_normal uses no bindless textures; it used to put every texture among its
+	/// attributes in <see cref="ImageLayout.General"/>.
+	/// </summary>
+	[TestMethod]
+	public void ADispatchLeavesTexturesItCannotReach()
+	{
+		var bake = library.Load( "shaders/terrain/cs_terrain_normal.shader" );
+		if ( bake is null ) Assert.Inconclusive( "cs_terrain_normal isn't compiled" );
+
+		var list = Device.BeginCommandList( QueueType.Graphics, "Dispatch with an unreachable texture" );
+		var context = new GraphicsContext( Device, drawer, list );
+		var storage = TextureUsage.Sampled | TextureUsage.Storage | TextureUsage.CopyDestination;
+		var height = Device.CreateTexture( TextureInfo.Texture2D( 16, 16, Format.R16Unorm, name: "Height" ) with { Usage = storage } );
+		var normals = Device.CreateTexture( TextureInfo.Texture2D( 16, 16, Format.RG16Unorm, name: "Normals" ) with { Usage = storage } );
+		var other = context.CreateTarget( 16, 16, Format.RGBA8Unorm, name: "Other" );
+		context.Track( height, ImageLayout.Undefined );
+		context.Track( normals, ImageLayout.Undefined );
+		context.SetTarget( other );
+		context.Clear( new Vector4( 1, 1, 1, 1 ) );
+		var before = context.LayoutOf( other );
+
+		var attributes = new ShaderAttributes();
+		attributes.Set( "Heightmap", height );
+		attributes.Set( "OutputMap", normals );
+		attributes.Set( "Unbound", other );
+		attributes.Set( "HeightScale", 100.0f );
+		attributes.Set( "UnitsPerTexel", 1.0f );
+		var variant = drawer.Variant( bake, attributes );
+		Assert.IsFalse( variant.ReadsBindlessTextures, "cs_terrain_normal samples no bindless textures" );
+		Assert.IsFalse( variant.UsesBindlessStorageTextures );
+
+		Assert.IsTrue( context.Dispatch( bake, attributes, 2, 2, 1 ) );
+		Assert.AreEqual( ImageLayout.General, context.LayoutOf( normals ), "bound as storage" );
+		Assert.AreEqual( ImageLayout.General, context.LayoutOf( height ), "bound as storage too (read with Load)" );
+		Assert.AreEqual( before, context.LayoutOf( other ), "neither bound nor reachable: left as it was" );
+
+		context.SetTarget( other );
+		context.Clear( new Vector4( 0, 0, 0, 1 ) );
+		Finish( context, other );
+		context.Release();
+		Device.Destroy( height );
+		Device.Destroy( normals );
+	}
+
+	/// <summary>
+	/// Reflection says which bindless arrays a compute variant reaches, as only what its code uses is reflected: screen-space
+	/// reflections' intersect pass samples last frame's colour by bindless index, and its other textures are bound.
+	/// </summary>
+	[TestMethod]
+	public void ReflectionSaysWhichVariantsReachBindlessTextures()
+	{
+		var reflections = library.Load( "shaders/screen_space_reflections_cs.shader" );
+		var mips = library.Load( "shaders/downsample_cs.shader" );
+		if ( reflections is null || mips is null ) Assert.Inconclusive( "screen_space_reflections_cs or downsample_cs isn't compiled" );
+
+		var attributes = new ShaderAttributes();
+		attributes.SetCombo( "D_PASS", 1 );
+		var intersect = drawer.Variant( reflections, attributes );
+		Assert.IsTrue( intersect.ReadsBindlessTextures, "the intersect pass reads the history by index" );
+		Assert.IsFalse( intersect.UsesBindlessStorageTextures );
+
+		var downsample = drawer.Variant( mips, new ShaderAttributes() );
+		Assert.IsFalse( downsample.ReadsBindlessTextures, "downsample_cs binds what it reads" );
+		Assert.IsFalse( downsample.UsesBindlessStorageTextures );
+	}
+
 	// The engine's Vertex, as VertexStreamLayout.EngineVertex lays it out
 	struct EngineVertex
 	{

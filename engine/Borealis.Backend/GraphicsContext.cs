@@ -527,15 +527,19 @@ public sealed class GraphicsContext
 	}
 
 	/// <summary>
-	/// Run a compute shader outside any rendering scope. Textures it's given whole are put in
-	/// <see cref="ImageLayout.General"/>, which it may both read and write. A texture it's given a mip of (a view) is put in
-	/// General too, with the mips it samples in <see cref="ImageLayout.ShaderRead"/> for the dispatch, as sampled views are
-	/// bound, and back in General after it (screen-space reflections read one mip of a texture and write another).
+	/// Run a compute shader outside any rendering scope. Textures it binds as storage are put in
+	/// <see cref="ImageLayout.General"/>, which it may both read and write, and those it only samples in
+	/// <see cref="ImageLayout.ShaderRead"/>. A texture it's given a mip of (a view) is put in General too, with the mips it
+	/// samples in ShaderRead for the dispatch, as sampled views are bound, and back in General after it (screen-space
+	/// reflections read one mip of a texture and write another). Other textures among the attributes it can only reach by
+	/// bindless index: they're made readable where its shader samples bindless textures, writable (General) where it uses
+	/// bindless storage textures, and left alone where it does neither.
 	/// </summary>
 	public bool Dispatch( ShaderFile shader, ShaderAttributes attributes, int x, int y, int z )
 	{
-		PrepareDispatch( shader, attributes );
-		var done = drawer.Dispatch( List, shader, attributes, x, y, z );
+		var variant = drawer.Variant( shader, attributes );
+		PrepareDispatch( variant, attributes );
+		var done = drawer.Dispatch( List, variant, attributes, x, y, z );
 		EndDispatch();
 		return done;
 	}
@@ -546,28 +550,30 @@ public sealed class GraphicsContext
 	/// </summary>
 	public bool DispatchIndirect( ShaderFile shader, ShaderAttributes attributes, BufferHandle arguments, long offset )
 	{
-		PrepareDispatch( shader, attributes );
-		var done = drawer.DispatchIndirect( List, shader, attributes, arguments, offset );
+		var variant = drawer.Variant( shader, attributes );
+		PrepareDispatch( variant, attributes );
+		var done = drawer.DispatchIndirect( List, variant, attributes, arguments, offset );
 		EndDispatch();
 		return done;
 	}
 
-	void PrepareDispatch( ShaderFile shader, ShaderAttributes attributes )
+	/// <summary>
+	/// Before a dispatch: the textures it binds in the layouts their bindings want, and those it can reach by bindless index
+	/// readable (or, where it uses bindless storage textures, writable). A texture among the attributes that it neither binds
+	/// nor can reach through the bindless set is left as it is: the dispatch can't touch it.
+	/// </summary>
+	void PrepareDispatch( ShaderVariant variant, ShaderAttributes attributes )
 	{
 		EndScope();
+		if ( variant is null ) return;
 
 		// Textures it writes go to General, which it may also read; those it only samples to ShaderRead, as their
 		// bindings expect
-		var variant = drawer.Variant( shader, attributes );
-		foreach ( var (_, value) in attributes.Values )
+		foreach ( var resource in variant.ResourceSpan )
 		{
-			if ( value is TextureHandle texture ) dispatchLayouts[texture] = ImageLayout.Undefined;
-		}
-
-		foreach ( var resource in variant is null ? default : variant.ResourceSpan )
-		{
-			if ( resource.Name is null ) continue;
-			var value = attributes.Get( resource.Name );
+			// By the id the drawer binds it by, hashing no name
+			if ( resource.Kind is not (ShaderResourceKind.Texture or ShaderResourceKind.StorageTexture) || resource.Variable is not { } variable ) continue;
+			var value = attributes.Get( variable.BindingId );
 
 			// A mip: its texture in General, a sampled one's mip read for the dispatch
 			if ( value is TextureViewHandle view && viewMips.TryGetValue( view, out var mip ) )
@@ -579,12 +585,23 @@ public sealed class GraphicsContext
 
 			if ( value is not TextureHandle texture ) continue;
 			if ( resource.Kind == ShaderResourceKind.StorageTexture ) dispatchLayouts[texture] = ImageLayout.General;
-			else if ( resource.Kind == ShaderResourceKind.Texture && dispatchLayouts[texture] != ImageLayout.General ) dispatchLayouts[texture] = ImageLayout.ShaderRead;
+			else if ( resource.Kind == ShaderResourceKind.Texture && dispatchLayouts.GetValueOrDefault( texture ) != ImageLayout.General ) dispatchLayouts[texture] = ImageLayout.ShaderRead;
+		}
+
+		// The rest of its textures it can only reach through the bindless set, by an index it's given: sampled ones want
+		// ShaderRead, as their bindless descriptors name it, and storage ones General. One that uses neither reaches none
+		if ( variant.UsesBindlessStorageTextures || variant.ReadsBindlessTextures )
+		{
+			var reached = variant.UsesBindlessStorageTextures ? ImageLayout.General : ImageLayout.ShaderRead;
+			foreach ( var (_, value) in attributes.Values )
+			{
+				if ( value is TextureHandle texture ) dispatchLayouts.TryAdd( texture, reached );
+			}
 		}
 
 		foreach ( var (texture, layout) in dispatchLayouts )
 		{
-			Transition( texture, layout == ImageLayout.Undefined ? ImageLayout.General : layout );
+			Transition( texture, layout );
 			if ( layout != ImageLayout.ShaderRead ) dispatched.Add( texture );
 		}
 
