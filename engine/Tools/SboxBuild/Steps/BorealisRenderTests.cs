@@ -43,7 +43,7 @@ internal class BorealisRenderTests( string[] presets, bool update, bool pullRequ
 
 		// The Vulkan loader ignores VK_DRIVER_FILES in an elevated process, so BorealisLab would render on the machine's GPU
 		// instead, where no image is approved
-		if ( new System.Security.Principal.WindowsPrincipal( System.Security.Principal.WindowsIdentity.GetCurrent() ).IsInRole( System.Security.Principal.WindowsBuiltInRole.Administrator ) )
+		if ( OperatingSystem.IsWindows() && new System.Security.Principal.WindowsPrincipal( System.Security.Principal.WindowsIdentity.GetCurrent() ).IsInRole( System.Security.Principal.WindowsBuiltInRole.Administrator ) )
 		{
 			Log.Error( "borealis-render-tests can't run elevated: the Vulkan loader then ignores VK_DRIVER_FILES and renders on the GPU, not Lavapipe. Run it from an unelevated shell (from an elevated one, through explorer.exe <script>.cmd)." );
 			return ExitCode.Failure;
