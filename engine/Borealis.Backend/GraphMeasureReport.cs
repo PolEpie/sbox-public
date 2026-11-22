@@ -11,7 +11,7 @@ namespace Borealis.Backend;
 /// Writes <see cref="GraphMeasure"/>'s files into its folder, at the start of a device frame: <c>summary.tsv</c>, a line
 /// every <see cref="GraphMeasure.Every"/> frames with the totals since the last per frame (planning, layout tracking, barrier
 /// calls and what they order); and for each listed frame <c>uses-N.tsv</c> (its texture uses in submission order),
-/// <c>resources-N.tsv</c> (every live texture and buffer) and <c>views-N.tsv</c> (the views' visibility sets).
+/// <c>resources-N.tsv</c> (every live texture and buffer) and <c>views-N.tsv</c> (the views' visibility sets and the morph atlas).
 /// </summary>
 internal static class GraphMeasureReport
 {
@@ -109,6 +109,6 @@ internal static class GraphMeasureReport
 			res.Append( CultureInfo.InvariantCulture, $"buffer\t{handle.Index}\t{handle.Generation}\t{name}\t\t\t\t\t\t\t\t{usage}\t{bytes}\t{size}\t{location}\n" );
 
 		File.WriteAllText( Path.Combine( GraphMeasure.Folder, $"resources-{frame}.tsv" ), res.ToString() );
-		File.WriteAllText( Path.Combine( GraphMeasure.Folder, $"views-{frame}.tsv" ), device.VisibilityViewsReport() );
+		File.WriteAllText( Path.Combine( GraphMeasure.Folder, $"views-{frame}.tsv" ), device.VisibilityViewsReport() + device.MorphReport() );
 	}
 }

@@ -3387,6 +3387,9 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	/// <summary>The frame's composite morph atlas, which <see cref="BackendMorphs"/> queue meshes in.</summary>
 	internal MorphAtlas Morphs => morphs ??= new MorphAtlas( this );
 
+	/// <summary>For <c>GraphMeasure</c>: the morph atlas's height (0 while there's none) and the frames since anything morphed, a line.</summary>
+	internal string MorphReport() => morphs is { } m ? $"morph atlas\t{m.MadeHeight}\tidle\t{m.IdleFor}\tresized\t{m.Resized}\tlongest_ms\t{m.LongestResize:0.000}\tfreed\t{m.Freed}\n" : "morph atlas\tnone\n";
+
 	MorphAtlas morphs;
 
 	/// <inheritdoc/>
@@ -3482,6 +3485,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 			FreeRetiredVisibility();
 			if ( GpuDrivenFrame % 60 == 0 ) FreeIdleVisibility();
 			FreeUnheldModels();
+			morphs?.BeginFrame();
 			surfaces?.Records.BeginFrame();
 			gpuDrivenTables?.BeginFrame();
 			if ( meshletStore is { } meshlets ) meshlets.Loading = Loading;
