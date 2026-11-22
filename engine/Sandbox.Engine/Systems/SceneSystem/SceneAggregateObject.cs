@@ -89,7 +89,7 @@ internal sealed class SceneAggregateObject : SceneObject
 
 	public new void Delete()
 	{
-		if ( native.IsNull )
+		if ( !this.IsValid() )
 			return;
 
 		RenderingEnabled = false;
@@ -109,10 +109,16 @@ internal sealed class SceneAggregateObject : SceneObject
 
 		var material = CheckModel( model, fragments );
 
-		// Its native twin holds only what every scene object has (world, transform, flags, tags); Borealis draws the fragments
+		// Its native twin holds only what every scene object has (world, transform, flags, tags); Borealis draws the fragments.
+		// Where nothing reads the twin it's made without one, as a custom object is
 		using ( var h = IHandle.MakeNextHandle( this ) )
 		{
-			CManagedSceneObject.Create( sceneWorld );
+			if ( MakesNativeTwin ) CManagedSceneObject.Create( sceneWorld );
+			else
+			{
+				MakeWithoutTwin( sceneWorld, null, SceneCustomObject.TwinlessFlags );
+				KeepFixedBounds( false );
+			}
 		}
 
 		AggregateModel = model;

@@ -178,6 +178,22 @@ public sealed partial class CommandList
 			list.AddEntry( &Execute, new Entry { Token = token, Object2 = texture, Object4 = this, Data1 = new Vector4( mip, 0, 0, 0 ) } );
 		}
 
+		/// <summary>
+		/// Set a texture's bindless index to this int attribute, looked up as the list plays back, where the renderer draws,
+		/// and tell texture streaming the texture is used then (<see cref="Texture.MarkUsed"/> with <paramref name="requiredMipSize"/>).
+		/// </summary>
+		internal void SetIndex( StringToken token, Texture texture, int requiredMipSize = 0 )
+		{
+			static void Execute( ref Entry entry, CommandList commandList )
+			{
+				var texture = (Texture)entry.Object2;
+				texture.MarkUsed( (int)entry.Data1.x );
+				var attrAccess = (AttributeAccess)entry.Object4;
+				attrAccess.attributes.Set( entry.Token, texture.Index );
+			}
+			list.AddEntry( &Execute, new Entry { Token = token, Object2 = texture, Object4 = this, Data1 = new Vector4( requiredMipSize, 0, 0, 0 ) } );
+		}
+
 		public void Set( StringToken token, SamplerState samplerState )
 		{
 			static void Execute( ref Entry entry, CommandList commandList )

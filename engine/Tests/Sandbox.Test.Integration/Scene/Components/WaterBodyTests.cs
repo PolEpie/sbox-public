@@ -291,4 +291,53 @@ public class WaterBodyTests
 			scene.Destroy();
 		}
 	}
+
+	/// <summary>
+	/// The surface's capture commands (the environment it reflects and its refraction capture) are recorded once and played
+	/// back each frame where the surface draws; they're recorded again only when what they record changes.
+	/// </summary>
+	[TestMethod]
+	public void CapturesRecordOnlyWhenTheyChange()
+	{
+		if ( !Graphics.IsAvailable )
+			Assert.Inconclusive( "Requires SBOX_TEST_GRAPHICS=1." );
+
+		var scene = Scene.CreateEditorScene();
+		using var scope = scene.Push();
+		try
+		{
+			var camera = scene.CreateObject().Components.Create<CameraComponent>();
+			camera.WorldPosition = new Vector3( 0, -600, 200 );
+			camera.WorldRotation = Rotation.From( 20, 90, 0 );
+			var sky = scene.CreateObject().Components.Create<SkyBox2D>();
+			var water = scene.CreateObject().Components.Create<WaterBody>();
+			water.Size = new Vector2( 1024 );
+			water.Waves = false;
+			water.Underwater = false;
+			water.Effects = false;
+			var surface = water.GetComponentsInChildren<ModelRenderer>().Single();
+
+			scene.PreRender();
+			var captures = surface.ExecuteBefore;
+			Assert.IsNotNull( captures, "The surface must play its captures back where it draws." );
+			int recorded = water.CaptureRecords;
+			for ( int i = 0; i < 5; i++ )
+				scene.PreRender();
+			Assert.AreSame( captures, surface.ExecuteBefore );
+			Assert.AreEqual( recorded, water.CaptureRecords, "Frames that changed nothing recorded the captures again." );
+
+			camera.WorldPosition += Vector3.Up * 50;
+			scene.PreRender();
+			Assert.AreEqual( recorded, water.CaptureRecords, "Moving the camera well above the surface changes nothing recorded." );
+
+			sky.Tint = Color.Red;
+			scene.PreRender();
+			Assert.AreEqual( recorded + 1, water.CaptureRecords, "A sky change must record the environment again." );
+			Assert.AreSame( captures, surface.ExecuteBefore );
+		}
+		finally
+		{
+			scene.Destroy();
+		}
+	}
 }

@@ -355,7 +355,7 @@ internal sealed partial class MapWorld
 		}
 
 		/// <summary>
-		/// <c>WaterBody.SetReflectionAttributes</c>: screen-space reflections (planar isn't drawn here) and the scene's sky as
+		/// <c>WaterBody.BindEnvironment</c>: screen-space reflections (planar isn't drawn here) and the scene's sky as
 		/// the environment they fall back to.
 		/// </summary>
 		void SetReflection( ShaderParameters a )

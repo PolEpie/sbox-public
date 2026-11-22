@@ -136,8 +136,34 @@ internal sealed class DecalSceneObject : SceneObject
 
 		using ( var h = IHandle.MakeNextHandle( this ) )
 		{
-			CSceneSystem.CreateDecal( world );
+			if ( MakesNativeTwin ) CSceneSystem.CreateDecal( world );
+			else MakeDecalWithoutTwin( world );
 		}
+	}
+
+	/// <summary>
+	/// Made without a native twin: what <c>CDecalSceneObjectDesc::Create</c> gives a new one (opaque, visible, not batchable,
+	/// no bounds until it's placed) and <c>CDecalSceneObject</c>'s defaults for its settings.
+	/// </summary>
+	void MakeDecalWithoutTwin( SceneWorld world )
+	{
+		color = new Vector4( 1, 1, 1, 1 );
+		attenuationAngle = 1.0f;
+		emissionEnergy = 1.0f;
+		colorMix = 1.0f;
+		parallaxStrength = 0.25f;
+		coverageAmount = 1.0f;
+		coverageRange = 0.07f;
+
+		MakeWithoutTwin( world, null, Rendering.SceneObjectFlags.IsOpaque, batchable: false );
+		KeepFixedBounds( false );
+	}
+
+	/// <summary>A unit box around its transform, as <c>CDecalSceneObjectDesc::UpdateBoundingBoxToMatchTransform</c> bounds it.</summary>
+	internal override void OnTransformChanged( in Transform tx )
+	{
+		base.OnTransformChanged( tx );
+		if ( !HasTwin ) KeepBounds( TransformBounds( tx, new BBox( new Vector3( -0.5f ), new Vector3( 0.5f ) ) ) );
 	}
 
 	void SettingsChanged()

@@ -39,8 +39,10 @@ public sealed partial class WaterBody : Component, Component.ExecuteInEditor
 		? MathF.Max( 4, MathF.Max( WaveLength, WaveWidth ) ) * Math.Clamp( WaveSteepness, 0, 1 ) / MathF.Tau : 0;
 
 	ModelRenderer _renderer;
-	CommandList[] _captureLists;
-	int _captureList;
+	readonly SurfaceAttributes _surfaceAttributes = new();
+	CommandList _captures;
+	CaptureKey _recorded;
+	bool _hasRecorded;
 	TagSet _captureExclusions;
 	static readonly List<CameraComponent> _cameras = [];
 
@@ -65,7 +67,8 @@ public sealed partial class WaterBody : Component, Component.ExecuteInEditor
 		_surface.Tags.Add( _surfaceTag );
 		_renderer = _surface.Components.Create<ModelRenderer>();
 		_renderer.RenderType = ModelRenderer.ShadowRenderType.Off;
-		_captureLists = [new( "Water captures" ), new( "Water captures" )];
+		_captures = new( "Water captures" );
+		_hasRecorded = false;
 		_captureExclusions = new TagSet( [Id.ToString( "N" )] );
 		_surface.Enabled = true;
 		UpdateSurface( ViewingCamera() );
@@ -92,7 +95,7 @@ public sealed partial class WaterBody : Component, Component.ExecuteInEditor
 
 		_layout = layout;
 		_surface.WorldTransform = new Transform( FromSurface( _renderCenter ), WorldRotation, 1 );
-		var attributes = _renderer.Attributes;
+		var attributes = _surfaceAttributes.For( _renderer.Attributes );
 		attributes.Set( "Origin", SurfaceOrigin );
 		attributes.Set( "HalfSize", new Vector2( MathF.Max( 0.05f, MathF.Abs( Size.x * WorldScale.x ) * 0.5f ),
 			MathF.Max( 0.05f, MathF.Abs( Size.y * WorldScale.y ) * 0.5f ) ) );
@@ -106,7 +109,6 @@ public sealed partial class WaterBody : Component, Component.ExecuteInEditor
 		attributes.Set( "AxisX", WorldRotation.Forward );
 		attributes.Set( "AxisY", WorldRotation.Left );
 		attributes.Set( "SurfaceNormal", WorldRotation.Up );
-		SetReflectionAttributes( attributes );
 		UpdateReflectionPlane( attributes );
 		SetOverlayAttributes( attributes );
 	}
@@ -207,7 +209,9 @@ public sealed partial class WaterBody : Component, Component.ExecuteInEditor
 	}
 
 	/// <summary>
-	/// Record surface captures for the editor viewport or main camera.
+	/// Hand the renderer what the surface's draws need from game state, for the editor viewport or main camera: the
+	/// environment it reflects and the refraction capture, as one command list played back where the surface draws (bindless
+	/// indices and capture targets are resolved there). The list is recorded again only when what it records changes.
 	/// Simultaneous independent viewing cameras and custom-projection captures are not supported yet.
 	/// </summary>
 	protected override void OnPreRender()
@@ -215,13 +219,36 @@ public sealed partial class WaterBody : Component, Component.ExecuteInEditor
 		if ( !_renderer.IsValid() )
 			return;
 
+		using var _ = _preRenderZone.Start();
+
 		var viewer = ViewingCamera();
 		UpdateSurface( viewer );
-		if ( !_surface.Enabled || !viewer.IsValid() )
+		if ( !_surface.Enabled )
 		{
 			_renderer.ExecuteBefore = null;
 			return;
 		}
+
+		var key = Captures( viewer );
+		if ( !_hasRecorded || !key.Same( _recorded ) )
+		{
+			RecordCaptures( _captures, key );
+			_recorded = key;
+			_hasRecorded = true;
+		}
+
+		_renderer.ExecuteBefore = _captures;
+	}
+
+	/// <summary>
+	/// What the capture commands record, from game state: the environment, and the refraction capture when the
+	/// viewer sees through the surface.
+	/// </summary>
+	CaptureKey Captures( CameraComponent viewer )
+	{
+		var key = new CaptureKey { Environment = CurrentEnvironment() };
+		if ( !viewer.IsValid() || viewer.CustomProjectionMatrix is not null )
+			return key;
 
 		var normal = WorldRotation.Up;
 		float eyeHeight = Vector3.Dot( viewer.WorldPosition - SurfaceOrigin, normal );
@@ -229,18 +256,62 @@ public sealed partial class WaterBody : Component, Component.ExecuteInEditor
 		if ( below )
 			normal = -normal;
 
-		var captures = _captureLists[_captureList ^= 1];
-		captures.Reset();
-		captures.Attributes.Set( "HasRefractionTexture", false );
-		if ( viewer.CustomProjectionMatrix is null )
-		{
-			bool unclipped = viewer.Orthographic || MathF.Abs( eyeHeight ) <= MathF.Max( 0.5f, CaptureDisplacement ) + viewer.ZNear * 2;
-			if ( MaterialOpacity( ActiveMaterial, below ) < 1 )
-				AddRefractionCapture( captures, viewer, normal, unclipped );
-		}
+		if ( MaterialOpacity( ActiveMaterial, below ) >= 1 )
+			return key;
 
-		_renderer.ExecuteBefore = captures;
+		key.Camera = viewer;
+		key.Refract = true;
+		key.Below = below;
+		key.Unclipped = viewer.Orthographic || MathF.Abs( eyeHeight ) <= MathF.Max( 0.5f, CaptureDisplacement ) + viewer.ZNear * 2;
+		if ( key.Unclipped )
+			key.Projection = viewer.ProjectionMatrix;
+		key.Plane = new Plane( SurfaceOrigin + normal * (CaptureDisplacement + 0.125f), -normal );
+		key.Downsample = CaptureSizeFactor( RefractionDownsampleFactor );
+		key.Fog = below ? default( FogSetup ) : RefractionFog;
+		return key;
 	}
+
+	/// <summary>
+	/// Record the capture commands: the environment's binding, then the refraction capture or its absence.
+	/// </summary>
+	void RecordCaptures( CommandList captures, in CaptureKey key )
+	{
+		CaptureRecords++;
+		captures.Reset();
+		BindEnvironment( captures, key.Environment );
+		captures.Attributes.Set( "HasRefractionTexture", false );
+		if ( key.Refract )
+			AddRefractionCapture( captures, key );
+	}
+
+	/// <summary>
+	/// How many times the capture commands were recorded, for tests.
+	/// </summary>
+	internal int CaptureRecords { get; private set; }
+
+	/// <summary>
+	/// Everything the capture commands are recorded from, compared exactly each frame.
+	/// </summary>
+	struct CaptureKey
+	{
+		public EnvironmentBinding Environment;
+		public bool Refract;
+		public CameraComponent Camera;
+		public bool Below;
+		public bool Unclipped;
+		public Matrix Projection;
+		public Plane Plane;
+		public int Downsample;
+		public FogSetup? Fog;
+
+		public readonly bool Same( in CaptureKey other ) => Environment.Same( other.Environment ) && Refract == other.Refract
+			&& ReferenceEquals( Camera, other.Camera ) && Below == other.Below && Unclipped == other.Unclipped
+			&& Projection._numerics == other.Projection._numerics
+			&& Plane.Normal.x == other.Plane.Normal.x && Plane.Normal.y == other.Plane.Normal.y && Plane.Normal.z == other.Plane.Normal.z
+			&& Plane.Distance == other.Plane.Distance && Downsample == other.Downsample && SameFog( Fog, other.Fog );
+	}
+
+	static readonly Sandbox.Utility.Superluminal _preRenderZone = new( "WaterBody.OnPreRender", Color.Cyan );
 
 	CameraComponent ViewingCamera() => FindViewingCamera( Scene );
 
@@ -287,7 +358,10 @@ public sealed partial class WaterBody : Component, Component.ExecuteInEditor
 		_renderer = null;
 		_layout = default;
 		Array.Clear( _surfaceMeshes );
-		_captureLists = null;
+		_captures = null;
+		_recorded = default;
+		_hasRecorded = false;
+		_surfaceAttributes.Forget();
 		_captureExclusions = null;
 		_reflectionSkies.Clear();
 		DestroyOverlays();
