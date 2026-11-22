@@ -221,6 +221,50 @@ public class AsyncSchedulingTests
 		AssertSingleConsumers( recorder );
 	}
 
+	static int Borrows( FrameRecorder recorder, int index )
+	{
+		var segment = ((Array)Segments.GetValue( recorder )).GetValue( index );
+		return (int)segment.GetType().GetField( "Borrows" ).GetValue( segment );
+	}
+
+	/// <summary>
+	/// With lists of their own, main-thread segments straight after one another record into the first one's list; a
+	/// segment that waits for compute, compute itself, or anything with separate lists turned off keeps a list of its own.
+	/// </summary>
+	[TestMethod]
+	public void MainSegmentsAfterOneAnotherShareAList()
+	{
+		using var system = new RenderSystem();
+		using var child = new RenderSystem();
+		Layers.SetValue( child, (RenderLayer[])[new Pass( "child graphics" )] );
+		Layers.SetValue( system, (RenderLayer[])[new Pass( "compute", compute: true ), new Pass( "independent" ),
+			new ChildFramePass( child.Frame ), new Pass( "after child" )] );
+		using var recorder = new FrameRecorder();
+		recorder.Plan( system.Frame, parallel: true, asyncCompute: true );
+
+		var plan = recorder.Snapshot( "test" );
+		var childSegment = plan.Frames[1].Layers[0].Segment;
+		var after = SegmentFor( recorder, "after child" );
+		var join = childSegment - 1;
+		Assert.IsTrue( WaitFor( recorder, join ) >= 0, "the segment before the child frame waits for compute" );
+		Assert.AreEqual( -1, Borrows( recorder, join ), "so it has a list of its own" );
+		Assert.AreEqual( -1, Borrows( recorder, SegmentFor( recorder, "compute" ) ), "as compute does" );
+		Assert.AreEqual( join, Borrows( recorder, childSegment ), "the child frame records into it" );
+		Assert.AreEqual( join, Borrows( recorder, after ), "and so does the segment after, into the first of the run" );
+		Assert.IsTrue( recorder.SharedLists >= 2 );
+
+		FrameRecorder.ShareMainLists = false;
+		try
+		{
+			recorder.Plan( system.Frame, parallel: true, asyncCompute: true );
+			Assert.AreEqual( 0, recorder.SharedLists, "-separate-main-lists keeps a list per segment" );
+		}
+		finally
+		{
+			FrameRecorder.ShareMainLists = true;
+		}
+	}
+
 	[TestMethod]
 	public void ComputeOutputPreparationCannotOverwriteEarlierInputs()
 	{
