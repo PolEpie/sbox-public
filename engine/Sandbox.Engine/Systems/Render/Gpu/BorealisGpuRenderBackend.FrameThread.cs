@@ -327,7 +327,9 @@ internal sealed partial class BorealisGpuRenderBackend
 		aheadWindow = null;
 		try
 		{
+			var joinStart = System.Diagnostics.Stopwatch.GetTimestamp();
 			thread.Join();
+			BorealisGpuFrameLatency.Joined( Application.FrameCount, System.Diagnostics.Stopwatch.GetElapsedTime( joinStart ).TotalMilliseconds );
 		}
 		catch ( Borealis.Gpu.GpuException e ) when ( e.IsDeviceLost )
 		{

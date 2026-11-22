@@ -108,6 +108,10 @@ internal static class EngineLoop
 		MainThreadCpuTiming.AddMilliseconds( ThreadCpuTime.NowMs() - cpuAtStart );
 
 		var idleMs = framePacer.Wait( FrameRateLimit.FramesPerSecond );
+
+		// The deadline latency mode: when the render thread draws, the next frame's input waits until just in time for the GPU.
+		// Not idle time: it takes the place of the wait for the render thread later in the frame, which isn't either
+		if ( GameWindow.Current?.HandedOverFrame == Application.FrameCount ) BorealisGpuFrameLatency.SleepBeforeInput( Application.FrameCount );
 		PerformanceStats.Timings.Idle.AddMilliseconds( idleMs );
 		DevTools.SampleFrame( frameTimer.ElapsedMilliSeconds, idleMs );
 
@@ -153,6 +157,7 @@ internal static class EngineLoop
 		//
 		UpdatePerformance();
 		DebugOverlay.Draw();
+		BorealisGpuFrameLatency.InputSampled( Application.FrameCount );
 		UpdateInput();
 
 		//

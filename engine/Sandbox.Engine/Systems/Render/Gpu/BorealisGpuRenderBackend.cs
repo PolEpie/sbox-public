@@ -286,10 +286,13 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 
 	internal void FollowFrame()
 	{
-		// Never inside a Borealis frame's recording (a block it lends): its lists would be left in the frame before
+		// Never inside a Borealis frame's recording (a block it lends): its lists would be left in the frame before. While the
+		// render thread draws, a block lent is its frame's, not the main thread's, which joins it (it skipped the join before,
+		// and drew a frame of its own over the render thread's)
 		// A lost device is said and handled whatever was recording when it went
 		BorealisGpuDeviceLost.Check( gpu );
-		if ( !followsFrames || lendNext is not null ) return;
+		if ( !followsFrames ) return;
+		if ( lendNext is not null && !Overlapping ) return;
 
 		// Started ahead on the frame thread (HandOverFrame): joined, and finished here; that may be before this engine frame
 		// ends, when something records in its end
@@ -515,9 +518,10 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 
 	public override RenderAttributes BeginBlock()
 	{
+		// Joined first: while the render thread draws, the block recording is its own
+		FollowFrame();
 		if ( list is not null ) throw new InvalidOperationException( "A Borealis.Gpu block is already recording." );
 
-		FollowFrame();
 		TrackWorkerTextures();
 		WriteWorkerUpdates();
 		WriteSheets();
@@ -2664,6 +2668,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	public void Dispose()
 	{
 		StopFrameThread();
+		BorealisGpuFrameLatency.Forget( gpu );
 		Unregister( this );
 		SubmitUploads();
 		gpu.WaitIdle();
