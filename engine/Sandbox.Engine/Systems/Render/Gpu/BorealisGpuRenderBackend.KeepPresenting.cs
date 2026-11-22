@@ -5,11 +5,11 @@ internal sealed partial class BorealisGpuRenderBackend
 	/// <summary>
 	/// Whether the frame thread keeps the game window presenting while the main thread is busy past a frame it handed over
 	/// (a map's mount, a long load step): after <see cref="KeepPresentingAfter"/> it presents the window's last output again
-	/// every <see cref="KeepPresentingEvery"/> until the main thread joins. Off unless <c>BOREALIS_KEEP_PRESENTING=1</c>.
+	/// every <see cref="KeepPresentingEvery"/> until the main thread joins. <c>BOREALIS_KEEP_PRESENTING=0</c> turns it off.
 	/// A window that stops presenting for seconds in immediate mode while a load makes and frees gigabytes of video memory
 	/// can have the GPU reset under it (RX 7900 XTX); presenting through the stall keeps the present path moving.
 	/// </summary>
-	internal static bool KeepPresenting = System.Environment.GetEnvironmentVariable( "BOREALIS_KEEP_PRESENTING" ) == "1";
+	internal static bool KeepPresenting = System.Environment.GetEnvironmentVariable( "BOREALIS_KEEP_PRESENTING" ) != "0";
 
 	/// <summary>How long the main thread may stay away from a frame handed over before the window presents its last output again.</summary>
 	internal static TimeSpan KeepPresentingAfter = TimeSpan.FromMilliseconds( 100 );
