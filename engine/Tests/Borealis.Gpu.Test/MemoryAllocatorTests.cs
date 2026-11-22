@@ -51,9 +51,9 @@ public class MemoryAllocatorTests : GpuTest
 	public void SparesAreKeptForSecondsAsWellAsFrames()
 	{
 		using var allocator = new MemoryAllocator( Device.Vk, Device.Allocator.MemoryProperties, false ) { QuietSeconds = 0, GrowBlocks = false, MakeBlocksAhead = false, SpareSeconds = 0.5 };
-		var requirements = new VkMemoryRequirements { size = allocator.BlockSize / 2, alignment = 256, memoryTypeBits = ~0u };
-		var kept = allocator.Allocate( requirements, MemoryLocation.Device, image: false );
-		var freed = allocator.Allocate( requirements, MemoryLocation.Device, image: false );
+		var requirements = new VkMemoryRequirements { size = allocator.BlockSize / 8, alignment = 256, memoryTypeBits = ~0u };
+		var full = new List<Allocation>();
+		for ( int i = 0; i < 8; i++ ) full.Add( allocator.Allocate( requirements, MemoryLocation.Device, image: false ) );
 		var other = allocator.Allocate( requirements, MemoryLocation.Device, image: false );
 		Assert.AreEqual( 2 * allocator.BlockSize, allocator.Reserved );
 
@@ -66,8 +66,7 @@ public class MemoryAllocatorTests : GpuTest
 		allocator.Trim( 3 + MemoryAllocator.SpareFrames );
 		Assert.AreEqual( allocator.BlockSize, allocator.Reserved, "freed once both passed" );
 
-		allocator.Free( kept );
-		allocator.Free( freed );
+		foreach ( var allocation in full ) allocator.Free( allocation );
 	}
 
 	/// <summary>
