@@ -151,7 +151,6 @@ native accessor g_pSceneSystem as NativeEngine.CSceneSystem
     CSceneLightProbeVolumeObject CreateLightProbeVolume( ISceneWorld pWorld );
 
     void MarkEnvironmentMapObjectUpdated( CEnvMapSceneObject pEnvMap );
-    void MarkLightProbeVolumeObjectUpdated( CSceneLightProbeVolumeObject pLightProbe );
 
     inline uint AddCullingBox( ISceneWorld pWorld, bool nCullMode, Vector3 vOrigin, Angles vAngles, Vector3 vExtents )
     {
