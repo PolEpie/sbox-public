@@ -28,13 +28,14 @@ public class SceneDynamicObject : SceneObject
 
 		using ( var h = IHandle.MakeNextHandle( this ) )
 		{
-			CDynamicSceneObject.Create( sceneWorld );
+			if ( MakesNativeTwin ) CDynamicSceneObject.Create( sceneWorld );
+			else MakeWithoutTwin( sceneWorld, null, SceneCustomObject.TwinlessFlags, batchable: false ); // as CDynamicSceneObject::Create
 
-			if ( native.IsValid )
+			if ( this.IsValid() )
 			{
 				// Start off with infinite bounds so it will actually get rendered
 				// if the user forgets/doesn't need bounds.
-				native.SetBoundsInfinite();
+				if ( HasTwin ) native.SetBoundsInfinite();
 				KeepFixedBounds( infinite: true );
 			}
 		}
@@ -44,7 +45,7 @@ public class SceneDynamicObject : SceneObject
 	{
 		set
 		{
-			managedNative.Material = value?.native ?? default;
+			if ( HasTwin ) managedNative.Material = value?.native ?? default;
 			if ( ManagedVertices is not null ) ManagedMaterial = value;
 		}
 	}
@@ -63,14 +64,14 @@ public class SceneDynamicObject : SceneObject
 
 	public void Clear()
 	{
-		managedNative.Reset();
+		if ( WritesTwin( "Reset" ) ) managedNative.Reset();
 		ManagedVertices?.Clear();
 	}
 
 	[MethodImpl( MethodImplOptions.AggressiveInlining )]
 	public void AddVertex( in Vertex v )
 	{
-		managedNative.AddVertex( v );
+		if ( WritesTwin( "AddVertex" ) ) managedNative.AddVertex( v );
 		ManagedVertices?.Add( v );
 	}
 
@@ -84,7 +85,7 @@ public class SceneDynamicObject : SceneObject
 
 	internal unsafe void AddVertex( in Vertex* ptr, int count )
 	{
-		managedNative.AddVertexRange( (IntPtr)ptr, count );
+		if ( WritesTwin( "AddVertexRange" ) ) managedNative.AddVertexRange( (IntPtr)ptr, count );
 		ManagedVertices?.AddRange( new ReadOnlySpan<Vertex>( ptr, count ) );
 	}
 
@@ -100,7 +101,7 @@ public class SceneDynamicObject : SceneObject
 	void Begin( Graphics.PrimitiveType type, int vertices )
 	{
 		ThrowIfUndefined( type );
-		managedNative.Begin( (RenderPrimitiveType)type, vertices );
+		if ( WritesTwin( "Begin" ) ) managedNative.Begin( (RenderPrimitiveType)type, vertices );
 		if ( ManagedVertices is null ) return;
 		ManagedVertices.Clear();
 		ManagedPrimitiveType = type;
