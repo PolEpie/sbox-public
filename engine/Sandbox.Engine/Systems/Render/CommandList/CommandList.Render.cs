@@ -1,3 +1,5 @@
+using System.Threading;
+
 namespace Sandbox.Rendering;
 
 
@@ -21,6 +23,29 @@ public sealed unsafe partial class CommandList
 		}
 
 		AddEntry( &Execute, new Entry { Object1 = renderer }, RendererSetupStore, rendererSetup );
+		lock ( _lock )
+		{
+			_drawsRenderers++;
+			Interlocked.Increment( ref liveRendererDraws );
+		}
+	}
+
+	// Renderers this list's recording draws (DrawRenderer), and in every list: a renderer's drawing is its component's code
+	int _drawsRenderers;
+	static int liveRendererDraws;
+
+	/// <summary>
+	/// Whether any command list's recording draws a renderer (<see cref="DrawRenderer"/>): its drawing is the component's code,
+	/// so a frame that may replay one draws on the main thread.
+	/// </summary>
+	internal static bool AnyDrawsRenderers => Volatile.Read( ref liveRendererDraws ) > 0;
+
+	// The recording was cleared (Reset): its renderer draws went with it
+	void ForgetRendererDraws()
+	{
+		if ( _drawsRenderers == 0 ) return;
+		Interlocked.Add( ref liveRendererDraws, -_drawsRenderers );
+		_drawsRenderers = 0;
 	}
 
 	/// <summary>

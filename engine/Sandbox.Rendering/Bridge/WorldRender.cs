@@ -215,7 +215,9 @@ internal sealed partial class WorldRender : ISceneWorldRender, IAttributeSource,
 	/// </summary>
 	public void PrepareFrame()
 	{
-		// Written at this frame's sync point, with nothing waiting since: a view of it finds it ready
+		// Written at this frame's sync point, with nothing waiting since: a view of it finds it ready. On the render thread it
+		// was written there whatever waits now, which is the main thread's next frame's
+		if ( ThreadSafe.IsRenderThread ) return;
 		if ( syncedFrame == Application.FrameCount && !Waiting ) return;
 
 		using var zone = Borealis.Zones.WorldPrepare.Start();
@@ -291,7 +293,11 @@ internal sealed partial class WorldRender : ISceneWorldRender, IAttributeSource,
 	/// </summary>
 	public void Sync()
 	{
-		if ( !HasPrepared || !Waiting ) return;
+		// With a render thread the frame's views don't prepare their worlds (they'd read the game's objects on it), so every
+		// world drawn is prepared here: its changes, and models and textures that finished loading
+		if ( RenderSync.Overlapping ) { if ( !HasPrepared && !Waiting ) return; }
+		else if ( !HasPrepared || !Waiting ) return;
+
 		PrepareFrame();
 		syncedFrame = Application.FrameCount;
 	}

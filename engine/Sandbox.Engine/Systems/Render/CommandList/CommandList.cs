@@ -163,25 +163,32 @@ public sealed unsafe partial class CommandList
 		if ( _splitEpoch == epoch ) return;
 		_splitEpoch = epoch;
 
+		// The other set isn't read in this frame: a replay reads the one recorded until the split, and the held one after.
+		// Written in this order for Playback, which reads them in the other order without the lock
 		var held = _recorded;
-		_recorded = _held ?? new Recorded();
-		_held = held;
-		if ( clearing ) _recorded.Clear();
-		else _recorded.CopyFrom( held );
+		var fresh = _held ?? new Recorded();
+		_splitEpoch = epoch;
+		if ( clearing ) fresh.Clear();
+		else fresh.CopyFrom( held );
+		Volatile.Write( ref _held, held );
+		Volatile.Write( ref _splitEpochPublished, epoch );
+		Volatile.Write( ref _recorded, fresh );
 		RenderSync.CountListSplit();
 	}
 
+	// The epoch of the last split as replays read it (Playback), written after the held set
+	long _splitEpochPublished = -1;
+
 	/// <summary>
 	/// The set a replay on this thread reads: on the render thread, the list as its frame was handed over (the held set once the
-	/// main thread has recorded since); anywhere else, what's recorded now.
+	/// main thread has recorded since); anywhere else, what's recorded now. Without the lock: the main thread may hold it while
+	/// it waits for the render thread (a panel's painting, uploading its tables).
 	/// </summary>
 	Recorded Playback()
 	{
-		lock ( _lock )
-		{
-			if ( _held is not null && _splitEpoch == RenderSync.Epoch && RenderSync.OnRenderThread ) return _held;
-			return _recorded;
-		}
+		var recorded = Volatile.Read( ref _recorded );
+		if ( !RenderSync.OnRenderThread ) return recorded;
+		return Volatile.Read( ref _splitEpochPublished ) == RenderSync.Epoch ? Volatile.Read( ref _held ) : recorded;
 	}
 
 	[System.Runtime.CompilerServices.MethodImpl( System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining )]
@@ -305,17 +312,24 @@ public sealed unsafe partial class CommandList
 		lock ( _lock )
 		{
 			Writing( clearing: true );
+			ForgetRendererDraws();
 			if ( _resources is not null )
 			{
 				foreach ( var resource in _resources )
 					resource.Reset();
 			}
 
-			Attributes.ClearRenderTargets();
-			drawAttributeAccess?.ClearRenderTargets();
-			drawAttributes?.Clear( false );
-			managedDrawAttributes?.Clear( false );
-			currentDrawAttributes = null;
+			// The playback state (the draw attributes a replay fills, its grabs) is the replay's: while a frame handed over may be
+			// replaying the list on the render thread it's left to that replay, which starts each from empty
+			if ( !RenderSync.Overlapping )
+			{
+				Attributes.ClearRenderTargets();
+				drawAttributeAccess?.ClearRenderTargets();
+				drawAttributes?.Clear( false );
+				managedDrawAttributes?.Clear( false );
+				currentDrawAttributes = null;
+			}
+
 			_recorded.Clear();
 		}
 	}

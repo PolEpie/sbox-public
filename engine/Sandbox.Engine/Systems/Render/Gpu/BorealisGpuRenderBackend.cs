@@ -671,6 +671,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	/// </summary>
 	internal override Graphics.Scope BeginUpdateWork()
 	{
+		FromMain();
 		if ( list is not null || lendNext is not null || !ThreadSafe.IsMainThread ) return Graphics.Scope.CreateOn( this );
 
 		var into = UploadList();
@@ -842,6 +843,36 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 
 	public override void Release( object resource )
 	{
+		// While the render thread draws a frame, what it draws with stays until it's done: released at the main thread's next
+		// join (ReleaseDeferred), as resources the game lets go of mid-frame are on the main thread
+		if ( drawing && !ThreadSafe.IsRenderThread )
+		{
+			lock ( deferredReleases ) deferredReleases.Add( resource );
+			return;
+		}
+
+		ReleaseNow( resource );
+	}
+
+	// Released while the render thread drew (Release), and a copy walked as they're released
+	readonly List<object> deferredReleases = new(), releasing = new();
+
+	/// <summary>Release what was let go of while the render thread drew, now that it's done.</summary>
+	void ReleaseDeferred()
+	{
+		lock ( deferredReleases )
+		{
+			if ( deferredReleases.Count == 0 ) return;
+			releasing.AddRange( deferredReleases );
+			deferredReleases.Clear();
+		}
+
+		foreach ( var resource in releasing ) ReleaseNow( resource );
+		releasing.Clear();
+	}
+
+	void ReleaseNow( object resource )
+	{
 		backingsVersion++;
 		if ( resource is Texture released ) Released?.Invoke( this, released );
 
@@ -924,8 +955,13 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 		// A realtime probe's cube is captured into a cube of Borealis's: read that, not a copy nothing writes
 		if ( texture.Depth == 6 && RenderedInto?.Invoke( this, texture ) is BackendTexture rendered ) return rendered.Handle;
 
-		// What workers made is tracked here before the main thread uses it
+		// One made already is looked up on any thread without waiting (a panel painting on the main thread asks for its
+		// textures' indices while the render thread draws). What workers made is tracked before the main thread uses it, and
+		// a texture made here: while the render thread draws the main thread waits for it first, before it takes the lock
+		// below that the render thread's textures take too
 		var mainThread = ThreadSafe.IsMainThread;
+		if ( (!mainThread || workerTracks.IsEmpty) && textures.TryGetValue( texture, out var known ) ) return known.Handle;
+		if ( mainThread ) FromMain();
 		if ( mainThread && !workerTracks.IsEmpty ) TrackWorkerTextures();
 
 		if ( textures.TryGetValue( texture, out var backing ) ) return backing.Handle;
@@ -1377,6 +1413,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	GpuCommandList UploadList()
 	{
 		if ( !ThreadSafe.IsMainThread && gpu.DeferredList is { } deferred ) return deferred;
+		FromMain();
 
 		if ( list is not null )
 		{
@@ -1422,6 +1459,8 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	/// </summary>
 	public override bool Update( Texture texture, ReadOnlySpan<byte> data, int x, int y, int z, int width, int height, int depth )
 	{
+		if ( ThreadSafe.IsMainThread ) FromMain();
+
 		// The engine wrote it: its copy is what's read from now on
 		texture.DrawnByView = false;
 
@@ -1484,6 +1523,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	/// </summary>
 	public override bool Cleared( Texture texture, Color color )
 	{
+		if ( ThreadSafe.IsMainThread ) FromMain();
 		texture.DrawnByView = false;
 		if ( !textures.TryGetValue( texture, out var backing ) ) return true;
 		if ( !ThreadSafe.IsMainThread ) return false;
@@ -1939,7 +1979,14 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	}
 
 	/// <summary>Called on the main thread with no block open: work that runs at once on Source 2's device gets a block of its own.</summary>
-	bool OutsideBlock => list is null && !Graphics.IsActive && ThreadSafe.IsMainThread;
+	bool OutsideBlock
+	{
+		get
+		{
+			FromMain();
+			return list is null && !Graphics.IsActive && ThreadSafe.IsMainThread;
+		}
+	}
 
 	GpuCommandList Recording => list ?? throw new InvalidOperationException( "Borealis.Gpu draws need a render block (Graphics.Scope.CreateOn)." );
 
@@ -2358,8 +2405,21 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 
 	public override unsafe void SetBufferData( GpuBuffer buffer, IntPtr data, int size, int offset )
 	{
+		// The main thread's write while the render thread draws doesn't wait for it (it may hold a lock the frame's drawing
+		// takes): its bytes are kept and written, in order, once the frame is drawn
+		if ( drawing && ThreadSafe.IsMainThread && !ThreadSafe.IsRenderThread )
+		{
+			StageBufferData( buffer, new ReadOnlySpan<byte>( (void*)data, size ), offset );
+			return;
+		}
+
+		FromMain();
+		WriteBufferData( buffer, new ReadOnlySpan<byte>( (void*)data, size ), offset );
+	}
+
+	void WriteBufferData( GpuBuffer buffer, ReadOnlySpan<byte> bytes, int offset )
+	{
 		var handle = BufferOf( buffer );
-		var bytes = new ReadOnlySpan<byte>( (void*)data, size );
 
 		// In a block, in order with its draws
 		if ( list is not null )
@@ -2401,7 +2461,8 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	/// </summary>
 	void BeginUploads()
 	{
-		if ( FrameAhead ) WaitForAheadSwitch();
+		// The render thread records in the frame it draws; the main thread's waits for the next frame's switch
+		if ( FrameAhead && !ThreadSafe.IsRenderThread ) WaitForAheadSwitch();
 		else FollowFrame();
 		uploads = gpu.BeginCommandList( QueueType.Graphics, "Engine uploads" );
 		written.Clear();
@@ -2418,6 +2479,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	/// <summary>Read a buffer's backing, after everything submitted so far. Not inside a block, which hasn't been submitted.</summary>
 	public override void ReadBuffer( GpuBuffer buffer, Span<byte> data, int offset )
 	{
+		FromMain();
 		if ( list is not null ) throw new NotSupportedException( "Buffer reads inside a render block on Borealis.Gpu" );
 		if ( data.IsEmpty ) return;
 
@@ -2448,6 +2510,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	/// </summary>
 	public byte[] ReadBytes( Texture texture, int mip = 0 )
 	{
+		FromMain();
 		var handle = TextureOf( texture );
 		SubmitUploads();
 		var info = gpu.InfoOf( handle );
@@ -2504,6 +2567,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	/// </summary>
 	public Color32[] ReadPixels( Texture texture )
 	{
+		FromMain();
 		var handle = TextureOf( texture );
 		var info = gpu.InfoOf( handle );
 		if ( info.Format is not (GpuFormat.RGBA8Unorm or GpuFormat.RGBA8Srgb) ) throw new NotSupportedException( $"Reading {info.Format} back" );

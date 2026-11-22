@@ -65,8 +65,12 @@ public sealed unsafe partial class CommandList
 		{
 			_resources ??= [];
 			_resources.Add( resource );
+			Volatile.Write( ref _replayedResources, _resources.ToArray() );
 		}
 	}
+
+	// The resources as a replay reads them, without the lock (BeginResources); made again as one registers
+	IResource[] _replayedResources;
 
 	/// <summary>
 	/// Executes commands on the current graphics context without requiring a scene view.
@@ -86,12 +90,9 @@ public sealed unsafe partial class CommandList
 	/// <summary>Prepare the list's resources for a replay (a painter's textures marked used).</summary>
 	void BeginResources()
 	{
-		lock ( _lock )
-		{
-			if ( _resources is null ) return;
-			foreach ( var resource in _resources )
-				resource.BeginExecute();
-		}
+		if ( Volatile.Read( ref _replayedResources ) is not { } resources ) return;
+		foreach ( var resource in resources )
+			resource.BeginExecute();
 	}
 
 	/// <summary>

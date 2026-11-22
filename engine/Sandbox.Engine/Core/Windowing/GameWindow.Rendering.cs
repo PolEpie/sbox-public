@@ -30,12 +30,18 @@ internal sealed partial class GameWindow
 
 		using ( WindowPresentTiming.Scope() )
 		{
-			game.presented = game.borealis.PresentFrame();
+			// A frame the render thread draws is presented there (DrawFrame)
+			if ( game.handedOver ) game.presented = true;
+			else game.presented = game.borealis.PresentFrame();
 			game.UpdateBorealisGpuTitle();
 		}
 
 		return true;
 	}
+
+	// Whether this engine frame's drawing was handed to the render thread (Render), which presents it and starts the next
+	// device frame itself
+	bool handedOver;
 
 	// Whether this engine frame presented on Borealis.Gpu, so the next one's device frame starts ahead (HandOverFrame)
 	bool presented;
@@ -47,10 +53,32 @@ internal sealed partial class GameWindow
 	/// </summary>
 	internal void HandOverFrame()
 	{
-		if ( !presented || borealis is null ) return;
+		if ( borealis is null ) return;
+
+		// The render thread starts the next device frame itself, after the frame it was handed
+		if ( handedOver )
+		{
+			handedOver = false;
+			presented = false;
+			return;
+		}
+
+		if ( !presented ) return;
 		presented = false;
 		if ( RenderBackend.Default is BorealisGpuRenderBackend backend ) backend.HandOverFrame( borealis );
 	}
+
+	/// <summary>
+	/// Wait for the render thread to finish the frame handed to it, and finish the next frame's start here: before the sync
+	/// point writes the game's changes into the render side, and before anything else in the frame's output uses the device.
+	/// </summary>
+	internal void JoinRenderThread()
+	{
+		if ( borealis is not null && RenderBackend.Default is BorealisGpuRenderBackend { FrameAhead: true } backend ) backend.FollowFrame();
+	}
+
+	/// <summary>Whether the render thread is drawing a frame handed to it: what the frame's end disposes of waits for it.</summary>
+	internal bool DrawingOnRenderThread => borealis is not null && RenderBackend.Default is BorealisGpuRenderBackend { Drawing: true };
 
 	internal void Render()
 	{
@@ -80,6 +108,93 @@ internal sealed partial class GameWindow
 
 		Sandbox.UI.ScenePanel.RenderPending();
 
+		// The game's half on this thread: its cameras prepared, with every game hook that runs for them (the extract). One that
+		// throws leaves the frame undrawn by the game: said, and the window shows the overlay over the cleared image
+		extractThrew = false;
+		try
+		{
+			using ( global::Borealis.Zones.Extract.Start() )
+			using ( gameRender.Start() )
+			{
+				drawnScene = IGameInstanceDll.Current is null ? null : Game.ExtractRender( drawnCameras );
+				using ( menuRender.Start() )
+					IMenuDll.Current?.OnRender( default );
+			}
+		}
+		catch ( Exception e )
+		{
+			drawnScene = null;
+			drawnCameras.Clear();
+			extractThrew = true;
+			if ( BorealisGpuErrors.ShouldLog( e ) ) Log.Warning( e, $"Preparing the frame's cameras threw, so the game isn't drawn this frame: {e.Message}" );
+		}
+
+		// The drawing on the render thread, which presents it, unless this frame draws here (InlineReason)
+		var inline = InlineReason();
+		LastInlineReason = inline;
+		if ( inline is null && RenderBackend.Default is BorealisGpuRenderBackend backend && backend.HandOverRenderFrame( borealis, drawFrame ??= DrawFrame ) )
+		{
+			handedOver = true;
+			return;
+		}
+
+		DrawFrame();
+	}
+
+	// What the frame draws, prepared by the extract: the game's scene and its cameras in order (null with nothing extracted:
+	// the game draws as Game.Render does, on the main thread). The render thread reads them until the next frame's extract,
+	// which waits for it
+	Scene drawnScene;
+	readonly List<CameraComponent> drawnCameras = new();
+	bool extractThrew;
+	Action drawFrame;
+
+	/// <summary>Why the last frame was drawn on the main thread rather than the render thread, or null if it wasn't.</summary>
+	internal static string LastInlineReason { get; private set; }
+
+	/// <summary>
+	/// Why this frame draws on the main thread (serial, as before the render thread), or null for the render thread: game code
+	/// would run in its drawing (a load drawn by the game itself, a game's custom object, a renderer drawn from a command list),
+	/// or something reads the frame on this thread (a recording, the dev tools' dock).
+	/// </summary>
+	string InlineReason()
+	{
+		if ( !BorealisGpuFrameThread.Enabled ) return "serial";
+		if ( !BorealisGpuFrameThread.Draws ) return "off";
+		if ( Game.IsPlaying && Game.ActiveScene is not null && drawnScene is null && !extractThrew ) return "loading";
+		if ( Sandbox.Diagnostics.DevTools.IsOpen ) return "dev tools";
+		if ( ScreenRecorder.IsRecording() ) return "recording";
+		if ( Rendering.RenderSync.GameDrawsInFrame is { } game ) return game;
+		return null;
+	}
+
+	/// <summary>
+	/// The frame's drawing (the extract prepared it): the window's image, the game's cameras into it, the overlay, and on the
+	/// render thread the present. A throw on the render thread is said and the frame dropped, its image presented as drawn so far.
+	/// </summary>
+	void DrawFrame()
+	{
+		if ( !ThreadSafe.IsRenderThread )
+		{
+			DrawWindow();
+			return;
+		}
+
+		try
+		{
+			DrawWindow();
+		}
+		catch ( Exception e ) when ( !(e is Borealis.Gpu.GpuException { IsDeviceLost: true }) )
+		{
+			if ( BorealisGpuErrors.ShouldLog( e ) ) Log.Warning( e, $"The render thread's frame threw: {e.Message}" );
+		}
+
+		borealis.PresentFrame();
+	}
+
+	void DrawWindow()
+	{
+		BorealisGpuFrameThread.Doing = "the window's begin";
 		using ( WindowBeginTiming.Scope() )
 		{
 			if ( !borealis.BeginFrame( Color.Black ) ) return;
@@ -87,15 +202,19 @@ internal sealed partial class GameWindow
 
 		try
 		{
+			BorealisGpuFrameThread.Doing = "the game's cameras";
 			using ( gameRender.Start() )
-				IGameInstanceDll.Current?.OnRender( default );
-			using ( menuRender.Start() )
-				IMenuDll.Current?.OnRender( default );
+			{
+				if ( drawnScene is not null ) drawnScene.DrawRender( drawnCameras, default, null );
+				else if ( !extractThrew ) IGameInstanceDll.Current?.OnRender( default );
+			}
 		}
 		finally
 		{
+			BorealisGpuFrameThread.Doing = "the overlay";
 			using ( WindowOverlayTiming.Scope() )
 				borealis.EndFrame( Graphics.RenderOverlay );
+			BorealisGpuFrameThread.Doing = "the present";
 		}
 	}
 

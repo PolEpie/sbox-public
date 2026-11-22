@@ -65,6 +65,12 @@ internal static class Zones
 	public static readonly Zone ChildView = new( "Borealis Child View", Color.Blue );
 	public static readonly Zone DrawCallbacks = new( "Borealis Draw Callbacks", Color.White );
 
+	// The render thread's frame (docs/reference/borealis-render-thread.md): what it draws of the frame handed over, and the main
+	// thread's sync point and extract
+	public static readonly Zone RenderThreadFrame = new( "Borealis Render Thread Frame", Color.Blue );
+	public static readonly Zone SyncPoint = new( "Borealis Sync Point", Color.Cyan );
+	public static readonly Zone Extract = new( "Borealis Extract", Color.Cyan );
+
 	/// <summary>Sandbox.ShaderCompiler's phases (<c>CompilePhase</c>), by value.</summary>
 	public static readonly Zone[] Slang =
 	[

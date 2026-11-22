@@ -27,7 +27,7 @@ internal static class RenderSync
 	/// Hand-overs so far: each frame handed to the render thread starts a new epoch. What the main thread records after a
 	/// hand-over (a command list, <see cref="Overlapping"/>) is kept apart from what that frame replays, by epoch.
 	/// </summary>
-	internal static long Epoch => Interlocked.Read( ref epoch );
+	internal static long Epoch => Volatile.Read( ref epoch );
 	static long epoch;
 
 	/// <summary>
@@ -38,7 +38,7 @@ internal static class RenderSync
 	internal static bool Overlapping { get; set; }
 
 	/// <summary>Whether this thread renders frames handed over (the render thread).</summary>
-	internal static bool OnRenderThread => onRenderThread;
+	internal static bool OnRenderThread => onRenderThread || ThreadSafe.IsRenderThread;
 	[ThreadStatic] static bool onRenderThread;
 
 	/// <summary>Mark this thread as the one frames handed over render on (the render thread), or not.</summary>
@@ -54,6 +54,34 @@ internal static class RenderSync
 	static long listSplits;
 
 	internal static void CountListSplit() => Interlocked.Increment( ref listSplits );
+
+	/// <summary>Attribute sets the main thread wrote while a frame handed over could read them, each copied once.</summary>
+	internal static long AttributeSplits => Interlocked.Read( ref attributeSplits );
+	static long attributeSplits;
+
+	internal static void CountAttributeSplit() => Interlocked.Increment( ref attributeSplits );
+
+	/// <summary>
+	/// Why game code would run in this frame's drawing, or null: a custom object drawn by game code, a renderer drawn from a
+	/// command list. Such a frame draws on the main thread; the render thread runs no game code.
+	/// </summary>
+	internal static string GameDrawsInFrame
+	{
+		get
+		{
+			if ( SceneCustomObject.GameDrawn() is { } custom )
+			{
+				LastGameDrawn = custom.GetType().FullName;
+				return "a custom object drawn by game code";
+			}
+
+			if ( CommandList.AnyDrawsRenderers ) return "a renderer drawn from a command list";
+			return null;
+		}
+	}
+
+	/// <summary>The type of the last custom object that kept a frame on the main thread, for the stats.</summary>
+	internal static string LastGameDrawn { get; private set; }
 
 	// Every world drawn on Borealis (WorldRender registers itself), and a copy walked at the sync point, kept
 	static readonly List<ISceneWorldRender> worlds = new();
@@ -96,6 +124,7 @@ internal static class RenderSync
 		if ( !DeferWrites ) return;
 		ThreadSafe.AssertIsMainThread();
 		using var timing = SyncTiming.Scope();
+		using var zone = global::Borealis.Zones.SyncPoint.Start();
 		Syncs++;
 
 		int count;
@@ -149,6 +178,37 @@ internal static class RenderSync
 			}
 
 			Log.Info( $"Synchronous readback ({what}) from {site}: waited {ticks * 1000.0 / Stopwatch.Frequency:F2} ms for the GPU" );
+		}
+	}
+
+	// Main-thread waits for the render thread's drawing, and their call sites, as readbacks are counted
+	static long renderWaits;
+	static readonly HashSet<string> renderWaitSites = new();
+
+	/// <summary>Main-thread uses of the device that waited for the render thread's drawing, for the tests and stats.</summary>
+	internal static long RenderWaits => Interlocked.Read( ref renderWaits );
+
+	/// <summary>
+	/// Time the main thread waiting for the render thread's drawing before it uses the device: each wait is counted, and each
+	/// call site is logged once with how long it waited, found from the stack on the first wait and at each power of two.
+	/// </summary>
+	internal static RenderWaitScope RenderWait() => new( Stopwatch.GetTimestamp() );
+
+	internal readonly ref struct RenderWaitScope( long start )
+	{
+		public void Dispose()
+		{
+			var ticks = Stopwatch.GetTimestamp() - start;
+			var n = Interlocked.Increment( ref renderWaits );
+			if ( (n & (n - 1)) != 0 ) return;
+
+			var site = new StackTrace( 2, false ).ToString();
+			lock ( renderWaitSites )
+			{
+				if ( !renderWaitSites.Add( site ) ) return;
+			}
+
+			Log.Info( $"The main thread waited {ticks * 1000.0 / Stopwatch.Frequency:F2} ms for the render thread at {site}" );
 		}
 	}
 
