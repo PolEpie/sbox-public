@@ -54,6 +54,13 @@ internal abstract class RenderBackend
 	/// </summary>
 	internal virtual void DeferUpdateWork( Action work ) => work();
 
+	/// <summary>
+	/// On the main thread, before taking a lock the render thread also takes, when what follows under it may wait for the
+	/// drawing (a compute dispatch outside a block): wait for the frame the render thread draws now, so nothing waits for it
+	/// with the lock held. Only the main thread hands frames over, so none starts before the lock is let go.
+	/// </summary>
+	internal virtual void FinishDrawing() { }
+
 	/// <summary>A texture's bindless index on this device: its linear view; the sRGB view is the next.</summary>
 	public abstract int TextureIndex( Texture texture );
 
@@ -86,21 +93,25 @@ internal abstract class RenderBackend
 	/// </summary>
 	public virtual byte[] ReadCompiledPrefix( string path, long most ) => null;
 
-	static readonly List<RenderBackend> others = new();
+	// The devices that hold backings, replaced whole when one comes or goes (under the lock): what's called for each of them
+	// is called on a copy taken without the lock, so no thread holds it while a device waits (the main thread waits for the
+	// render thread's drawing in a device's Update; the render thread releases textures through ReleaseEverywhere)
+	static readonly System.Threading.Lock othersLock = new();
+	static volatile RenderBackend[] others = [];
 
 	/// <summary>Devices other than <see cref="Default"/> that hold backings, to release them from.</summary>
 	protected static void Register( RenderBackend backend )
 	{
-		lock ( others ) others.Add( backend );
+		lock ( othersLock ) others = [.. others, backend];
 	}
 
 	protected static void Unregister( RenderBackend backend )
 	{
-		lock ( others ) others.Remove( backend );
+		lock ( othersLock ) others = Array.FindAll( others, b => b != backend );
 	}
 
 	/// <summary>Whether any device other than <see cref="Default"/> exists, which might make copies of engine resources.</summary>
-	internal static bool OthersExist => others.Count > 0;
+	internal static bool OthersExist => others.Length > 0;
 
 	/// <summary>
 	/// A shader was compiled while running (<see cref="Shader.CompileAsync(string, string, System.Threading.CancellationToken)"/>,
@@ -110,18 +121,15 @@ internal abstract class RenderBackend
 	public virtual void ShaderCompiled( string path, byte[] compiled ) { }
 
 	/// <summary>Whether any device needs <see cref="ShaderCompiled"/>: a Borealis.Gpu one.</summary>
-	internal static bool TakesCompiledShaders => Default is BorealisGpuRenderBackend || others.Count > 0;
+	internal static bool TakesCompiledShaders => Default is BorealisGpuRenderBackend || others.Length > 0;
 
 	/// <summary>Give a shader compiled while running to every device (<see cref="ShaderCompiled"/>).</summary>
 	internal static void ShaderCompiledEverywhere( string path, byte[] compiled )
 	{
 		Default.ShaderCompiled( path, compiled );
-		lock ( others )
+		foreach ( var backend in others )
 		{
-			foreach ( var backend in others )
-			{
-				if ( backend != Default ) backend.ShaderCompiled( path, compiled );
-			}
+			if ( backend != Default ) backend.ShaderCompiled( path, compiled );
 		}
 	}
 
@@ -134,13 +142,9 @@ internal abstract class RenderBackend
 	/// <summary>Update an engine texture's copies on every other device, releasing those that can't take the bytes.</summary>
 	internal static void UpdateEverywhere( Texture texture, ReadOnlySpan<byte> data, int x, int y, int z, int width, int height, int depth )
 	{
-		if ( others.Count == 0 ) return;
-		lock ( others )
+		foreach ( var backend in others )
 		{
-			foreach ( var backend in others )
-			{
-				if ( !backend.Update( texture, data, x, y, z, width, height, depth ) ) backend.Release( texture );
-			}
+			if ( !backend.Update( texture, data, x, y, z, width, height, depth ) ) backend.Release( texture );
 		}
 	}
 
@@ -153,24 +157,16 @@ internal abstract class RenderBackend
 	/// <summary>Clear an engine texture's copies on every other device, releasing those that can't be cleared.</summary>
 	internal static void ClearEverywhere( Texture texture, Color color )
 	{
-		if ( others.Count == 0 ) return;
-		lock ( others )
+		foreach ( var backend in others )
 		{
-			foreach ( var backend in others )
-			{
-				if ( !backend.Cleared( texture, color ) ) backend.Release( texture );
-			}
+			if ( !backend.Cleared( texture, color ) ) backend.Release( texture );
 		}
 	}
 
 	/// <summary>Release an engine resource's backings on every other device.</summary>
 	internal static void ReleaseEverywhere( object resource )
 	{
-		if ( others.Count == 0 ) return;
-		lock ( others )
-		{
-			foreach ( var backend in others ) backend.Release( resource );
-		}
+		foreach ( var backend in others ) backend.Release( resource );
 	}
 
 	//

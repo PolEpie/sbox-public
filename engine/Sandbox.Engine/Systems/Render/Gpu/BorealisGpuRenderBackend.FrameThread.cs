@@ -171,6 +171,12 @@ internal sealed partial class BorealisGpuRenderBackend
 	}
 
 	/// <inheritdoc/>
+	internal override void FinishDrawing()
+	{
+		if ( Overlapping ) FromMain();
+	}
+
+	/// <inheritdoc/>
 	internal override bool DefersUpdateWork => Overlapping;
 
 	/// <inheritdoc/>

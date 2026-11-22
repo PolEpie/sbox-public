@@ -54,6 +54,52 @@ public class RenderThreadOverlapTests
 	}
 
 	/// <summary>
+	/// The game updates a texture during the drawing (the physgun's screen graph) while the render thread releases another
+	/// (a disposed stage texture, <c>BorealisGpuFrame.DropDisposedStageTextures</c> through <c>ReleaseEverywhere</c>) and
+	/// finishes its frame only after that. Before, the main thread held the devices' list lock while its update waited for
+	/// the drawing, the render thread waited for that lock, and both stopped.
+	/// </summary>
+	[TestMethod]
+	public void TextureUpdatesDuringTheDrawingDontDeadlockWithItsReleases()
+	{
+		TestGraphics.Require();
+		ThreadSafe.MarkMainThread();
+		using var borealis = BorealisGpuRenderBackend.Create( validation: true );
+
+		const int size = 16;
+		using var texture = Texture.Create( size, size, ImageFormat.RGBA8888 ).WithData( Pixels( size, size, new Color32( 0, 0, 255, 255 ) ) ).Finish();
+		using var released = Texture.Create( size, size, ImageFormat.RGBA8888 ).WithData( Pixels( size, size, new Color32( 0, 255, 0, 255 ) ) ).Finish();
+		borealis.ReadPixels( texture );
+		borealis.ReadPixels( released );
+
+		borealis.DrawingForTests( true );
+
+		// Never left drawing: a deadlock is let go after the release time, and shows as the time it took
+		using var release = new Timer( _ => borealis.DrawingForTests( false ), null, ReleaseMs, Timeout.Infinite );
+		var renderThread = new Thread( () =>
+		{
+			ThreadSafe.MarkRenderThread();
+			Thread.Sleep( 200 );
+			RenderBackend.ReleaseEverywhere( released );
+			borealis.DrawingForTests( false );
+		} );
+
+		var timer = Stopwatch.StartNew();
+		renderThread.Start();
+		for ( int i = 0; i < 20; i++ )
+		{
+			texture.Update( Pixels( size, size, new Color32( (byte)(i * 10), 0, 0, 255 ) ), 0, 0, size, size );
+			Thread.Sleep( 20 );
+		}
+
+		Assert.IsTrue( renderThread.Join( ReleaseMs * 2 ), "the render thread's frame ended" );
+		var took = timer.ElapsedMilliseconds;
+		Assert.IsTrue( took < ReleaseMs / 2, $"neither thread waited on the other ({took} ms)" );
+		Assert.AreEqual( new Color32( 190, 0, 0, 255 ), borealis.ReadPixels( texture )[0], "the last update landed after the frame" );
+		Assert.AreEqual( 0, borealis.ValidationErrors );
+	}
+
+	/// <summary>
 	/// A texture first used on the main thread while the render thread draws (a panel's new background image) is made as a
 	/// worker makes one, in a list of its own, without waiting for the drawing. Before, making it waited.
 	/// </summary>
