@@ -8,10 +8,12 @@
 #include "sbox/system.slangh"
 
 #ifdef SURFACE_GPU_DRIVEN
-// A GPU-driven surface pass loads them per draw from its lighting record (sbox/surface_passes.slangh)
-static float4 g_vLightmapUvScale;
-static int4 g_nLightmapTextureIndices;
-static int4 g_nLightmapTextureIndices2;
+#include "borealis_records.fxc"
+// A GPU-driven surface pass reads them from its draw's lighting record where they're used (SurfaceLightingWords,
+// sbox/surface_passes.slangh), not into registers ahead of shading, where they were held through the light loops
+#define g_vLightmapUvScale asfloat( SurfaceLightingWords( LightingRecord_LightmapUvScale ) )
+#define g_nLightmapTextureIndices asint( SurfaceLightingWords( LightingRecord_LightmapTextureIndices ) )
+#define g_nLightmapTextureIndices2 asint( SurfaceLightingWords( LightingRecord_SecondLightmapTextureIndices ) )
 #else
 cbuffer BakedLightingConstantBuffer_t
 {

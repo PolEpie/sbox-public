@@ -449,14 +449,16 @@ internal sealed partial class AggregateRenderFeature : RenderFeature
 		var total = residentCount + batches.Length + meshDraws.Length;
 		if ( total == 0 ) return;
 
-		// A resident list alone is handed over as the list's own batches, without a copy
+		// A resident list alone is handed over as the list's own batches, without a copy; with batches after it, in an array
+		// of the list's that already starts with them (TakeCombined), so the call writes only its own
 		var alone = resident is not null && batches.IsEmpty && meshDraws.IsEmpty;
-		var list = alone ? null : System.Buffers.ArrayPool<GpuContext.GpuDrivenBatch>.Shared.Rent( total );
-		var count = 0;
+		var kind = (depth ? 1 : 0) | (forceDepthOnly ? 2 : 0);
 		var deviceBatches = resident is not null ? DeviceBatches( resident, depth, forceDepthOnly ) : default;
+		var combined = !alone && resident is not null ? TakeCombined( resident, kind, deviceBatches, total ) : null;
+		var list = alone ? null : combined?.Batches ?? System.Buffers.ArrayPool<GpuContext.GpuDrivenBatch>.Shared.Rent( total );
+		var count = 0;
 		if ( !alone )
 		{
-			deviceBatches.CopyTo( list );
 			count = residentCount;
 			for ( int i = 0; i < batches.Length; i++ ) list[count++] = DeviceBatch( batches[i], depth, forceDepthOnly );
 
@@ -472,7 +474,12 @@ internal sealed partial class AggregateRenderFeature : RenderFeature
 		if ( resident is not null ) ResidentDrawn( context, layer, resident, alone ? deviceBatches : list.AsSpan( 0, residentCount ), allDrawn[..residentCount], mode, depthBias, slopeBias, ref stats );
 
 		System.Buffers.ArrayPool<bool>.Shared.Return( all );
-		if ( list is not null ) System.Buffers.ArrayPool<GpuContext.GpuDrivenBatch>.Shared.Return( list, clearArray: true );
+		if ( combined is not null ) ReturnCombined( resident, kind, combined, count );
+		else if ( list is not null )
+		{
+			list.AsSpan( 0, count ).Clear();
+			System.Buffers.ArrayPool<GpuContext.GpuDrivenBatch>.Shared.Return( list );
+		}
 	}
 
 	/// <summary>A batch as the device takes it, with the material it would bind here; default when it has nothing to draw.</summary>
