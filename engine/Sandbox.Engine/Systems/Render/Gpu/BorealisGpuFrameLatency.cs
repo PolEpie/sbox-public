@@ -98,7 +98,7 @@ internal static class BorealisGpuFrameLatency
 	/// </summary>
 	internal static void Presented( Device device, ulong frame, SyncPoint point )
 	{
-		if ( !Timing || device is null || point.Value == 0 ) return;
+		if ( !Timing || stopped || device is null || point.Value == 0 ) return;
 		if ( watched != device )
 		{
 			// The game window's device; another one (a test's) isn't watched
@@ -115,32 +115,36 @@ internal static class BorealisGpuFrameLatency
 		presentedCount.Release();
 	}
 
-	/// <summary>The game window's device is going: stop watching it, once the watcher has let go of it.</summary>
+	/// <summary>
+	/// The game window's device is going (the process is ending): the watcher lets go of it and ends, and nothing is watched
+	/// from then on. A watcher left waiting past the device crashed the process at exit now and then.
+	/// </summary>
 	internal static void Forget( Device device )
 	{
 		if ( watched != device ) return;
+		stopped = true;
 		Interlocked.Exchange( ref watched, null );
-		var spin = Stopwatch.StartNew();
-		while ( Volatile.Read( ref watching ) != 0 && spin.ElapsedMilliseconds < 1000 ) Thread.Sleep( 1 );
+		presentedCount.Release();
+		watcher?.Join( 1000 );
+		watcher = null;
 	}
 
-	// Whether the watcher is waiting on the device
-	static int watching;
+	static volatile bool stopped;
+
 
 	static void Watch()
 	{
 		while ( true )
 		{
 			presentedCount.Wait();
+			if ( stopped ) return;
 			var read = Interlocked.Read( ref presentedRead );
 			var (frame, point) = presented[read % Ring];
 			Interlocked.Increment( ref presentedRead );
 
-			Interlocked.Exchange( ref watching, 1 );
 			var device = Volatile.Read( ref watched );
-			while ( device is { IsLost: false } && !device.TryWait( point, TimeSpan.FromMilliseconds( 250 ) ) ) device = watched;
-			Volatile.Write( ref watching, 0 );
-			if ( device is null || device.IsLost ) continue;
+			while ( device is { IsLost: false } && !stopped && !device.TryWait( point, TimeSpan.FromMilliseconds( 250 ) ) ) device = Volatile.Read( ref watched );
+			if ( device is null || device.IsLost || stopped ) continue;
 
 			var now = Stopwatch.GetTimestamp();
 			var i = (int)(frame % Ring);
