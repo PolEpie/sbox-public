@@ -364,6 +364,11 @@ internal sealed unsafe class MemoryAllocator : IDisposable
 	/// <summary>Blocks asked of the driver so far (<c>vkAllocateMemory</c>), shared and dedicated.</summary>
 	public long DriverAllocations => System.Threading.Interlocked.Read( ref driverAllocations );
 
+	/// <summary>Blocks given back to the driver so far (<c>vkFreeMemory</c>).</summary>
+	public long DriverFrees => System.Threading.Interlocked.Read( ref driverFrees );
+
+	long driverFrees;
+
 	long driverAllocations;
 
 	/// <summary><see cref="System.Diagnostics.Stopwatch"/> ticks the driver's allocations took, in all and the longest.</summary>
@@ -1058,6 +1063,7 @@ internal sealed unsafe class MemoryAllocator : IDisposable
 		ulong memory;
 		var start = System.Diagnostics.Stopwatch.GetTimestamp();
 		using ( Owner is { } owner ? owner.AllocateMemoryZone() : default )
+		using ( Owner is { } watched ? watched.Enter( "vkAllocateMemory" ) : default )
 			vk.vkAllocateMemory( vk.Device, &info, null, &memory ).Check( "vkAllocateMemory" );
 		var ticks = System.Diagnostics.Stopwatch.GetTimestamp() - start;
 		System.Threading.Interlocked.Add( ref driverAllocationTicks, ticks );
@@ -1142,8 +1148,11 @@ internal sealed unsafe class MemoryAllocator : IDisposable
 
 	void FreeBlock( MemoryBlock block, bool counted = true )
 	{
+		System.Threading.Interlocked.Increment( ref driverFrees );
+
 		// Freeing memory unmaps it
-		vk.vkFreeMemory( vk.Device, block.Memory, null );
+		using ( Owner is { } watched ? watched.Enter( "vkFreeMemory" ) : default )
+			vk.vkFreeMemory( vk.Device, block.Memory, null );
 		if ( !counted ) return;
 		Reserved -= block.Size;
 		heapReserved[properties.Type( block.TypeIndex ).heapIndex] -= (long)block.Size;

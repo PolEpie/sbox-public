@@ -86,6 +86,7 @@ public sealed partial class Device
 		var info = new VkSemaphoreWaitInfo { sType = VkStructureType.SemaphoreWaitInfo, semaphoreCount = 1, pSemaphores = &semaphore, pValues = &value };
 		var start = Stopwatch.GetTimestamp();
 		var said = false;
+		using var _ = Enter( "vkWaitSemaphores" );
 
 		while ( !IsLost )
 		{

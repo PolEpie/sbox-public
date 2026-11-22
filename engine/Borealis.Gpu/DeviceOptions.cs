@@ -54,6 +54,13 @@ public sealed class DeviceOptions
 	public bool ProgressMarkers { get; init; }
 
 	/// <summary>
+	/// Watch the frames from a thread of the device's own: one that goes on over a second is noted (where the frame thread
+	/// was in the device, how far each queue had got) among a loss report's events and in a warning when it ends, so a GPU
+	/// timeout that comes while the frame thread waits on the driver says where it waited.
+	/// </summary>
+	public bool HangWatch { get; init; }
+
+	/// <summary>
 	/// Keep the driver's statistics for each pipeline's shaders (VK_KHR_pipeline_executable_properties, when the device
 	/// has it): registers, spills, wave size and the like, in <see cref="Device.ShaderStatistics"/>. For measuring.
 	/// </summary>

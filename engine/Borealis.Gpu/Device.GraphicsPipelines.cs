@@ -855,7 +855,7 @@ public sealed unsafe partial class Device
 		};
 
 		ulong pipeline;
-		Vk.vkCreateGraphicsPipelines( Vk.Device, pipelineCache, 1, &create, null, &pipeline ).Check( $"vkCreateGraphicsPipelines ({info.Name ?? "link"})" );
+		using ( Enter( "vkCreateGraphicsPipelines" ) ) Vk.vkCreateGraphicsPipelines( Vk.Device, pipelineCache, 1, &create, null, &pipeline ).Check( $"vkCreateGraphicsPipelines ({info.Name ?? "link"})" );
 		return pipeline;
 	}
 
