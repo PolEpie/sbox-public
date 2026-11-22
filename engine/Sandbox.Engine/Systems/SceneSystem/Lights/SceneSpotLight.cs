@@ -39,7 +39,8 @@ public sealed class SceneSpotLight : SceneLight
 
 		using ( var h = IHandle.MakeNextHandle( this ) )
 		{
-			CSceneSystem.CreateSpotLight( world );
+			if ( MakesNativeTwin ) CSceneSystem.CreateSpotLight( world );
+			else MakeLightWithoutTwin( world, NewDescription( TypeSpot ) );
 		}
 
 		LightColor = color;
