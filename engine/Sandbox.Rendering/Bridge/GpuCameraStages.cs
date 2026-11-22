@@ -62,6 +62,12 @@ internal sealed class GpuCameraStages : IRenderStages
 		=> Camera is not null && Frame is not null && View is not null && Camera.HasEarlyPostProcess( (Stage)stage, (PostProcessQueue)queue );
 
 	/// <summary>
+	/// The camera has command lists at <paramref name="stage"/> (<see cref="CameraComponent.AddCommandList"/>).
+	/// </summary>
+	public bool DrawsAt( RenderStage stage )
+		=> Camera is not null && Frame is not null && View is not null && Camera.HasCommandLists( (Stage)stage );
+
+	/// <summary>
 	/// Run them in the frame's list for that queue, with no frame targets bound: the target's depth and depth chain readable,
 	/// as the frame's compute handoff left them. The stage then skips what ran (<c>RanEarly</c>); a frame that doesn't
 	/// overlap compute doesn't call this, and the stage runs them in its place.

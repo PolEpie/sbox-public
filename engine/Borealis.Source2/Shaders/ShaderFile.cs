@@ -20,7 +20,14 @@ public sealed class ShaderFile
 	public const int MinVcsVersion = 65;
 
 	/// <summary>Newest VCS version read (<c>VFX_VCS_VERSION</c>).</summary>
-	public const int MaxVcsVersion = 68;
+	public const int MaxVcsVersion = 69;
+
+	/// <summary>
+	/// The VCS version from which <c>SpecializedConstant()</c> has no cap and the renderer's switches take the reserved
+	/// specialization ids (<c>VFX_VCS_VERSION_SPECIALIZATION_RESERVED_IDS</c>); older files have them at 68 and 120.
+	/// </summary>
+	public const int ReservedSpecializationIdsVcsVersion = 69;
+
 
 	/// <summary>The shader ABI epoch these bindings follow (<c>VFX_ABI_CURRENT_VERSION</c>).</summary>
 	public const int AbiVersion = 4;

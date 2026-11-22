@@ -81,6 +81,13 @@ OutputFormat( BC7 ); SrgbRead( false ); >;
 #elif ( S_BLEND_MODE == 5 )
 #elif( S_BLEND_MODE == 6 )
 #endif
+// static_overlay.shader's vertex inputs (its VS_INPUT, every dynamic combo's): what the model compiler lays out the meshes of
+// models using these materials by (the material's VSInputSignature), so they keep the streams they had
+#define VS_INPUT_HAS_TANGENT_BASIS 1
+struct VS_INPUT
+{
+	#include "vr_shared_standard_vs_input.fxc"
+};
 #endif
 
 // static_overlay.shader's g_sTrilinearWrap, for occlusion and self-illumination (the rest use g_sAniso)

@@ -19,6 +19,13 @@ internal interface IRenderStages
 	void RenderEarlyPostProcess( RenderStage stage, StageQueue queue, in StageTarget target ) { }
 
 	/// <summary>
+	/// Whether the camera's command lists draw at <paramref name="stage"/>. At <see cref="RenderStage.AfterDepthPrepass"/>
+	/// they draw into the frame's colour and depth, so the frame clears colour before that stage instead of in the
+	/// opaque pass (GAMMA's mirror glass).
+	/// </summary>
+	bool DrawsAt( RenderStage stage ) => false;
+
+	/// <summary>
 	/// Whether the camera renders screen-space reflections.
 	/// </summary>
 	bool HasScreenSpaceReflections => false;

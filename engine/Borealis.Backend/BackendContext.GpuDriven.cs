@@ -921,8 +921,8 @@ internal sealed partial class BackendContext
 							cullBatch.Transform = MeshLightingDraws( tables, keys[batch.FirstArg], meshLighting, bucket.Attributes, pooled, vertexMaterial, pixelMaterial, flags & 0xff, pooled.FirstIndex + (uint)batch.Draw.StartIndex, (uint)batch.Draw.IndexCount, geometry.BaseVertex ) | MeshDrawList;
 
 						// A model without LODs of its own: its draw's generated levels, which the culls pick per mesh (not an
-						// overlay's, which keeps the surface under it)
-						if ( device.MeshLods && device.LodStore is { } lods && !cull.KeepsOrder && batch.Mesh.Geometry is BackendModel lodModel && lodModel.File.LodCount <= 1 )
+						// overlay's, which keeps the surface under it, nor a material's that places its vertices itself)
+						if ( device.MeshLods && device.LodStore is { } lods && !cull.KeepsOrder && material.PlacesVertices != true && batch.Mesh.Geometry is BackendModel { GeneratesLevels: true } lodModel && lodModel.File.LodCount <= 1 )
 						{
 							var lodColor = r.Color is not null && !bucket.DepthOnly;
 							if ( lodModel.FirstLodRequest( batch.Draw.Mesh, batch.Draw.DrawCall, lodColor ) ) RequestLods( lods, pooled, lodModel, batch.Draw, geometry.BaseVertex, lodColor );
@@ -956,7 +956,7 @@ internal sealed partial class BackendContext
 							var (vertexMaterial, pixelMaterial) = Records( tables, bucket, material, geometry.UncompressedTangentFrame, vertexAttributes, pixelAttributes );
 							var fragmentRecords = tables.FragmentsOf( aggregate, used.GeometryRecord, vertexMaterial, pixelMaterial, flags, fragmentCount,
 								(Tables: tables, Aggregate: aggregate, Pooled: used, Vertex: vertexMaterial, Pixel: pixelMaterial, Flags: flags, Meshlets: device.MeshletStore, Model: batch.Mesh.Geometry as BackendModel, batch.Draw.Mesh, batch.Draw.DrawCall,
-									Lods: device.LodStore, Color: r.Color is not null && !bucket.DepthOnly),
+									Lods: material.PlacesVertices != true && batch.Mesh.Geometry is BackendModel { GeneratesLevels: true } ? device.LodStore : null, Color: r.Color is not null && !bucket.DepthOnly),
 								static ( s, bytes ) =>
 								{
 									WriteFragments( s.Tables, s.Aggregate, s.Pooled, s.Vertex, s.Pixel, s.Flags, bytes );

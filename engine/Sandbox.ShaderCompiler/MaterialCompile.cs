@@ -30,6 +30,13 @@ public sealed class MaterialCompile
 	public IReadOnlyList<string> Prerequisites { get; init; }
 
 	/// <summary>
+	/// The vertex inputs of the shader the material draws with, as the material compiler writes them into the material's
+	/// edit data (<c>VSInputSignature</c>), which the model compiler lays meshes using the material out by; null for a
+	/// module with no vertex inputs.
+	/// </summary>
+	public string VertexSignature { get; init; }
+
+	/// <summary>
 	/// An image's width and height from its file (PNG, JPEG, TGA, PSD, EXR), as the material compiler reads a representative
 	/// texture's; null for anything else.
 	/// </summary>
@@ -212,7 +219,30 @@ public sealed class MaterialCompile
 			Generated = generated,
 			Textures = [.. textures.Select( t => t.Path ).Distinct( StringComparer.OrdinalIgnoreCase )],
 			Prerequisites = prerequisites,
+			VertexSignature = VertexSignatureText( inputs.VertexInputs ),
 		};
+	}
+
+	/// <summary>
+	/// The vertex inputs as the material compiler writes a <c>.shader</c>'s into a material's edit data
+	/// (<c>VSInputSignature</c>: <c>VsInputSignature_t</c> as KV3 text), byte for byte; null for none (no vertex stage).
+	/// </summary>
+	public static string VertexSignatureText( IReadOnlyList<MaterialInputs.VertexInput> inputs )
+	{
+		if ( inputs is null || inputs.Count == 0 ) return null;
+
+		var text = new StringBuilder( "<!-- kv3 encoding:text:version{e21c7f3c-8a33-41c5-9977-a76d3a32aa0d} format:generic:version{7412167c-06e9-4698-aff2-e63eb59037e7} -->\n{\n\tm_elems = \n\t[\n" );
+		foreach ( var input in inputs )
+		{
+			text.Append( "\t\t{\n" );
+			text.Append( "\t\t\tm_pName = " ).Append( Quote( input.Name ) ).Append( '\n' );
+			text.Append( "\t\t\tm_pSemantic = " ).Append( Quote( input.Semantic ) ).Append( '\n' );
+			text.Append( "\t\t\tm_pD3DSemanticName = " ).Append( Quote( input.D3DSemanticName ) ).Append( '\n' );
+			text.Append( "\t\t\tm_nD3DSemanticIndex = " ).Append( input.D3DSemanticIndex.ToString( CultureInfo.InvariantCulture ) ).Append( '\n' );
+			text.Append( "\t\t},\n" );
+		}
+
+		return text.Append( "\t]\n}" ).ToString();
 	}
 
 	/// <summary>

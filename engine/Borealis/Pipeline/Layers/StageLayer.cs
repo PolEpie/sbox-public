@@ -42,7 +42,18 @@ internal sealed class StageLayer : RenderLayer
 	public override void Record( RenderFrame frame, GpuContext rc, ref RenderStats stats )
 	{
 		using var zone = Zones.Stage.Start();
-		frame.RunStage( rc, Stage, Color, Final );
+
+		// Command lists after the prepass draw into colour too (GAMMA's mirror glass): colour, with the opaque pass's normals,
+		// is cleared here instead of in the opaque pass, and depth too when no prepass cleared it
+		var color = Color;
+		if ( !color && Stage == RenderStage.AfterDepthPrepass && frame.ColorBeforeOpaque )
+		{
+			frame.BindFrame( rc, normals: true );
+			rc.Clear( frame.Clear, clearDepth: !frame.System.DepthPrepass );
+			color = true;
+		}
+
+		frame.RunStage( rc, Stage, color, Final );
 	}
 }
 
