@@ -838,17 +838,25 @@ internal sealed partial class FrameRecorder : IDisposable
 
 	/// <summary>
 	/// What segment <paramref name="i"/> records, for the frame's shape: its kind, frame and the layers and views it starts
-	/// and ends with, and what it waits for. Not its draw counts, which change from frame to frame.
+	/// and ends with (<see cref="ViewShape"/>), and what it waits for. Not its draw counts, which change from frame to frame.
 	/// </summary>
 	int ShapeOf( int i )
 	{
 		ref var segment = ref segments[i];
 		var last = segment.Index + segment.Count - 1;
 		var (first, end) = segment.Kind == SegmentKind.Draw
-			? (HashCode.Combine( work[segment.Index].Layer, work[segment.Index].View ), HashCode.Combine( work[last].Layer, work[last].View ))
+			? (HashCode.Combine( work[segment.Index].Layer, ViewShape( work[segment.Index].View ) ), HashCode.Combine( work[last].Layer, ViewShape( work[last].View ) ))
 			: segment.Count > 0 ? (HashCode.Combine( layers[segment.Index].Layer ), HashCode.Combine( layers[last].Layer )) : (0, 0);
 		return HashCode.Combine( segment.Kind, segment.Frame, first, end, segment.Count, segment.HandOff, segment.WaitFor, segment.Async );
 	}
+
+	/// <summary>
+	/// A view in the frame's shape: a main view itself, a shadow view by what it draws (its filter, and whether it starts
+	/// from a static cache or a blank tile). The pooled shadow views take whichever lights' maps are drawn this frame, which
+	/// rotate as point lights update a few a frame, and keyed by which view they are the layout plan never held. A plan
+	/// that guessed a layout wrong costs a fix-up, as having none does (<c>BackendContext.SubmitLayoutFixUps</c>).
+	/// </summary>
+	static int ViewShape( ViewPass view ) => view is { IsShadow: true } ? HashCode.Combine( view.StaticFilter, view.CachedStatic is not null, view.Blank is not null ) : view?.GetHashCode() ?? 0;
 
 	/// <summary>
 	/// Where a layer's recording started: the time, and the counts it's measured against.

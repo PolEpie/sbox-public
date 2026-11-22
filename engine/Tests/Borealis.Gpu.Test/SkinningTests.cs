@@ -82,7 +82,9 @@ public class SkinningTests : GpuTest
 
 	/// <summary>
 	/// Morphs move the face: the human's head with every flex controller at its maximum, composited into the morph atlas
-	/// and skinned with <c>D_MORPH</c>, differs from it with none set, and with every controller at 0 it doesn't.
+	/// and skinned with <c>D_MORPH</c>, differs from it with none set, and with every controller at 0 it doesn't. The atlas
+	/// is as tall as the face needs rather than native's 1024 (16 MB), is freed once nothing has morphed for a while, and
+	/// made again the face morphs the same.
 	/// </summary>
 	[TestMethod]
 	public void MorphsMoveTheFace()
@@ -115,6 +117,15 @@ public class SkinningTests : GpuTest
 			var toNone = MeanDifference( morphed, none );
 			Assert.IsTrue( toNone > 1, $"morphs change the face: mean difference {toNone:F3}" );
 			Assert.IsTrue( MeanDifference( unweighted, none ) < 0.05, "nothing weighted, nothing moves" );
+
+			var height = backend.Morphs.MadeHeight;
+			Assert.IsTrue( height >= MorphAtlas.MinHeight && height < MorphAtlas.MaxHeight, $"the atlas is as tall as the face needs: {height} texels" );
+			for ( int i = 0; i <= MorphAtlas.IdleFrames; i++ ) backend.BeginFrame();
+			Assert.AreEqual( 0, backend.Morphs.MadeHeight, "freed with nothing morphing" );
+			var again = Render( mesh, Transform.Zero, null, full, head, 0.25f );
+			Assert.AreEqual( height, backend.Morphs.MadeHeight, "made again as tall" );
+			var toFirst = MeanDifference( again, morphed );
+			Assert.IsTrue( toFirst < 0.05, $"the face morphs the same in the atlas made again: mean difference {toFirst:F3}" );
 		}
 		finally
 		{
