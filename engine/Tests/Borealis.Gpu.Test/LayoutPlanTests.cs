@@ -77,6 +77,43 @@ public class LayoutPlanTests : GpuTest
 			Assert.AreEqual( 0, planned, "a planned frame needs no fix-up lists" );
 			Assert.AreEqual( 0, again, "nor does the next" );
 
+			// The reading segment recording into the clearing one's list, as a main-thread segment after another does
+			// (FrameRecorder.PlanSharedLists): one list, which a planned frame submits without fix-ups
+			int Shared( float red )
+			{
+				Device.BeginFrame();
+				var before = BackendContext.LayoutFixUps;
+				frame.Begin();
+				clearing.BeginSegment( frame, null );
+				clearing.PlanLayouts( 3 );
+				clearing.Bind( new StageTarget
+				{
+					Context = clearing,
+					Attributes = clearing.Attributes,
+					Color = color,
+					Size = new Vector2( Width, Height ),
+					Viewport = new Rect( 0, 0, Width, Height ),
+					MaxZ = 1,
+					ColorFormat = TextureFormat.RGBA16161616F,
+					Samples = 1,
+				} );
+				clearing.Clear( new Color( red, 0.5f, 0.25f, 1 ) );
+
+				reading.BeginSegment( frame, clearing );
+				reading.PlanLayouts( 4 );
+				reading.BarrierToPixelShaderRead( color );
+
+				frame.Submit();
+				clearing.Submit();
+				reading.Submit();
+				Device.WaitIdle();
+				return BackendContext.LayoutFixUps - before;
+			}
+
+			Assert.IsTrue( Shared( 0.6f ) <= 1, "a shared list needs at most its own fix-ups while it learns" );
+			Assert.AreEqual( 0, Shared( 0.7f ), "a planned shared list needs none" );
+			Assert.AreEqual( 0, Shared( 1 ), "nor the next" );
+
 			var (handle, current) = BackendDevice.Unwrap( color );
 			Assert.AreEqual( ImageLayout.ShaderRead, current, "the second segment left the target readable" );
 			var texels = ReadBack( handle, current );

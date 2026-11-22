@@ -30,6 +30,9 @@ internal sealed class BorealisGpuWindow : IDisposable
 		sdl = Borealis.Sdl.SdlWindow.Wrap( window );
 		var (width, height) = sdl.PixelSize;
 		swapChain = backend.CreateSwapChain( SurfaceOf( sdl.NativeWindow ), Math.Max( width, 1 ), Math.Max( height, 1 ), vsync );
+
+		// The game window's presents are queued on a thread of their own: the present call's cost leaves the main thread
+		swapChain.PresentOnThread = true;
 		Size = new Vector2( width, height );
 		timestamps = CreateTimestamps( backend, out timestampMs );
 	}
@@ -207,7 +210,16 @@ internal sealed class BorealisGpuWindow : IDisposable
 		using var rendererAllocations = Borealis.RendererAllocations.Measure();
 		if ( target is null ) return false;
 		backend.BeforeAcquire( swapChain );
-		if ( !swapChain.Acquire( out _ ) ) return false;
+		try
+		{
+			if ( !swapChain.Acquire( out _ ) ) return false;
+		}
+		catch ( GpuException e ) when ( e.IsDeviceLost )
+		{
+			// Met by the last frame's present, on the present thread (SwapChain.PresentOnThread): said as PresentFrame says it
+			BorealisGpuDeviceLost.Check( backend.Device );
+			throw;
+		}
 
 		Drawing = this;
 		using var scope = Graphics.Scope.CreateOn( backend );

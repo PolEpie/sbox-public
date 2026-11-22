@@ -51,14 +51,78 @@ internal sealed partial class AggregateRenderFeature
 		public readonly GpuContext.GpuDrivenBatch[][] Device = new GpuContext.GpuDrivenBatch[4][];
 		public readonly int[] DeviceGeneration = [-1, -1, -1, -1];
 
+		/// <summary>Per depth kind, moved each time <see cref="Device"/>'s batches come out different from the last time they were made.</summary>
+		public readonly int[] DeviceStamp = new int[4];
+
 		/// <summary>Per depth kind, whether <see cref="Device"/> holds its mesh groups' batches, which no frame changes.</summary>
 		public readonly bool[] DeviceMeshes = new bool[4];
+
+		/// <summary>
+		/// Per depth kind, arrays that start with <see cref="Device"/>'s batches, for calls that hand the device more batches
+		/// after them (<see cref="TakeCombined"/>): the list is copied into one when it changes, not into every call's.
+		/// </summary>
+		public readonly Stack<Combined>[] Spare = [new(), new(), new(), new()];
 
 		/// <summary>A main view's static overlays: a list per render order whose every overlay is resident, lowest first.</summary>
 		public readonly List<OverlayOrder> Overlays = new();
 
 		/// <summary>Whether it draws anything the views would otherwise collect and prepare.</summary>
 		public bool HoldsAny => DeviceCount > 0 || Overlays.Count > 0;
+	}
+
+	/// <summary>
+	/// A call's batches: a resident list's device batches as they were at <see cref="Stamp"/> and <see cref="Version"/>,
+	/// then the call's own, which it clears when done.
+	/// </summary>
+	internal sealed class Combined
+	{
+		public GpuContext.GpuDrivenBatch[] Batches = [];
+		public int Stamp = -1, Version = -1, Count = -1;
+	}
+
+	/// <summary>
+	/// An array for one call that starts with <paramref name="list"/>'s <paramref name="device"/> batches of depth kind
+	/// <paramref name="kind"/> and has room for <paramref name="total"/>: a spare one already holding them as they are now
+	/// where there is one, so only a change to the list or its batches (<see cref="ResidentList.DeviceStamp"/>) copies them. Hand it back with
+	/// <see cref="ReturnCombined"/>.
+	/// </summary>
+	internal Combined TakeCombined( ResidentList list, int kind, ReadOnlySpan<GpuContext.GpuDrivenBatch> device, int total )
+	{
+		Combined combined;
+		int stamp;
+		lock ( list )
+		{
+			if ( !list.Spare[kind].TryPop( out combined ) ) combined = new Combined();
+			stamp = list.DeviceStamp[kind];
+		}
+
+		if ( combined.Batches.Length < total )
+		{
+			combined.Batches = new GpuContext.GpuDrivenBatch[Math.Max( total, combined.Batches.Length * 2 )];
+			combined.Stamp = -1;
+		}
+
+		if ( combined.Stamp != stamp || combined.Version != list.Version || combined.Count != device.Length )
+		{
+			device.CopyTo( combined.Batches );
+			System.Threading.Interlocked.Increment( ref combinedCopies );
+			combined.Stamp = stamp;
+			combined.Version = list.Version;
+			combined.Count = device.Length;
+		}
+
+		return combined;
+	}
+
+	/// <summary>Times <see cref="TakeCombined"/> copied a resident list's batches, for tests.</summary>
+	internal int CombinedCopies => combinedCopies;
+	int combinedCopies;
+
+	/// <summary>Hand back an array from <see cref="TakeCombined"/>, its call's own batches (from the list's, to <paramref name="end"/>) cleared.</summary>
+	internal static void ReturnCombined( ResidentList list, int kind, Combined combined, int end )
+	{
+		combined.Batches.AsSpan( combined.Count, Math.Max( end - combined.Count, 0 ) ).Clear();
+		lock ( list ) list.Spare[kind].Push( combined );
 	}
 
 	/// <summary>
@@ -1469,17 +1533,27 @@ internal sealed partial class AggregateRenderFeature
 			var made = list.Device[kind];
 			if ( list.DeviceGeneration[kind] == argGeneration && made is not null ) return made.AsSpan( 0, list.DeviceCount );
 
-			if ( made is null || made.Length < list.DeviceCount ) list.Device[kind] = made = new GpuContext.GpuDrivenBatch[list.DeviceCount];
+			var changed = made is null || made.Length < list.DeviceCount;
+			if ( changed ) list.Device[kind] = made = new GpuContext.GpuDrivenBatch[list.DeviceCount];
 			var batches = CollectionsMarshal.AsSpan( list.Batches );
-			for ( int i = 0; i < batches.Length; i++ ) made[i] = DeviceBatch( batches[i], depth, forceDepthOnly );
-			if ( list.Moved is { } moved )
+			var moved = list.Moved;
+			for ( int i = 0; i < batches.Length; i++ )
 			{
-				for ( int i = 0; i < batches.Length; i++ ) made[i] = made[i] with { Moved = moved[i] };
+				var batch = DeviceBatch( batches[i], depth, forceDepthOnly );
+				if ( moved is not null ) batch = batch with { Moved = moved[i] };
+				changed |= !made[i].Equals( batch );
+				made[i] = batch;
 			}
 
 			// Mesh groups' batches name no frame's instances: made once their materials have settled
-			if ( !list.DeviceMeshes[kind] ) list.DeviceMeshes[kind] = MeshDeviceBatches( list.MeshGroups, depth, forceDepthOnly, made.AsSpan( batches.Length, list.DeviceCount - batches.Length ) );
+			if ( !list.DeviceMeshes[kind] )
+			{
+				list.DeviceMeshes[kind] = MeshDeviceBatches( list.MeshGroups, depth, forceDepthOnly, made.AsSpan( batches.Length, list.DeviceCount - batches.Length ) );
+				changed = true;
+			}
+
 			list.DeviceGeneration[kind] = argGeneration;
+			if ( changed ) list.DeviceStamp[kind]++;
 			return made.AsSpan( 0, list.DeviceCount );
 		}
 	}
