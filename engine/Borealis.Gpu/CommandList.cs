@@ -1,4 +1,5 @@
 using Borealis.Gpu.Vulkan;
+using System.Diagnostics;
 using System.Threading;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -66,6 +67,18 @@ public sealed unsafe class CommandList
 	public (int Draws, int Pipelines, int Sets, int Scopes, int Barriers, int FullBarriers, int Resumed) Counts => (draws, pipelines, setBinds, scopes, barriers, fullBarriers, resumed);
 
 	int draws, pipelines, setBinds, scopes, barriers, fullBarriers, resumed;
+
+	/// <summary>Lists submitted before it since the device was made, plus one, once submitted: its place in submission order.</summary>
+	public long SubmitOrder { get; internal set; }
+
+	/// <summary>What its barrier calls held since it began, for profiling (<see cref="BarrierCounts"/>).</summary>
+	public BarrierCounts BarrierDetail => barrierDetail;
+
+	BarrierCounts barrierDetail;
+
+	// Whether a command that does work (a scope, dispatch, copy or clear) has been recorded since the last barrier call: one
+	// after none is at the same gap as the call before it
+	bool workSinceBarrier;
 
 	bool recording;
 
@@ -179,6 +192,8 @@ public sealed unsafe class CommandList
 		skippedDraws = 0;
 		Submitted = default;
 		draws = pipelines = setBinds = scopes = barriers = fullBarriers = resumed = 0;
+		barrierDetail = default;
+		workSinceBarrier = true;
 		acted = suspending = suspended = false;
 		StartsResumed = EndsSuspended = false;
 
@@ -194,7 +209,7 @@ public sealed unsafe class CommandList
 		if ( !recording ) throw new InvalidOperationException( "This command list was already submitted" );
 		if ( rendering ) throw new InvalidOperationException( "Rendering wasn't ended" );
 
-		FlushBarriers();
+		FlushBarriers( work: false );
 		if ( labelled ) EndLabel();
 		Marker( "end" );
 		EndsSuspended = suspended;
@@ -330,7 +345,7 @@ public sealed unsafe class CommandList
 	public void ResetTimestamps( TimestampQueries queries, int first, int count )
 	{
 		OutsideRendering();
-		FlushBarriers();
+		FlushBarriers( work: false );
 		vk.vkCmdResetQueryPool( Handle, queries.Pool, (uint)first, (uint)count );
 	}
 
@@ -339,7 +354,7 @@ public sealed unsafe class CommandList
 	{
 		Recording();
 		if ( !rendering ) Act();
-		FlushBarriers();
+		FlushBarriers( work: false );
 
 		// A graphics stage on the async compute queue: when everything before it has finished
 		if ( Queue == QueueType.Compute && ((ulong)stage & ComputeQueueStages) == 0 ) stage = PipelineStage.AllCommands;
@@ -354,7 +369,7 @@ public sealed unsafe class CommandList
 	public void ResetQueries( OcclusionQueries queries, int first, int count )
 	{
 		OutsideRendering();
-		FlushBarriers();
+		FlushBarriers( work: false );
 		vk.vkCmdResetQueryPool( Handle, queries.Pool, (uint)first, (uint)count );
 	}
 
@@ -385,7 +400,7 @@ public sealed unsafe class CommandList
 	public void ResetQueries( PipelineStatistics queries, int first, int count )
 	{
 		OutsideRendering();
-		FlushBarriers();
+		FlushBarriers( work: false );
 		vk.vkCmdResetQueryPool( Handle, queries.Pool, (uint)first, (uint)count );
 	}
 
@@ -397,7 +412,7 @@ public sealed unsafe class CommandList
 	{
 		Recording();
 		if ( !rendering ) Act();
-		FlushBarriers();
+		FlushBarriers( work: false );
 		vk.vkCmdBeginQuery( Handle, queries.Pool, (uint)index, 0 );
 	}
 
@@ -525,7 +540,8 @@ public sealed unsafe class CommandList
 				return;
 			}
 
-			FlushBarriers();
+			barrierDetail.SameImageSplits++;
+			FlushBarriers( work: false );
 			break;
 		}
 
@@ -601,9 +617,20 @@ public sealed unsafe class CommandList
 		access = stages == 0 ? 0 : access & ComputeQueueAccess;
 	}
 
-	void FlushBarriers()
+	// Vulkan's write accesses (VK_ACCESS_2_*_WRITE_BIT): shader, colour and depth targets, transfer, host, memory, storage
+	const ulong WriteAccess = (1ul << 6) | (1ul << 8) | (1ul << 10) | (1ul << 12) | (1ul << 14) | (1ul << 16) | (1ul << 35);
+
+	/// <summary>
+	/// Record the barriers asked for so far as one call. <paramref name="work"/>: whether the command it's flushed for does
+	/// work (a scope, dispatch, copy or clear), rather than writing a timestamp, binding a pipeline or ending the list.
+	/// </summary>
+	void FlushBarriers( bool work = true )
 	{
-		if ( imageBarrierCount == 0 && bufferBarrierCount == 0 && !hasMemoryBarrier ) return;
+		if ( imageBarrierCount == 0 && bufferBarrierCount == 0 && !hasMemoryBarrier )
+		{
+			workSinceBarrier |= work;
+			return;
+		}
 
 		if ( Queue == QueueType.Compute )
 		{
@@ -626,9 +653,16 @@ public sealed unsafe class CommandList
 				ForComputeQueue( ref memoryBarrier.srcStageMask, ref memoryBarrier.srcAccessMask );
 				ForComputeQueue( ref memoryBarrier.dstStageMask, ref memoryBarrier.dstAccessMask );
 				hasMemoryBarrier = memoryBarrier.srcStageMask != 0 || memoryBarrier.dstStageMask != 0;
-				if ( imageBarrierCount == 0 && bufferBarrierCount == 0 && !hasMemoryBarrier ) return;
+				if ( imageBarrierCount == 0 && bufferBarrierCount == 0 && !hasMemoryBarrier )
+				{
+					workSinceBarrier |= work;
+					return;
+				}
 			}
 		}
+
+		var timed = device.TimesBarriers ? Stopwatch.GetTimestamp() : 0;
+		CountBarriers();
 
 		fixed ( VkImageMemoryBarrier2* images = imageBarriers )
 		fixed ( VkBufferMemoryBarrier2* buffers = bufferBarriers )
@@ -658,6 +692,39 @@ public sealed unsafe class CommandList
 		imageBarrierCount = 0;
 		bufferBarrierCount = 0;
 		hasMemoryBarrier = false;
+
+		if ( !workSinceBarrier ) barrierDetail.SameGap++;
+		workSinceBarrier = work;
+		if ( timed != 0 ) device.AddBarrierTicks( Stopwatch.GetTimestamp() - timed );
+	}
+
+	/// <summary>
+	/// Count the barriers about to be recorded by what they order (<see cref="BarrierCounts"/>): from a write, from nothing
+	/// (a texture's first use), or from reads, to reads or to a write.
+	/// </summary>
+	void CountBarriers()
+	{
+		barrierDetail.Calls++;
+		if ( hasMemoryBarrier ) barrierDetail.Memory++;
+
+		for ( int i = 0; i < imageBarrierCount; i++ )
+		{
+			ref var b = ref imageBarriers[i];
+			barrierDetail.Images++;
+			if ( b.oldLayout == VkImageLayout.Undefined ) barrierDetail.ImagesFromUndefined++;
+			else if ( (b.srcAccessMask & WriteAccess) != 0 ) barrierDetail.ImagesAfterWrite++;
+			else if ( (b.dstAccessMask & WriteAccess) != 0 ) barrierDetail.ImagesReadToWrite++;
+			else if ( b.oldLayout == b.newLayout ) barrierDetail.ImagesReadToReadSameLayout++;
+			else barrierDetail.ImagesReadToRead++;
+		}
+
+		for ( int i = 0; i < bufferBarrierCount; i++ )
+		{
+			ref var b = ref bufferBarriers[i];
+			barrierDetail.Buffers++;
+			if ( (b.srcAccessMask & WriteAccess) != 0 ) barrierDetail.BuffersAfterWrite++;
+			else if ( (b.dstAccessMask & WriteAccess) == 0 ) barrierDetail.BuffersReadToRead++;
+		}
 	}
 
 	//
@@ -844,7 +911,7 @@ public sealed unsafe class CommandList
 		Recording();
 		ref var record = ref device.Get( pipeline );
 		if ( record.BindPoint == Vulkan.Vk.BindPointCompute ) OutsideRendering();
-		FlushBarriers();
+		FlushBarriers( work: false );
 
 		// One workers are still making (GraphicsPipelineInfo.SkipUntilReady): its draws are skipped until another is bound
 		var vkPipeline = Volatile.Read( ref record.Pipeline );

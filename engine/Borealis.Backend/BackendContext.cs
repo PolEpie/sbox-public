@@ -228,7 +228,13 @@ internal sealed partial class BackendContext : GpuContext
 			Span<SyncPoint> waits = stackalloc SyncPoint[1];
 			var waitCount = 0;
 			if ( wait.Handle != IntPtr.Zero ) waits[waitCount++] = device.PointOf( wait );
-			if ( recording.Layouts is not null ) SubmitLayoutFixUps( recording, waits[..waitCount] );
+			if ( recording.Layouts is not null )
+			{
+				var fixUpStart = GraphMeasure.Now();
+				var fixUpLists = LayoutFixUps;
+				using ( Zones.LayoutFixUps.Start() ) SubmitLayoutFixUps( recording, waits[..waitCount] );
+				if ( GraphMeasure.Enabled ) GraphMeasure.AddFixUps( GraphMeasure.Now() - fixUpStart, LayoutFixUps != fixUpLists );
+			}
 
 			var point = waitCount == 0 && device.BatchSubmits ? Gpu.SubmitLater( recording.List ) : Gpu.Submit( recording.List, waits[..waitCount] );
 			if ( signal.Handle != IntPtr.Zero ) device.Signalled( signal, point );
@@ -396,6 +402,12 @@ internal sealed partial class BackendContext : GpuContext
 
 	public override void End()
 	{
+		if ( GraphMeasure.Enabled )
+		{
+			GraphMeasure.AddTransitions( measuredTransitions, measuredTicks, measuredBarriers );
+			measuredTransitions = measuredTicks = measuredBarriers = 0;
+		}
+
 		recording = null;
 		borrowed = false;
 		lender = null;
@@ -681,10 +693,29 @@ internal sealed partial class BackendContext : GpuContext
 	// Layouts: every texture remembers where its last recorded use left it
 	//
 
+	// Layout tracking's calls, time and barriers since this context's list began, while measuring (GraphMeasure)
+	long measuredTransitions, measuredTicks, measuredBarriers;
+
 	void Transition( BackendTexture texture, ImageLayout layout, bool always = false )
 	{
 		if ( texture is null ) return;
+		if ( !GraphMeasure.Enabled )
+		{
+			Move( texture, layout, always );
+			return;
+		}
 
+		var start = System.Diagnostics.Stopwatch.GetTimestamp();
+		var moved = Move( texture, layout, always );
+		measuredTicks += System.Diagnostics.Stopwatch.GetTimestamp() - start;
+		measuredTransitions++;
+		if ( moved ) measuredBarriers++;
+		if ( GraphMeasure.Listing ) GraphMeasure.Used( recording.List, texture.Handle.Index, texture.Handle.Generation, texture.Name, (int)layout, moved );
+	}
+
+	/// <summary>Move <paramref name="texture"/> to <paramref name="layout"/> where this list uses it; whether that took a barrier.</summary>
+	bool Move( BackendTexture texture, ImageLayout layout, bool always )
+	{
 		// A list recorded beside others: its first use of a texture is what it needs, moved there before it's submitted,
 		// unless the plan says where the lists before leave it
 		var local = recording.Layouts;
@@ -694,14 +725,14 @@ internal sealed partial class BackendContext : GpuContext
 			if ( !PlannedLayout( texture, out var planned ) )
 			{
 				local[texture] = (layout, layout);
-				return;
+				return false;
 			}
 
 			local[texture] = known = (planned, planned);
 		}
 
 		var from = local is null ? texture.Layout : known.Current;
-		if ( from == layout && !always ) return;
+		if ( from == layout && !always ) return false;
 		if ( recording.Rendering ) CloseScope();
 
 		// A barrier can't sit between a suspended scope and its resumption: this list's scopes begin anew
@@ -709,6 +740,7 @@ internal sealed partial class BackendContext : GpuContext
 		recording.List.Barrier( LayoutBarrier( texture.Handle, from, layout ) );
 		if ( local is null ) texture.Layout = layout;
 		else local[texture] = (known.First, layout);
+		return true;
 	}
 
 	const MemoryAccess Writes = MemoryAccess.ShaderWrite | MemoryAccess.ColorTargetWrite | MemoryAccess.DepthTargetWrite | MemoryAccess.TransferWrite | MemoryAccess.HostWrite | MemoryAccess.MemoryWrite;

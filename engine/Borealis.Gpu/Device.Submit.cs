@@ -565,7 +565,7 @@ public sealed unsafe partial class Device
 			Interlocked.Increment( ref submissions );
 			queue.Pending.Clear();
 			Volatile.Write( ref queue.Flushed, value );
-			ApplyLayouts( list );
+			using ( Zone( ZoneApplyLayouts ) ) ApplyLayouts( list );
 			list.LeaveGate();
 			return list.Submitted = new SyncPoint( list.Queue, value );
 		}
@@ -590,7 +590,7 @@ public sealed unsafe partial class Device
 			Remember( queue, value, list, -1 );
 			queue.Pending.Add( list.Handle );
 			queue.Suspended = list.EndsSuspended ? list : null;
-			ApplyLayouts( list );
+			using ( Zone( ZoneApplyLayouts ) ) ApplyLayouts( list );
 			list.LeaveGate();
 			return list.Submitted = new SyncPoint( list.Queue, value );
 		}
@@ -714,6 +714,7 @@ public sealed unsafe partial class Device
 		{
 			recentSubmissions[recentNext] = (queue.Type, value, list.Name, heldBefore, Stopwatch.GetTimestamp(), list.MarkerSlot);
 			recentNext = (recentNext + 1) % recentSubmissions.Length;
+			list.SubmitOrder = ++submitOrder;
 			Tally( list );
 		}
 	}
@@ -730,11 +731,51 @@ public sealed unsafe partial class Device
 
 	(long Lists, long Scopes, long Barriers, long FullBarriers, long Resumed) recorded;
 
+	/// <summary>What the barrier calls of the lists submitted so far held, added up (<see cref="CommandList.BarrierDetail"/>).</summary>
+	public BarrierCounts RecordedBarriers
+	{
+		get { lock ( recentSubmissions ) return recordedBarriers; }
+	}
+
+	BarrierCounts recordedBarriers;
+	long submitOrder;
+
 	void Tally( CommandList list )
 	{
 		var c = list.Counts;
 		recorded = (recorded.Lists + 1, recorded.Scopes + c.Scopes, recorded.Barriers + c.Barriers, recorded.FullBarriers + c.FullBarriers, recorded.Resumed + c.Resumed);
+		recordedBarriers.Add( list.BarrierDetail );
+		if ( TimesBarriers ) System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault( barriersByList, list.Name ?? "", out _ ).Add( list.BarrierDetail );
 	}
+
+	readonly Dictionary<string, BarrierCounts> barriersByList = new();
+
+	/// <summary>
+	/// What the barrier calls of the lists submitted while <see cref="TimesBarriers"/> held, added up by list name, and start
+	/// again.
+	/// </summary>
+	public Dictionary<string, BarrierCounts> TakeBarriersByList()
+	{
+		lock ( recentSubmissions )
+		{
+			var taken = new Dictionary<string, BarrierCounts>( barriersByList );
+			barriersByList.Clear();
+			return taken;
+		}
+	}
+
+	/// <summary>
+	/// Whether command lists time their barrier calls (<see cref="BarrierTicks"/>): recording the call and counting it, on
+	/// whichever thread records the list.
+	/// </summary>
+	public bool TimesBarriers { get; set; }
+
+	long barrierTicks;
+
+	/// <summary><see cref="System.Diagnostics.Stopwatch"/> ticks spent in barrier calls while <see cref="TimesBarriers"/>.</summary>
+	public long BarrierTicks => Interlocked.Read( ref barrierTicks );
+
+	internal void AddBarrierTicks( long ticks ) => Interlocked.Add( ref barrierTicks, ticks );
 
 	/// <summary>
 	/// For after the device is lost: the driver's fault report (only valid then), the process's memory use

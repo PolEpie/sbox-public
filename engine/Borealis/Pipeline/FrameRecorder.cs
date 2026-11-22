@@ -249,6 +249,29 @@ internal sealed partial class FrameRecorder : IDisposable
 		PlanSharedLists();
 	}
 
+	// The last plan's structure (GraphMeasure): the segments' shapes and how their lists are shared
+	int measuredShape;
+
+	/// <summary>The render <see cref="GraphMeasure"/> lists this recorder's uses under.</summary>
+	internal int MeasureRender { get; set; }
+
+	/// <summary>
+	/// For <see cref="GraphMeasure"/>: whether this plan's structure differs from the last one's, as a plan kept from frame
+	/// to frame would have to be made again; the segments' shapes (<see cref="ShapeOf"/>), not their draw counts.
+	/// </summary>
+	internal bool PlanChanged()
+	{
+		var shape = HashCode.Combine( segmentCount, Parallel, layerCount, workCount );
+		for ( int i = 0; i < segmentCount; i++ )
+			shape = HashCode.Combine( shape, ShapeOf( i ), segments[i].Borrows, segments[i].OnMainThread );
+
+		var changed = shape != measuredShape;
+		measuredShape = shape;
+		return changed;
+	}
+
+	internal int SegmentCount => segmentCount;
+
 	/// <summary>
 	/// Short names of <see cref="FrameResources"/>, by bit, for the plan overlay.
 	/// </summary>
@@ -656,9 +679,15 @@ internal sealed partial class FrameRecorder : IDisposable
 		for ( int l = 0; l < layerCount; l++ )
 			layers[l].Layer.BeforeSegments( layers[l].Frame, layers[l].Frame.System.FrameContext );
 
-		var shape = 0;
-		for ( int i = 0; i < segmentCount; i++ )
-			segments[i].Shape = shape = HashCode.Combine( shape, ShapeOf( i ) );
+		var shaped = GraphMeasure.Now();
+		using ( Zones.PlanShapes.Start() )
+		{
+			var shape = 0;
+			for ( int i = 0; i < segmentCount; i++ )
+				segments[i].Shape = shape = HashCode.Combine( shape, ShapeOf( i ) );
+		}
+
+		if ( GraphMeasure.Enabled ) GraphMeasure.AddShapes( GraphMeasure.Now() - shaped );
 
 		var start = Stopwatch.GetTimestamp();
 		var workers = 0;
@@ -866,6 +895,7 @@ internal sealed partial class FrameRecorder : IDisposable
 						var mark = layerCosts is null ? default : CostMark.Of( rc, stats );
 						var started = item.Layer is DepthPrepassLayer ? Stopwatch.GetTimestamp() : 0;
 						var scope = rc.BeginGpuScope( rc.Census ? CensusScope( item.View.View?.Name, item.View.IsShadow, item.Layer.Name ) : item.Layer.Name );
+						if ( GraphMeasure.Listing ) GraphMeasure.Pass( MeasureRender, item.Layer.Name );
 						item.Layer.Begin( frame, rc, item.View, start: from == 0 );
 						frame.System.DrawRange( rc, item.View, item.Layer, from, to - from, ref stats );
 						rc.EndPass();
@@ -884,6 +914,7 @@ internal sealed partial class FrameRecorder : IDisposable
 					{
 						var mark = layerCosts is null ? default : CostMark.Of( rc, stats );
 						var scope = rc.BeginGpuScope( rc.Census ? CensusScope( layers[l].Frame?.View?.Name, false, layers[l].Layer.Name ) : layers[l].Layer.Name );
+						if ( GraphMeasure.Listing ) GraphMeasure.Pass( MeasureRender, layers[l].Layer.Name );
 						frame.UseFrameConstants( rc );
 						layers[l].Layer.Record( frame, rc, ref stats );
 						rc.EndPass();

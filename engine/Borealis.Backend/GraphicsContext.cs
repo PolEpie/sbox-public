@@ -1193,6 +1193,7 @@ public sealed class GraphicsContext
 	void Transition( TextureHandle texture, ImageLayout layout )
 	{
 		var from = Layout( texture );
+		if ( GraphMeasure.Listing ) GraphMeasure.Used( List, texture.Index, texture.Generation, null, (int)layout, from != layout );
 		if ( from == layout ) return;
 
 		List.Barrier( new TextureBarrier
