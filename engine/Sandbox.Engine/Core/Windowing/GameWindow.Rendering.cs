@@ -32,7 +32,11 @@ internal sealed partial class GameWindow
 		{
 			// A frame the render thread draws is presented there (DrawFrame)
 			if ( game.handedOver ) game.presented = true;
-			else game.presented = game.borealis.PresentFrame();
+			else
+			{
+				game.presented = game.borealis.PresentFrame();
+				if ( game.presented ) game.PresentedForLatency();
+			}
 			game.UpdateBorealisGpuTitle();
 		}
 
@@ -74,7 +78,23 @@ internal sealed partial class GameWindow
 	/// </summary>
 	internal void JoinRenderThread()
 	{
-		if ( borealis is not null && RenderBackend.Default is BorealisGpuRenderBackend { FrameAhead: true } backend ) backend.FollowFrame();
+		if ( borealis is null || RenderBackend.Default is not BorealisGpuRenderBackend backend ) return;
+		if ( backend.FrameAhead ) backend.FollowFrame();
+
+		// What the game wrote and painted while it drew, if an earlier join couldn't (a block was recording)
+		backend.WriteStagedNow();
+	}
+
+	/// <summary>
+	/// At shutdown, before anything is released: the render thread (or the frame thread) finishes the frame handed to it and
+	/// stops, and what the game wrote meanwhile is written. Frames from then on start on the main thread.
+	/// </summary>
+	internal void StopRenderThread()
+	{
+		if ( borealis is null || RenderBackend.Default is not BorealisGpuRenderBackend backend ) return;
+		backend.StopFrameThread();
+		backend.WriteStagedNow();
+		borealis.PresentAhead();
 	}
 
 	/// <summary>Whether the render thread is drawing a frame handed to it: what the frame's end disposes of waits for it.</summary>
@@ -135,10 +155,21 @@ internal sealed partial class GameWindow
 		if ( inline is null && RenderBackend.Default is BorealisGpuRenderBackend backend && backend.HandOverRenderFrame( borealis, drawFrame ??= DrawFrame ) )
 		{
 			handedOver = true;
+			HandedOverFrame = Application.FrameCount;
+			BorealisGpuFrameLatency.HandedOver( Application.FrameCount );
 			return;
 		}
 
 		DrawFrame();
+	}
+
+	/// <summary>The last frame whose drawing was handed to the render thread, for the deadline latency mode.</summary>
+	internal ulong HandedOverFrame { get; private set; }
+
+	// The window's frame was presented: the GPU's last work for it is watched for its input-to-GPU latency
+	void PresentedForLatency()
+	{
+		if ( RenderBackend.Default is BorealisGpuRenderBackend backend ) BorealisGpuFrameLatency.Presented( backend.Device, Application.FrameCount, backend.Device.LastFlushed( global::Borealis.Gpu.QueueType.Graphics ) );
 	}
 
 	// What the frame draws, prepared by the extract: the game's scene and its cameras in order (null with nothing extracted:
@@ -180,6 +211,7 @@ internal sealed partial class GameWindow
 			return;
 		}
 
+		var drawStart = System.Diagnostics.Stopwatch.GetTimestamp();
 		try
 		{
 			DrawWindow();
@@ -189,7 +221,8 @@ internal sealed partial class GameWindow
 			if ( BorealisGpuErrors.ShouldLog( e ) ) Log.Warning( e, $"The render thread's frame threw: {e.Message}" );
 		}
 
-		borealis.PresentFrame();
+		BorealisGpuFrameLatency.Drawn( Application.FrameCount, System.Diagnostics.Stopwatch.GetElapsedTime( drawStart ).TotalMilliseconds );
+		if ( borealis.PresentFrame() ) PresentedForLatency();
 	}
 
 	void DrawWindow()
