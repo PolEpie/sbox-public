@@ -49,6 +49,11 @@ public partial class SceneObject
 	internal void ChangeFlags( ObjectFlags value, ObjectFlags mask )
 	{
 		value &= mask;
+
+		// Unchanged: nothing to write or tell the renderer (a water sets its capture list, and with it these, every frame).
+		// Internal flags aren't kept here, so a change to one always goes through
+		if ( (mask & InternalFlags) == 0 && (CurrentFlags & mask) == value ) return;
+
 		if ( WritesNativeObject( "ChangeFlags" ) ) native.ChangeFlags( value, mask );
 		_flags = (CurrentFlags & ~mask) | (value & ~InternalFlags);
 		NotifyChanged( Rendering.SceneObjectChange.Flags );

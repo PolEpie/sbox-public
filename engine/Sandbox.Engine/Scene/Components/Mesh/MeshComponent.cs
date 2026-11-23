@@ -212,6 +212,9 @@ public sealed partial class MeshComponent : Collider, ExecuteInEditor, ITintable
 		_sceneObject = null;
 	}
 
+	// Off the update list in play: a mesh edits only in the editor, and the collision setter rebuilds itself. A map has thousands
+	internal override bool UpdatesIn( Scene scene ) => scene.IsEditor;
+
 	protected override void OnUpdate()
 	{
 		base.OnUpdate();
@@ -228,6 +231,8 @@ public sealed partial class MeshComponent : Collider, ExecuteInEditor, ITintable
 
 	void UpdateMesh()
 	{
+		// In game only a collision type change does anything, and this runs every frame for every mesh
+		if ( Scene?.IsEditor != true && (_builtMesh is null || _builtCollision == Collision) ) return;
 		if ( !Active || !PhysicsBody.IsValid() ) return;
 
 		if ( Scene.IsEditor && (_builtMesh != Mesh || Mesh?.IsDirty == true) )

@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Linq;
 
 namespace Borealis;
@@ -304,6 +304,24 @@ public sealed partial class RenderSystem : IDisposable
 		}
 	}
 
+	/// <summary>The system whose frame this thread is recording: a view rendered meanwhile is its child.</summary>
+	[ThreadStatic] static RenderSystem recordingHere;
+
+	/// <summary>
+	/// Before a child view of this system's frame prepares (water's refraction, from the middle of this frame's recording):
+	/// submit this frame's setup and segments up to its last shadow layer, recording what workers haven't yet, so its shadow
+	/// maps reach the GPU before the child's draws and the child uses them rather than drawing them again. Not for a
+	/// reflection, which keeps cascades of its own (<see cref="RenderView.Reflection"/>), nor where the segments can't go
+	/// on their own (<see cref="FrameRecorder.SubmitThrough"/>): the child then draws the maps itself.
+	/// </summary>
+	void SubmitShadowsFor( RenderView child )
+	{
+		if ( child.Reflection || frame.View is null ) return;
+
+		// Maps this frame didn't draw are on the GPU already
+		if ( shadows.Drawn.Length == 0 || recorder.SubmitThrough( recorder.LastSegmentOf<ShadowsReadyLayer>( frame ) ) ) shadows.Submitted();
+	}
+
 	void Record( RenderWorld world, RenderView view, in RenderOutput output, IRenderStages stages )
 	{
 		using var rendererAllocations = Borealis.RendererAllocations.Measure();
@@ -312,6 +330,9 @@ public sealed partial class RenderSystem : IDisposable
 
 		var stats = new RenderStats { Objects = world.Count };
 		RenderNumber++;
+
+		// A child view of a frame this thread is recording: the parent's shadow maps go to the GPU first, so it uses them
+		if ( recordingHere is { } parent && parent != this ) parent.SubmitShadowsFor( view );
 
 		view.Update();
 		frame.Begin( world, view, output, stages );
@@ -400,7 +421,16 @@ public sealed partial class RenderSystem : IDisposable
 			stats.SetupMs = Lap();
 
 			// Frame attributes are read-only during recording.
-			using ( Zones.Record.Start() ) recorder.Record( ref stats );
+			var outer = recordingHere;
+			recordingHere = this;
+			try
+			{
+				using ( Zones.Record.Start() ) recorder.Record( ref stats );
+			}
+			finally
+			{
+				recordingHere = outer;
+			}
 			if ( plan is not null ) recorder.FillTimes( plan );
 			RenderStats.AddCounts( ref stats, frame.Recorded );
 			if ( skyFrame is not null )
@@ -731,9 +761,10 @@ public sealed partial class RenderSystem : IDisposable
 
 	/// <summary>
 	/// Persistent mipmapped RGBA16F copy (<c>FindOrCreateFrameBufferScratchTexture</c>).
-	/// Created on the main thread; the depth-aware mask reads the previous frame's second mip. The last two sizes are kept:
-	/// a view whose renderer also draws views of another size (a camera's and its 128 px cube faces) made a new 10 MiB copy,
-	/// the driver's allocation, at every turn, 190 in Construct's load and the seconds after it.
+	/// Created on the main thread, cleared: the depth-aware mask reads the previous frame's second mip, so a new copy's first
+	/// frames read black rather than what its memory held, and a view's frames from a new copy are the same each time. The
+	/// last two sizes are kept: a view whose renderer also draws views of another size (a camera's and its 128 px cube faces)
+	/// made a new 10 MiB copy, the driver's allocation, at every turn, 190 in Construct's load and the seconds after it.
 	/// </summary>
 	internal GpuTexture FrameBufferCopy( Rect viewport )
 	{
@@ -749,7 +780,9 @@ public sealed partial class RenderSystem : IDisposable
 
 		// Keep the general layout for compute mip writes and sampling.
 		var desc = TextureDesc.Target( width, height, TextureFormat.RGBA16161616F, mips: mips ) with { Storage = true, GenerateMips = true };
-		frameBufferCopy = RenderHost.Current.Device.CreateTexture( desc, "Borealis frame buffer copy" );
+		var device = RenderHost.Current.Device;
+		frameBufferCopy = device.CreateTexture( desc, "Borealis frame buffer copy" );
+		device.Clear( frameBufferCopy, Color.Transparent );
 		return frameBufferCopy;
 	}
 

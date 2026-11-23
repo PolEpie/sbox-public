@@ -56,15 +56,6 @@ native class CSceneObject as NativeEngine.CSceneObject
 
 	BBox GetBounds();
 
-	inline void SetBufferIndexRange( int start, int count )
-	{
-		CMeshInstance *pMesh = self->GetMeshInstanceData();
-		CSceneObjectData *pData = new CSceneObjectData( pMesh->GetSceneObjectData() );
-		pData->m_drawCalls[0].m_nStartIndex = start;
-		pData->m_drawCalls[0].m_nIndexCount = count;
-		pMesh->SetAndOwnDrawDataOverride( pData );
-	}
-
 	CSceneObject GetParent();
 	void RemoveChild( CSceneObject obj );
 

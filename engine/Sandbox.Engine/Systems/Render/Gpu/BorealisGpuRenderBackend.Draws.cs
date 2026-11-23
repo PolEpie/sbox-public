@@ -96,12 +96,30 @@ internal sealed partial class BorealisGpuRenderBackend
 	{
 		_ = Recording;
 		var (shader, surface) = PrepareDraw( pendingMaterial );
-		var lowered = Lower( pendingAttributes );
 
 		// Vertices from buffers hold plain normals and tangents, as a native view tells its draws
-		if ( lowered.Get( UncompressedTangentFrame ) is null ) lowered.Set( UncompressedTangentFrame, 1.0f );
-		if ( surface is not null ) context.DrawSurface( surface, lowered, draw );
-		else context.Draw( shader, lowered, draw );
+		var lowered = LoweredForPending( pendingAttributes );
+
+		// Indirect draws index g_TransformBuffer by instance ids counting from the command's first instance, as a model's do, not by the custom object's transform slot
+		var lent = drawer.InstanceIds;
+		if ( draw.Arguments.IsValid && TransformBufferLength() is > 0 and var transformCount )
+			drawer.InstanceIds = InstanceIds( 0, transformCount );
+
+		try
+		{
+			if ( surface is not null ) context.DrawSurface( surface, lowered, draw );
+			else context.Draw( shader, lowered, draw );
+		}
+		finally
+		{
+			drawer.InstanceIds = lent;
+		}
+	}
+
+	int TransformBufferLength()
+	{
+		var value = pendingAttributes?.Managed?.Get( "g_TransformBuffer" ) ?? blockAttributes?.Managed?.Get( "g_TransformBuffer" );
+		return value is GpuBuffer buffer ? buffer.ElementCount : 0;
 	}
 
 	//
@@ -328,9 +346,7 @@ internal sealed partial class BorealisGpuRenderBackend
 				if ( draw.Material is null ) continue;
 
 				var (shader, surface) = PrepareDraw( draw.Material );
-				var lowered = Lower( attributes );
-				if ( transforms.IsValid ) lowered.Set( "g_TransformBuffer", transforms );
-				lowered.Set( UncompressedTangentFrame, draw.Uncompressed ? 1.0f : 0.0f );
+				var lowered = LoweredForModel( attributes, transforms, draw.Uncompressed );
 				var drawn = draw.Geometry with
 				{
 					Instances = instances,
@@ -345,6 +361,76 @@ internal sealed partial class BorealisGpuRenderBackend
 		finally
 		{
 			drawer.InstanceIds = lent;
+		}
+	}
+
+	static readonly int TransformBufferId = AttributeIds.Of( "g_TransformBuffer" );
+	static readonly int UncompressedTangentFrameId = AttributeIds.Of( UncompressedTangentFrame );
+
+	/// <summary>A model draw's lowered attributes, kept while block, attributes, transforms, tangent frame, device frame, lent transforms and backings are unchanged.</summary>
+	sealed class ModelAttributes
+	{
+		public readonly ShaderAttributes Set = new();
+		public ManagedRenderAttributes Managed, Block;
+		public int Version, BlockVersion, Backings, Built;
+		public ulong Frame;
+		public BufferHandle Lent, Transforms;
+		public bool Uncompressed, Pending;
+	}
+
+	const int ModelAttributesKept = 12;
+	readonly ModelAttributes[] modelAttributes = new ModelAttributes[ModelAttributesKept];
+	int modelAttributesNext;
+
+	ShaderAttributes LoweredForModel( RenderAttributes attributes, BufferHandle transforms, bool uncompressed ) => LoweredFor( attributes, transforms, uncompressed, pending: false );
+
+	/// <summary>The same for draws from buffers or CPU vertices; the identity transform is added here so drawing doesn't change the kept set.</summary>
+	ShaderAttributes LoweredForPending( RenderAttributes attributes ) => LoweredFor( attributes, default, true, pending: true );
+
+	ShaderAttributes LoweredFor( RenderAttributes attributes, BufferHandle transforms, bool uncompressed, bool pending )
+	{
+		if ( attributes?.Managed is null && attributes?.ShadowSet is { } copy ) attributes = copy;
+		if ( attributes?.Managed is null )
+			throw new NotSupportedException( "Native render attributes can't be drawn with on Borealis.Gpu" );
+
+		var managed = attributes.Managed;
+		var block = blockAttributes?.Managed is { } b && !ReferenceEquals( b, managed ) ? b : null;
+		var frame = gpu.FrameNumber;
+		var blockVersion = block?.Version ?? 0;
+		foreach ( var kept in modelAttributes )
+		{
+			if ( kept is not null && ReferenceEquals( kept.Managed, managed ) && kept.Version == managed.Version && ReferenceEquals( kept.Block, block ) && kept.BlockVersion == blockVersion
+				&& kept.Frame == frame && kept.Lent == lentTransforms && kept.Transforms == transforms && kept.Uncompressed == uncompressed && kept.Pending == pending && kept.Backings == backingsVersion
+				&& kept.Built == kept.Set.Version ) return kept.Set;
+		}
+
+		var made = modelAttributes[modelAttributesNext] ??= new ModelAttributes();
+		modelAttributesNext = (modelAttributesNext + 1) % ModelAttributesKept;
+		var set = made.Set;
+		set.Clear();
+		if ( block is not null ) set.CopyFrom( LoweredBlock( block ) );
+		else if ( lentTransforms.IsValid ) set.SetById( TransformBufferId, lentTransforms );
+		Lower( managed, set );
+		if ( transforms.IsValid ) set.SetById( TransformBufferId, transforms );
+		if ( pending )
+		{
+			if ( set.Get( UncompressedTangentFrameId ) is null ) set.SetById( UncompressedTangentFrameId, 1.0f );
+			context.EnsureTransform( set );
+		}
+		else set.SetById( UncompressedTangentFrameId, uncompressed ? 1.0f : 0.0f );
+
+		(made.Managed, made.Version, made.Block, made.BlockVersion, made.Frame, made.Lent, made.Transforms, made.Uncompressed, made.Pending, made.Backings, made.Built) = (managed, managed.Version, block, blockVersion, frame, lentTransforms, transforms, uncompressed, pending, backingsVersion, set.Version);
+		return set;
+	}
+
+	/// <summary>Forget the kept lowered attributes, which hold textures and buffers past their owners.</summary>
+	void ReleaseModelAttributes()
+	{
+		foreach ( var kept in modelAttributes )
+		{
+			if ( kept is null ) continue;
+			kept.Set.Clear();
+			kept.Managed = kept.Block = null;
 		}
 	}
 

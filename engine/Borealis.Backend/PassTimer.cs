@@ -124,7 +124,8 @@ internal sealed class PassTimer : IDisposable
 		var begin = Interlocked.Increment( ref usedTimestamps[slot] ) - 1;
 		if ( begin >= PerSlot - 1 ) return -1;
 		var query = -1;
-		if ( statistics is not null && count && kind != ScopeKind.List )
+		// Not on an async compute list: the pool counts graphics stages, which a compute-only queue can't begin (device lost)
+		if ( statistics is not null && count && kind != ScopeKind.List && list.Queue == QueueType.Graphics )
 		{
 			query = Interlocked.Increment( ref usedQueries[slot] ) - 1;
 			if ( query >= PerSlot / 2 ) query = -1;

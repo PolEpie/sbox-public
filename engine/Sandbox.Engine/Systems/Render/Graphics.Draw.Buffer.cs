@@ -183,6 +183,7 @@ partial class Graphics
 		Backend.DrawIndexedInstanced( indexBuffer, primitiveType, instanceCount );
 	}
 
+	/// <summary>Draws indexed geometry with arguments read from <paramref name="indirectBuffer"/>.</summary>
 	internal static void DrawIndexedInstancedIndirect<T>( GpuBuffer<T> vertexBuffer, GpuBuffer indexBuffer, Material material, GpuBuffer indirectBuffer, uint indirectElementOffset = 0, RenderAttributes attributes = null, PrimitiveType primitiveType = PrimitiveType.Triangles, uint drawCount = 1, uint stride = 0 ) where T : unmanaged
 	{
 		AssertRenderBlock();

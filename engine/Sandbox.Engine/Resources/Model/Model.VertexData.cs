@@ -83,6 +83,7 @@ public partial class Model
 		streams = default;
 
 		if ( BuilderMeshes is { } built ) return TryReadBuilderDrawCall( built, mesh, drawCall, out vertices, out indices, out streams );
+		if ( FileGeometry() is { } file ) return ModelFileGeometry.TryReadDrawCall( file, mesh, drawCall, out vertices, out indices, out streams );
 
 		int vertexCount = MeshGlue.GetDrawCallVertexCount( native, mesh, drawCall );
 		int indexCount = MeshGlue.GetDrawCallIndexCount( native, mesh, drawCall );
@@ -207,6 +208,25 @@ public partial class Model
 	public int GetIndexCount( int drawcall ) => MeshGlue.GetModelIndexCount( native, drawcall );
 	public int GetIndexStart( int drawcall ) => MeshGlue.GetModelIndexStart( native, drawcall );
 	public int GetBaseVertex( int drawcall ) => MeshGlue.GetModelBaseVertex( native, drawcall );
+
+	/// <summary>The vertices and indices of one draw call of the mesh drawn at a LOD; indices are relative to the returned vertices. False when the draw has no readable triangles.</summary>
+	internal bool TryGetLodDrawCall( int lod, int drawCall, out Vertex[] vertices, out uint[] indices )
+	{
+		vertices = null;
+		indices = null;
+
+		var meshes = MeshInfo?.Meshes;
+		if ( meshes is null || (uint)lod >= 32 ) return false;
+
+		var lodMask = 1 << lod;
+		for ( int i = 0; i < meshes.Length; i++ )
+		{
+			if ( (meshes[i].LodMask & lodMask) != 0 )
+				return TryReadDrawCall( i, drawCall, out vertices, out indices, out _ );
+		}
+
+		return false;
+	}
 
 	/// <summary>
 	/// Index count of the mesh drawn at the given LOD.

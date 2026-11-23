@@ -136,5 +136,22 @@ public sealed partial class RenderSystem
 		into.AmbientLight = main.AmbientLight;
 		into.GradientFog = main.GradientFog;
 		into.Time = main.Time;
+		into.Projection = ClippedSkyboxProjection( into, main, sky );
+	}
+
+	/// <summary>
+	/// A clipped view's skybox projection: its own, made oblique at the main view's <see cref="RenderView.ClipPlane"/> taken into
+	/// skybox space, so the skybox is clipped and culled where the world is (a planar refraction sees only what's beyond its
+	/// surface). Null for other views, which keep native's template frustum.
+	/// </summary>
+	static Matrix? ClippedSkyboxProjection( RenderView into, RenderView main, Skybox3D sky )
+	{
+		if ( main.ClipPlane is not { } plane || main.Orthographic ) return null;
+
+		var turn = sky.Rotation.Inverse;
+		var clip = new Sandbox.Plane( sky.Origin + turn * plane.Position / sky.Scale, turn * plane.Normal );
+		var aspect = into.Viewport.Width > 0 && into.Viewport.Height > 0 ? into.Viewport.Width / into.Viewport.Height : 1.0f;
+		var projection = Matrix.CreateProjection( into.ZNear, into.ZFar, into.FieldOfView, aspect, into.ClipSpaceBounds );
+		return Matrix.CreateObliqueProjection( new Transform( into.Position, into.Rotation ), clip, projection );
 	}
 }

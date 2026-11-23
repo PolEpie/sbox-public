@@ -243,10 +243,11 @@ internal sealed partial class BackendContext
 		var r = recording;
 		var pass = bucket.Surface;
 
-		// Alpha-tested colour in the visibility-driven forward pass: the ids prepass drew these triangles with the bucket's own
-		// vertex stage and wrote their depth, so colour tests it equal without writing, keeping early depth testing
+		// Opaque colour in the visibility-driven forward pass: the prepass wrote these triangles' depth, so colour doesn't write it
+		// again; alpha-tested buckets, whose ids the prepass drew with their own vertex stage, test it equal, keeping early
+		// depth testing
 		var depthEqual = surfaceDepthFromIds && !ids && color != Format.Unknown && !bucket.NoColor && !bucket.IdsShader
-			&& bucket.SurfaceState.AlphaTest && bucket.SurfaceState.DepthWrite && !bucket.SurfaceState.DrawsTranslucent;
+			&& bucket.SurfaceState.DepthWrite && !bucket.SurfaceState.DrawsTranslucent;
 		var vertexConstants = SurfaceConstants( pass.Pass.Vertex, out var vertexKey, gpuDriven: true );
 		ulong pixelKey = 0;
 		var pixelConstants = pass.Pass.Pixel is { } pixel ? SurfaceConstants( pixel, out pixelKey, gpuDriven: true ) : null;
@@ -596,6 +597,9 @@ internal sealed partial class BackendContext
 		public readonly int[] Bound;
 		public readonly StringToken[] Tokens;
 
+		/// <summary>Per bound member, the <see cref="AttributeIds"/> id of its attribute.</summary>
+		public readonly int[] Ids;
+
 		public SurfaceGlobalsLayout( GlobalConstants globals )
 		{
 			Defaults = new byte[Math.Max( globals.Size, 16 )];
@@ -609,7 +613,12 @@ internal sealed partial class BackendContext
 
 			Bound = [.. bound];
 			Tokens = new StringToken[Bound.Length];
-			for ( int i = 0; i < Bound.Length; i++ ) Tokens[i] = Token( globals.Members[Bound[i]].Attribute );
+			Ids = new int[Bound.Length];
+			for ( int i = 0; i < Bound.Length; i++ )
+			{
+				Tokens[i] = Token( globals.Members[Bound[i]].Attribute );
+				Ids[i] = AttributeIds.Of( globals.Members[Bound[i]].Attribute );
+			}
 		}
 
 		public static void Write( Span<byte> data, GlobalMember member, ReadOnlySpan<float> value )

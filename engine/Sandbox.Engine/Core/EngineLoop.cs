@@ -104,6 +104,7 @@ internal static class EngineLoop
 			}
 		}
 
+		Sandbox.Utility.ProfilerZones.FrameMark();
 		// The main thread's CPU time this frame, besides the wall time the timings add up to
 		MainThreadCpuTiming.AddMilliseconds( ThreadCpuTime.NowMs() - cpuAtStart );
 
