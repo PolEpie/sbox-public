@@ -5,9 +5,11 @@ using System.Runtime.InteropServices;
 namespace Borealis.Backend;
 
 /// <summary>
-/// The frame's composite morph atlas, as native's scene system keeps it (<c>m_CMTAtlasDesc</c>): RGBA16F, 2048 by 1024, the
+/// The frame's composite morph atlas, as native's scene system keeps it (<c>m_CMTAtlasDesc</c>): RGBA16F, 2048 across, the
 /// left half each morphing mesh's position deltas and the right half its normal deltas and wrinkle, one texel per vertex in
-/// a rectangle of its own. Meshes are queued while Borealis prepares a frame (<see cref="BackendMorphs"/>), their rectangles
+/// a rectangle of its own. Native's is 1024 down; this one is as tall as the rectangles placed in it need (<see cref="Fit"/>),
+/// from <see cref="MinHeight"/> to that, and is freed once nothing has morphed for <see cref="IdleFrames"/>.
+/// Meshes are queued while Borealis prepares a frame (<see cref="BackendMorphs"/>), their rectangles
 /// placed when the frame's morphs are generated (<see cref="BackendContext.GenerateMorphs"/>), and each skinning dispatch
 /// reads its mesh's rectangle from the transform buffer's morph entry (<see cref="Subrect"/>).
 /// </summary>
@@ -19,8 +21,17 @@ internal sealed class MorphAtlas( BackendDevice device )
 	/// <summary>Texels across the whole atlas: positions, then normals and wrinkles.</summary>
 	public const int Width = LogicalWidth * 2;
 
-	/// <summary>Texels down the atlas.</summary>
-	public const int Height = 1024;
+	/// <summary>Texels down the atlas at most (native's).</summary>
+	public const int MaxHeight = 1024;
+
+	/// <summary>Texels down the atlas at least: a citizen's head and its clothes fit.</summary>
+	public const int MinHeight = 64;
+
+	/// <summary>
+	/// Generations after which an atlas taller than the last ones needed is made again as tall as the tallest of them, and
+	/// device frames without a generation after which it's freed.
+	/// </summary>
+	public const int ShrinkGenerations = 600, IdleFrames = 600;
 
 	/// <summary>The gutter between rectangles (native's <c>MORPH_GUTTER_SIZE</c>).</summary>
 	const int Gutter = 1;
@@ -49,8 +60,76 @@ internal sealed class MorphAtlas( BackendDevice device )
 	bool generated;
 	BackendTexture texture;
 
-	/// <summary>The atlas, made the first time anything morphs.</summary>
-	public BackendTexture Texture => texture ??= (BackendTexture)device.CreateTexture( new TextureDesc { Width = Width, Height = Height, Depth = 1, Mips = 1, Samples = 1, Format = TextureFormat.RGBA16161616F, RenderTarget = true }, "Borealis composite morph atlas" );
+	// The tallest atlas the generations since the last resize needed, how many there were, and the frame of the last
+	int tallestNeeded, generations;
+	uint lastGenerated;
+
+	/// <summary>The atlas, made the first time anything morphs (<see cref="Fit"/>).</summary>
+	public BackendTexture Texture => texture ??= Make( MinHeight );
+
+	/// <summary>Texels down the atlas now.</summary>
+	int Height => texture?.Height ?? MinHeight;
+
+	BackendTexture Make( int height ) => (BackendTexture)device.CreateTexture( new TextureDesc { Width = Width, Height = height, Depth = 1, Mips = 1, Samples = 1, Format = TextureFormat.RGBA16161616F, RenderTarget = true }, "Borealis composite morph atlas" );
+
+	/// <summary>
+	/// Before the queued meshes are generated, on the frame's setup context and before any skinning dispatch binds the atlas:
+	/// place them and make the atlas as tall as they need (a power of two, from <see cref="MinHeight"/> up to
+	/// <see cref="MaxHeight"/>): taller at once when they don't fit, shorter once <see cref="ShrinkGenerations"/> generations
+	/// have needed less. The atlas.
+	/// </summary>
+	public BackendTexture Fit()
+	{
+		lock ( queued )
+		{
+			if ( generated || queued.Count == 0 ) return Texture;
+
+			var needed = (int)Math.Min( System.Numerics.BitOperations.RoundUpToPowerOf2( (uint)Math.Max( Place( MaxHeight ), MinHeight ) ), MaxHeight );
+			tallestNeeded = Math.Max( tallestNeeded, needed );
+			generations++;
+			lastGenerated = device.GpuDrivenFrame;
+			if ( texture is null || texture.Height < needed || generations >= ShrinkGenerations && tallestNeeded < texture.Height ) Resize( tallestNeeded );
+			else if ( generations >= ShrinkGenerations ) (tallestNeeded, generations) = (needed, 0);
+			return texture;
+		}
+	}
+
+	/// <summary>Remade this tall: the old one is destroyed once the GPU is done with it.</summary>
+	void Resize( int height )
+	{
+		var start = System.Diagnostics.Stopwatch.GetTimestamp();
+		texture?.Dispose();
+		texture = Make( height );
+		(tallestNeeded, generations) = (0, 0);
+		Resized++;
+		LongestResize = Math.Max( LongestResize, System.Diagnostics.Stopwatch.GetElapsedTime( start ).TotalMilliseconds );
+	}
+
+	/// <summary>Times the atlas was made at another height, and the longest that took in milliseconds, for tests and reports.</summary>
+	public int Resized { get; private set; }
+	public double LongestResize { get; private set; }
+
+	/// <summary>Device frames since anything morphed, for reports.</summary>
+	public uint IdleFor => device.GpuDrivenFrame - lastGenerated;
+
+	/// <summary>At the start of a device frame: the atlas freed once nothing has morphed for <see cref="IdleFrames"/>.</summary>
+	public void BeginFrame()
+	{
+		if ( texture is null || device.GpuDrivenFrame - lastGenerated < IdleFrames ) return;
+		lock ( queued )
+		{
+			texture.Dispose();
+			texture = null;
+			(tallestNeeded, generations) = (0, 0);
+			Freed++;
+		}
+	}
+
+	/// <summary>Times the atlas was freed with nothing morphing, for tests.</summary>
+	public int Freed { get; private set; }
+
+	/// <summary>Texels down the atlas, 0 while there's none, for reports.</summary>
+	public int MadeHeight => texture?.Height ?? 0;
 
 	/// <summary>Meshes queued and not yet generated.</summary>
 	public bool Pending
@@ -110,9 +189,10 @@ internal sealed class MorphAtlas( BackendDevice device )
 
 	/// <summary>
 	/// Place every queued mesh's rectangle, a row at a time below a black texel at the corner, as native's packing does
-	/// (<c>PackChartsIntoAtlas</c>; the places differ, the result doesn't). One that doesn't fit gets the black texel.
+	/// (<c>PackChartsIntoAtlas</c>; the places differ, the result doesn't), in an atlas <paramref name="height"/> texels down.
+	/// One that doesn't fit gets the black texel. Returns the texels down the placed rectangles reach.
 	/// </summary>
-	void Place()
+	int Place( int height )
 	{
 		int x = Gutter, y = Gutter, row = 0;
 		foreach ( var q in queued )
@@ -126,7 +206,7 @@ internal sealed class MorphAtlas( BackendDevice device )
 				row = 0;
 			}
 
-			if ( x + w > LogicalWidth || y + h > Height )
+			if ( x + w > LogicalWidth || y + h > height )
 			{
 				(q.X, q.Y, q.W, q.H) = (0, 0, 1, 1);
 				continue;
@@ -136,6 +216,8 @@ internal sealed class MorphAtlas( BackendDevice device )
 			x += w;
 			row = Math.Max( row, h );
 		}
+
+		return y + row;
 	}
 
 	/// <summary>One composite vertex (<c>MorphNormalWrinkleVertex_t</c>): both passes read it, the first only part of it.</summary>
@@ -172,7 +254,7 @@ internal sealed class MorphAtlas( BackendDevice device )
 		{
 			if ( generated || queued.Count == 0 ) return false;
 			generated = true;
-			Place();
+			Place( Height );
 
 			// Six vertices a rectangle (two triangles, as native's quads index them), every rectangle of every weighted morph;
 			// the list is kept from frame to frame, as faces morph every frame

@@ -276,6 +276,19 @@ internal sealed partial class BackendContext : GpuContext
 		return planned && plannedLayouts.TryGetValue( texture, out layout );
 	}
 
+	/// <summary>
+	/// With a plan, for a texture it doesn't name (the shape didn't use it last time: a point light's shadow map drawn every
+	/// few frames, as the maps drawn rotate): where the last submitted list left it, which the lists before this one most
+	/// often leave alone. Not a texture with no layout yet, whose first use records what it needs, nor the swap chain's.
+	/// A wrong guess costs a fix-up, as no guess does.
+	/// </summary>
+	bool UnplannedLayout( BackendTexture texture, out ImageLayout layout )
+	{
+		layout = texture.Layout;
+		var plans = lender is not null ? lender.planned : planned;
+		return plans && layout is not (ImageLayout.Undefined or ImageLayout.Present);
+	}
+
 	// The context whose list this one records into (Begin's shared), or null
 	BackendContext lender;
 
@@ -757,7 +770,7 @@ internal sealed partial class BackendContext : GpuContext
 		var known = default( (ImageLayout First, ImageLayout Current) );
 		if ( local is not null && !local.TryGetValue( texture, out known ) )
 		{
-			if ( !PlannedLayout( texture, out var planned ) )
+			if ( !PlannedLayout( texture, out var planned ) && !UnplannedLayout( texture, out planned ) )
 			{
 				local[texture] = (layout, layout);
 				return false;

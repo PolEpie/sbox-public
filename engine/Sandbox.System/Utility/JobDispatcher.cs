@@ -385,9 +385,23 @@ internal static class JobDispatcher
 		static readonly Lazy<Semaphore> semaphore = new( Start );
 
 		/// <summary>
-		/// How many worker threads there are.
+		/// How many worker threads there are: one fewer than there are cores, or two fewer with a render thread
+		/// (<see cref="ReserveForRenderThread"/>), so the main thread, the render thread and the workers each have a core.
 		/// </summary>
-		public static readonly int Count = Math.Max( 0, Environment.ProcessorCount - 1 );
+		public static int Count { get; private set; } = Math.Max( 0, Environment.ProcessorCount - 1 );
+
+		static bool reserved;
+
+		/// <summary>
+		/// Leave a core for a render thread: one worker fewer. Before the workers start (the first job), one fewer starts;
+		/// after, no job is given more than <see cref="Count"/> of them.
+		/// </summary>
+		internal static void ReserveForRenderThread()
+		{
+			if ( reserved ) return;
+			reserved = true;
+			Count = Math.Max( 0, Count - 1 );
+		}
 
 		/// <summary>
 		/// Whether the workers sleep on the runtime's own LIFO semaphore rather than the fallback.

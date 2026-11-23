@@ -387,7 +387,7 @@ internal sealed partial class BackendContext
 			var listing = work.Lists || meshlets;
 			var layout = ResidentRegion( plan, ids, listing, work.HiZ );
 			var region = data.Slice( at, layout.Bytes );
-			var (compacted, compacted16) = meshlets ? MeshletCompacted( work.Visibility ) : work.Visibility is { } own ? (own.Compacted[frame % own.Compacted.Length], default) : default;
+			var (compacted, compacted16) = meshlets ? MeshletCompacted( work.Visibility ) : work.Visibility is { } own ? (own.Compacted, default) : default;
 			var regionOffset = offset + at;
 
 			var runWords = plan.ResidentRunWords ??= ResidentRunWords( plan );
@@ -635,7 +635,7 @@ internal sealed partial class BackendContext
 		var frame = device.GpuDrivenFrame;
 		if ( device.ResidentCulls.Take( cull.View, plan, frame ) is not { } assignment ) return false;
 		if ( (ids || lists) && (!ReferenceEquals( assignment.Visibility, visibility ) || assignment.Stamps != visibility.Stamps) ) return false;
-		if ( lists && assignment.Region.Compacted != visibility.Compacted[frame % visibility.Compacted.Length] ) return false;
+		if ( lists && assignment.Region.Compacted != visibility.Compacted ) return false;
 
 		var start = device.TimeDraws ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
 		var r = recording;

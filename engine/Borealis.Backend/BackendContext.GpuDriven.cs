@@ -730,7 +730,7 @@ internal sealed partial class BackendContext
 		var (frameBuffer, frameSlot, frameOffset) = tables.Allocate( frameBytes );
 		var data = Gpu.Map( frameBuffer ).Slice( (int)frameOffset, frameBytes );
 		var firstInstance = (uint)((frameOffset + instanceOffset) / GpuDrivenTables.InstanceStride);
-		var (compacted, compacted16) = lists ? (visibility.Compacted[device.GpuDrivenFrame % visibility.Compacted.Length], default) : meshlets ? MeshletCompacted( visibility ) : default;
+		var (compacted, compacted16) = lists ? (visibility.Compacted, default) : meshlets ? MeshletCompacted( visibility ) : default;
 
 		if ( listing )
 		{
@@ -1139,7 +1139,7 @@ internal sealed partial class BackendContext
 		{
 			cullAttributes.Set( "BorealisCullStamps", visibility.Stamps );
 			cullAttributes.Set( "BorealisCullMask", visibility.Mask );
-			cullAttributes.Set( "BorealisCullCompacted", lists ? compacted : visibility.Compacted[0] );
+			cullAttributes.Set( "BorealisCullCompacted", lists ? compacted : visibility.Compacted );
 			cullAttributes.Set( "BorealisHiZVisible", hizBits ? visibility.HiZVisible[visibility.HiZCurrent] : visibility.Stamps );
 			if ( MeshletStampsReady( visibility ) )
 			{
@@ -1483,7 +1483,12 @@ internal sealed partial class BackendContext
 		var shaders = compact && device.GpuDrivenVisibility && cull.View is not null && (cull.Ids || cull.Visibility) ? device.GpuDrivenVisibilityShaders : default;
 		var visibility = shaders.Mark is not null && shaders.Compact is not null && r.Depth is not null ? device.VisibilityFor( cull.View, Gpu.InfoOf( r.Depth.Handle ) ) : null;
 		var ready = visibility is not null && visibility.ClearedFrame == device.GpuDrivenFrame;
-		return (compact, shaders, visibility, ready && cull.Ids && r.Color is null, ready && cull.Visibility);
+
+		// A prepass draws ids once the view's ids targets are there, which only prepasses that draw ids ask for
+		var ids = visibility is not null && cull.Ids && r.Color is null && device.IdsTargetsFor( visibility ) && ready;
+		var lists = ready && cull.Visibility;
+		if ( lists ) visibility.ListsFrame = visibility.ClearedFrame;
+		return (compact, shaders, visibility, ids, lists);
 	}
 
 	/// <summary>
@@ -1777,6 +1782,9 @@ internal sealed partial class BackendContext
 		if ( !GpuDriven || !device.GpuDrivenVisibility || recording is null || device.ExistingVisibility( view ) is not { } visibility ) return;
 		var frame = device.GpuDrivenFrame;
 		if ( visibility.ClearedFrame == frame ) return;
+
+		// Ids targets a prepass asked for, in place before this frame's calls and cleared below with the rest
+		device.PrepareIdsTargets( visibility );
 		visibility.ClearedFrame = frame;
 
 		var tables = device.GpuDrivenTables;
@@ -1804,7 +1812,7 @@ internal sealed partial class BackendContext
 
 		// Normals from the ids: cleared once a frame instead of by each call, so they end holding every call's, readable as a
 		// call's mark leaves them; and the table of the calls that draw them
-		if ( device.IdsNormals && visibility.Ids.IsValid && visibility.IdsCalls.IsValid )
+		if ( device.IdsNormals && visibility.IdsReady && visibility.IdsCalls.IsValid )
 		{
 			r.List.Barrier( Borealis.Gpu.TextureBarrier.Transition( visibility.Ids, ImageLayout.Undefined, ImageLayout.CopyDestination, PipelineStage.AllCommands, MemoryAccess.None, PipelineStage.Transfer, MemoryAccess.TransferWrite ) );
 			r.List.ClearTexture( visibility.Ids );
@@ -1814,7 +1822,7 @@ internal sealed partial class BackendContext
 		}
 
 		// This frame's compacted buffer's cursor, past itself: the forward pass's calls take their triangles' ranges from it
-		r.List.FillBuffer( visibility.Compacted[frame % visibility.Compacted.Length], BackendDevice.VisibilityView.CompactedCursorIndices, 0, 4 );
+		r.List.FillBuffer( visibility.Compacted, BackendDevice.VisibilityView.CompactedCursorIndices, 0, 4 );
 		if ( visibility.PrepassCompacted.IsValid )
 		{
 			r.List.FillBuffer( visibility.PrepassCompacted, BackendDevice.VisibilityView.CompactedCursorIndices, 0, 4 );

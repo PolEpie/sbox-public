@@ -10,8 +10,8 @@ namespace Borealis.Backend;
 /// <summary>
 /// Writes <see cref="GraphMeasure"/>'s files into its folder, at the start of a device frame: <c>summary.tsv</c>, a line
 /// every <see cref="GraphMeasure.Every"/> frames with the totals since the last per frame (planning, layout tracking, barrier
-/// calls and what they order); and for each listed frame <c>uses-N.tsv</c> (its texture uses in submission order) and
-/// <c>resources-N.tsv</c> (every live texture and buffer).
+/// calls and what they order); and for each listed frame <c>uses-N.tsv</c> (its texture uses in submission order),
+/// <c>resources-N.tsv</c> (every live texture and buffer) and <c>views-N.tsv</c> (the views' visibility sets and the morph atlas).
 /// </summary>
 internal static class GraphMeasureReport
 {
@@ -20,13 +20,13 @@ internal static class GraphMeasureReport
 	static long lastBarrierTicks;
 	static double pairTicks = -1;
 
-	public static void BeginFrame( Device gpu )
+	public static void BeginFrame( Device gpu, BackendDevice device )
 	{
 		if ( !GraphMeasure.Enabled ) return;
 		if ( pairTicks < 0 ) Start( gpu );
 
 		var listed = GraphMeasure.BeginFrame();
-		if ( listed is not null ) WriteFrame( gpu, listed, GraphMeasure.Frame - 1 );
+		if ( listed is not null ) WriteFrame( gpu, device, listed, GraphMeasure.Frame - 1 );
 		if ( GraphMeasure.Frame % GraphMeasure.Every == 0 ) WriteSummary( gpu );
 	}
 
@@ -86,7 +86,7 @@ internal static class GraphMeasureReport
 
 	static string Join( params object[] values ) => string.Join( '\t', values.Select( v => v is IFormattable f ? f.ToString( null, CultureInfo.InvariantCulture ) : v?.ToString() ) );
 
-	static void WriteFrame( Device gpu, List<GraphMeasure.Use> uses, long frame )
+	static void WriteFrame( Device gpu, BackendDevice device, List<GraphMeasure.Use> uses, long frame )
 	{
 		// Submission order: by each use's list, then where in it
 		static long Submitted( object list ) => list is CommandList l && l.SubmitOrder > 0 ? l.SubmitOrder : long.MaxValue;
@@ -109,5 +109,6 @@ internal static class GraphMeasureReport
 			res.Append( CultureInfo.InvariantCulture, $"buffer\t{handle.Index}\t{handle.Generation}\t{name}\t\t\t\t\t\t\t\t{usage}\t{bytes}\t{size}\t{location}\n" );
 
 		File.WriteAllText( Path.Combine( GraphMeasure.Folder, $"resources-{frame}.tsv" ), res.ToString() );
+		File.WriteAllText( Path.Combine( GraphMeasure.Folder, $"views-{frame}.tsv" ), device.VisibilityViewsReport() + device.MorphReport() );
 	}
 }

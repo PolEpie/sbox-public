@@ -158,6 +158,49 @@ public class SdlWindowTests
 		Assert.AreEqual( 0, errors.Count, "Validation errors:\n" + string.Join( "\n", errors.Take( 10 ) ) );
 	}
 
+	/// <summary>
+	/// Several frames acquired and presented in one device frame, as the game window does when it presents its last frame
+	/// again while the game is busy: each acquire takes a semaphore no pending acquire or submission holds, so validation sees
+	/// no semaphore reused while in use, and only a few are made.
+	/// </summary>
+	[TestMethod]
+	public void SeveralPresentsInOneDeviceFrameReuseNoSemaphoreInUse()
+	{
+		if ( !SdlLibrary.IsAvailable ) Assert.Inconclusive( "No SDL3 library" );
+		if ( !Device.IsSupported ) Assert.Inconclusive( "No Vulkan loader is installed" );
+		if ( !Sdl.TryInit( out var error ) ) Assert.Inconclusive( error );
+
+		var errors = new List<string>();
+		try
+		{
+			using var window = new SdlWindow( new SdlWindowOptions { Title = "Borealis.Sdl test", Width = 320, Height = 240, Hidden = true } );
+			using ( var device = CreateDevice( Sdl.VulkanInstanceExtensions, errors ) )
+			{
+				using ( var swapChain = device.CreateSwapChain( new SwapChainInfo { Surface = SurfaceSource.Custom( window.CreateVulkanSurface ), Width = 320, Height = 240, PresentMode = PresentMode.Immediate } ) )
+				{
+					swapChain.PresentOnThread = true;
+					device.BeginFrame();
+					var frame = device.FrameNumber;
+					for ( int i = 0; i < 12; i++ ) PresentInThisFrame( device, swapChain, new Vector4( i % 2, 0, 1, 1 ) );
+					Assert.AreEqual( frame, device.FrameNumber, "every present in the one device frame" );
+					Assert.IsTrue( swapChain.AcquireSemaphoreCount <= device.FramesInFlight + swapChain.ImageCount, $"{swapChain.AcquireSemaphoreCount} acquire semaphores made" );
+
+					// And frames go on as before
+					for ( int i = 0; i < 4; i++ ) Present( device, swapChain, new Vector4( 0, 1, 0, 1 ) );
+				}
+
+				device.WaitIdle();
+				Assert.IsFalse( device.IsLost );
+			}
+		}
+		finally
+		{
+			Sdl.Quit();
+		}
+
+		Assert.AreEqual( 0, errors.Count, "Validation errors:\n" + string.Join( "\n", errors.Take( 10 ) ) );
+	}
+
 	/// <summary>A presenting device with SDL's instance extensions and validation on; inconclusive without one.</summary>
 	static Device CreateDevice( IReadOnlyList<string> extensions, List<string> errors )
 	{
@@ -184,6 +227,11 @@ public class SdlWindowTests
 	static void Present( Device device, SwapChain swapChain, Vector4 color )
 	{
 		device.BeginFrame();
+		PresentInThisFrame( device, swapChain, color );
+	}
+
+	static void PresentInThisFrame( Device device, SwapChain swapChain, Vector4 color )
+	{
 		Assert.IsTrue( swapChain.Acquire( out var image ), "No image to draw into" );
 
 		var list = device.BeginCommandList( QueueType.Graphics, "Clear window" );
