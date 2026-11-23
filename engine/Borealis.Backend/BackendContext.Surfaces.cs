@@ -596,6 +596,9 @@ internal sealed partial class BackendContext
 		public readonly int[] Bound;
 		public readonly StringToken[] Tokens;
 
+		/// <summary>Per bound member, the <see cref="AttributeIds"/> id of its attribute.</summary>
+		public readonly int[] Ids;
+
 		public SurfaceGlobalsLayout( GlobalConstants globals )
 		{
 			Defaults = new byte[Math.Max( globals.Size, 16 )];
@@ -609,7 +612,12 @@ internal sealed partial class BackendContext
 
 			Bound = [.. bound];
 			Tokens = new StringToken[Bound.Length];
-			for ( int i = 0; i < Bound.Length; i++ ) Tokens[i] = Token( globals.Members[Bound[i]].Attribute );
+			Ids = new int[Bound.Length];
+			for ( int i = 0; i < Bound.Length; i++ )
+			{
+				Tokens[i] = Token( globals.Members[Bound[i]].Attribute );
+				Ids[i] = AttributeIds.Of( globals.Members[Bound[i]].Attribute );
+			}
 		}
 
 		public static void Write( Span<byte> data, GlobalMember member, ReadOnlySpan<float> value )

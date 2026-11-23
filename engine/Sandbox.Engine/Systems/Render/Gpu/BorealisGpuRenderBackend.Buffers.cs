@@ -95,19 +95,14 @@ internal sealed partial class BorealisGpuRenderBackend
 		return buffer.Usage.HasFlag( GpuBuffer.UsageFlags.Append ) ? CounterOf( buffer ) : null;
 	}
 
-	// Counters' attribute ids by their buffer's attribute id
-	readonly Dictionary<int, int> counterIds = new();
 
-	/// <summary>
-	/// Set a buffer and, when it has one, its hidden counter (<see cref="ShaderResource.CounterName"/>) under <paramref name="name"/>
-	/// (attribute id <paramref name="id"/>), hashing no names once each has been seen.
-	/// </summary>
-	void LowerBuffer( int id, string name, GpuBuffer buffer, Borealis.Backend.ShaderAttributes lowered )
+	/// <summary>Set a buffer and, when it has one, its hidden counter (<see cref="ShaderResource.CounterName"/>) under <paramref name="binding"/>'s name.</summary>
+	void LowerBuffer( TokenBinding binding, GpuBuffer buffer, Borealis.Backend.ShaderAttributes lowered )
 	{
-		lowered.SetById( id, BufferOf( buffer ) );
+		lowered.SetById( binding.Id, BufferOf( buffer ) );
 		if ( BoundCounter( buffer ) is not { } counter ) return;
-		if ( !counterIds.TryGetValue( id, out var counterId ) ) counterIds[id] = counterId = AttributeIds.Of( ShaderResource.CounterName( name ) );
-		lowered.SetById( counterId, counter );
+		if ( binding.CounterId < 0 ) binding.CounterId = AttributeIds.Of( ShaderResource.CounterName( binding.Name ) );
+		lowered.SetById( binding.CounterId, counter );
 	}
 
 	void ForgetCounter( GpuBuffer buffer )

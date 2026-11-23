@@ -564,6 +564,8 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 		pendingShader = null;
 		blockAttributes = null;
 		reusedBlockAttributes = null;
+		drawer.ReleasePass();
+		ReleaseModelAttributes();
 		ReleaseSheets();
 	}
 
@@ -1705,9 +1707,26 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 
 	readonly ConditionalWeakTable<Material, ShaderName> shaderNames = new();
 
+	// Last few materials drawn with: a draw looks its material up first
+	readonly Material[] nameKeys = new Material[4];
+	readonly ShaderName[] nameValues = new ShaderName[4];
+	int nameNext;
+
 	ShaderFile ShaderOf( Material material )
 	{
-		var name = shaderNames.GetOrCreateValue( material );
+		ShaderName name = null;
+		for ( int i = 0; i < nameKeys.Length; i++ )
+		{
+			if ( ReferenceEquals( nameKeys[i], material ) ) { name = nameValues[i]; break; }
+		}
+
+		if ( name is null )
+		{
+			name = shaderNames.GetOrCreateValue( material );
+			(nameKeys[nameNext], nameValues[nameNext]) = (material, name);
+			nameNext = (nameNext + 1) & 3;
+		}
+
 		if ( name.ShaderVersion != material.ShaderVersion )
 		{
 			// As code gave it, else as its compiled file names it; the material system only for one with no file of ours to
@@ -1738,6 +1757,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 		shader = drawer.Shaders.Load( file ) ?? (file.StartsWith( "shaders/", StringComparison.OrdinalIgnoreCase ) ? null : drawer.Shaders.Load( "shaders/" + file ));
 		shaders[path] = shader;
 		if ( shader is not null ) AddNames( shader );
+		(name.Shader, name.Loaded) = (shader, shadersVersion);
 		return shader;
 	}
 
@@ -1816,13 +1836,20 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 
 	string Name( uint token ) => names.TryGetValue( token, out var name ) ? name : StringToken.GetValue( token );
 
-	// Attribute ids by token, so lowering a draw's attributes hashes no names
-	readonly Dictionary<uint, int> attributeIds = new();
-
-	int AttributeId( uint token, string name )
+	// Lowering a token's value: its name, attribute id (no per-draw hashing) and its buffer's hidden counter id (-1 until lowered)
+	sealed class TokenBinding( string name, int id )
 	{
-		if ( attributeIds.TryGetValue( token, out var id ) ) return id;
-		return attributeIds[token] = AttributeIds.Of( name );
+		public readonly string Name = name;
+		public readonly int Id = id;
+		public int CounterId = -1;
+	}
+
+	readonly Dictionary<uint, TokenBinding> tokenBindings = new();
+
+	TokenBinding BindingOf( uint token )
+	{
+		if ( tokenBindings.TryGetValue( token, out var known ) ) return known;
+		return Name( token ) is { } name ? tokenBindings[token] = new TokenBinding( name, AttributeIds.Of( name ) ) : null;
 	}
 
 	// Whether the attributes being lowered are a dispatch's (LowerForDispatch)
@@ -1858,7 +1885,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 		// A lent frame's transforms under everything, then a draw's attributes over the block's: a post process's blit reads
 		// the frame grab its command list set on the block. The block's lowered set shows through under the draw's, not copied
 		if ( blockAttributes?.Managed is { } block && !ReferenceEquals( block, attributes.Managed ) ) lowered.Under = LoweredBlock( block );
-		else if ( lentTransforms.IsValid ) lowered.Set( "g_TransformBuffer", lentTransforms );
+		else if ( lentTransforms.IsValid ) lowered.SetById( TransformBufferId, lentTransforms );
 		Lower( attributes.Managed );
 		return lowered;
 	}
@@ -1876,7 +1903,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 		if ( loweredBlockKey == key ) return loweredBlock;
 
 		loweredBlock.Clear();
-		if ( lentTransforms.IsValid ) loweredBlock.Set( "g_TransformBuffer", lentTransforms );
+		if ( lentTransforms.IsValid ) loweredBlock.SetById( TransformBufferId, lentTransforms );
 		Lower( block, loweredBlock );
 
 		// Lowering may make backings (a texture's first use, an append buffer's counter): keyed after them
@@ -1890,30 +1917,24 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	{
 		foreach ( var (token, value) in managed.Values )
 		{
-			if ( Name( token ) is not { } name ) continue;
-			switch ( value )
+			if ( value is null || BindingOf( token ) is not { } binding ) continue;
+
+			// Exact types first: a pattern switch over arrays and classes goes through cast helpers per value
+			var type = value.GetType();
+			if ( type == typeof( float[] ) || type == typeof( byte[] ) ) lowered.SetById( binding.Id, value );
+			else if ( type == typeof( ManagedRenderAttributes.TextureValue ) )
 			{
-				case float[] floats:
-					lowered.SetById( AttributeId( token, name ), floats );
-					break;
-				case ManagedRenderAttributes.TextureValue { Texture: { } texture, Mip: < 0 }:
-					lowered.SetById( AttributeId( token, name ), BoundTextureOf( texture ) );
-					break;
-				case ManagedRenderAttributes.TextureValue { Texture: { } texture, Mip: var mip }:
-					lowered.SetById( AttributeId( token, name ), context.View( BoundTextureOf( texture ), mip ) );
-					break;
-				case GpuBuffer buffer:
-					LowerBuffer( AttributeId( token, name ), name, buffer, lowered );
-					break;
-				case byte[] data:
-					lowered.SetById( AttributeId( token, name ), data );
-					break;
+				var (texture, mip) = (ManagedRenderAttributes.TextureValue)value;
+				if ( texture is null ) continue;
+				if ( mip < 0 ) lowered.SetById( binding.Id, BoundTextureOf( texture ) );
+				else lowered.SetById( binding.Id, context.View( BoundTextureOf( texture ), mip ) );
 			}
+			else if ( value is GpuBuffer buffer ) LowerBuffer( binding, buffer, lowered );
 		}
 
 		foreach ( var (token, value) in managed.Combos )
 		{
-			if ( Name( token ) is { } name ) lowered.SetCombo( name, value );
+			if ( BindingOf( token ) is { } binding ) lowered.SetComboById( binding.Id, value );
 		}
 	}
 
@@ -1925,31 +1946,27 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	/// A copy reads its original's file and a material made in code its shader's defaults (<see cref="Material.MadeFromShader"/>),
 	/// with what code set on it (<see cref="Material.SetInCode"/>) over them.
 	/// </summary>
-	ShaderFile Prepare( Material material )
+	ShaderFile Prepare( Material material ) => Prepare( material, Require( material ) );
+
+	ShaderFile Prepare( Material material, ShaderFile shader )
 	{
 		// The shader by the material's name, which also learns the names its attributes lower to; the file's values only
 		// when it names the same shader
-		var shader = Require( material );
 		var values = MaterialValues ? MaterialFile( material ) : null;
 		drawer.Material = values is not null && ReferenceEquals( values.Shader, shader ) ? values : null;
 		return shader;
 	}
 
-	/// <summary>
-	/// What a draw with <paramref name="material"/> draws with: its shader (prepared as <see cref="Prepare"/> does), or, for a
-	/// material whose shader has no compiled <c>.shader</c> (one a surface alone stands for: standard, and complex for it;
-	/// skin, glass), the surface material its scene draws use, with what code set on it. A surface's module where the
-	/// <c>.shader_c</c> would be (<c>vertex_color.slang</c>) describes a shader with no stages to draw: that's a surface alone
-	/// too. Throws as <see cref="Require"/> when it has neither.
-	/// </summary>
+	/// <summary>The shader to draw <paramref name="material"/> with, or for a surface-only material the scene's surface material. Throws as <see cref="Require"/> when it has neither.</summary>
 	(ShaderFile Shader, SurfaceMaterial Surface) PrepareDraw( Material material )
 	{
-		if ( ShaderOf( material ) is not { } shader || shader[global::Borealis.Source2.Shaders.ShaderProgramType.Vertex] is null )
+		var shader = ShaderOf( material );
+		if ( shader is null || shader[global::Borealis.Source2.Shaders.ShaderProgramType.Vertex] is null )
 		{
 			if ( SurfaceOf( material ) is { } surface ) return (null, surface);
 		}
 
-		return (Prepare( material ), null);
+		return (shader is null ? Prepare( material ) : Prepare( material, shader ), null);
 	}
 
 	/// <summary>
@@ -1976,11 +1993,26 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	}
 
 	readonly ConditionalWeakTable<Material, MaterialBacking> materialFiles = new();
+	readonly Material[] backingKeys = new Material[4];
+	readonly MaterialBacking[] backingValues = new MaterialBacking[4];
+	int backingNext;
 
 	BackendMaterial MaterialFile( Material material )
 	{
 		if ( material is null ) return null;
-		if ( materialFiles.TryGetValue( material, out var known ) )
+		MaterialBacking known = null;
+		for ( int i = 0; i < backingKeys.Length; i++ )
+		{
+			if ( ReferenceEquals( backingKeys[i], material ) ) { known = backingValues[i]; break; }
+		}
+
+		if ( known is null && materialFiles.TryGetValue( material, out known ) )
+		{
+			(backingKeys[backingNext], backingValues[backingNext]) = (material, known);
+			backingNext = (backingNext + 1) & 3;
+		}
+
+		if ( known is not null )
 		{
 			// Code set more on it since: its own copy of the file takes the new values and features
 			if ( known.Version != material.SetInCodeVersion && known.File is not null )
@@ -2143,8 +2175,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 		var (shader, surface) = PrepareDraw( material );
 		var bytes = new ReadOnlySpan<byte>( (void*)vertices, vertexSize * vertexCount );
 		// CPU vertices hold plain normals and tangents, as a native view tells its draws (UncompressedTangentFrame)
-		var lowered = Lower( attributes );
-		if ( lowered.Get( UncompressedTangentFrame ) is null ) lowered.Set( UncompressedTangentFrame, 1.0f );
+		var lowered = LoweredForPending( attributes );
 		if ( indices == IntPtr.Zero )
 		{
 			if ( surface is not null ) context.DrawSurfaceVertices( surface, lowered, bytes, layout, vertexCount, Topology( primitiveType ) );

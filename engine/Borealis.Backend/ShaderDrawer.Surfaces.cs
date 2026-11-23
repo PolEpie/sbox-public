@@ -19,16 +19,16 @@ public sealed partial class ShaderDrawer
 	public bool DrawSurface( CommandList list, SurfaceMaterial material, ShaderAttributes attributes, Format color, Format depth, int samples, in GeometryDraw draw, System.Numerics.Vector4 viewport, string mode = null )
 	{
 		if ( device is null || material is null || draw.Layout is null || !draw.Vertices.IsValid ) return false;
-		if ( attributes.GetCombo( "D_CS_VERTEX_ANIMATION" ) is > 0 ) return false;
+		if ( attributes.GetCombo( VertexAnimationId ) is > 0 ) return false;
 		if ( device.Surfaces.For( material ) is not { } program ) return false;
 		var state = material.RenderState;
-		if ( SurfacePass( program, state, color, mode, attributes.GetCombo( "D_BAKED_LIGHTING_FROM_LIGHTMAP" ) is > 0 ) is not { } pass ) return false;
+		if ( SurfacePass( program, state, color, mode, attributes.GetCombo( LightmapId ) is > 0 ) is not { } pass ) return false;
 
 		var ids = InstanceIds.Buffer.IsValid;
 		var vertexConstants = SurfaceStageConstants( pass.Pass.Vertex, attributes, out var vertexKey );
 		ulong pixelKey = 0;
 		var pixelConstants = pass.Pass.Pixel is { } pixel ? SurfaceStageConstants( pixel, attributes, out pixelKey ) : null;
-		var fade = attributes.GetCombo( "D_OPAQUE_FADE" ) is > 0;
+		var fade = attributes.GetCombo( OpaqueFadeId ) is > 0;
 		var pipeline = program.ImmediatePipeline( pass, SurfaceLayoutOf( draw.Layout ), color, depth, samples, vertexConstants, pixelConstants, vertexKey * 31 + pixelKey, state, draw.Topology, ids, fade, ToolsPass );
 
 		if ( BackendDevice.DrawMarkers ) list.Marker( $"{material.Name} {pass.Pass.Name} (engine draw)" );
@@ -36,7 +36,7 @@ public sealed partial class ShaderDrawer
 		SetViewport( list, viewport );
 
 		var record = device.Surfaces.Records.Offset( material, out var records );
-		var tangent = attributes.Get( "UncompressedTangentFrame" ) is float[] { Length: > 0 } t && t[0] != 0;
+		var tangent = attributes.Get( TangentFrameId ) is float[] { Length: > 0 } t && t[0] != 0;
 		BindSurfaceStage( list, pass, pass.Pass.Vertex, ShaderAbi.VertexSet, attributes, records, tangent );
 		if ( pass.Pass.Pixel is not null ) BindSurfaceStage( list, pass, pass.Pass.Pixel, ShaderAbi.FragmentSet, attributes, records, tangent );
 		list.PushConstants( record );
@@ -95,11 +95,53 @@ public sealed partial class ShaderDrawer
 	/// A surface stage's specialization constants for a draw: each slot's attribute, else the dynamic combo of that name, else
 	/// its default, then the 3D skybox, where the pixel stage reads the record's offset, and fading, as scene draws make them.
 	/// </summary>
+	// Constants per stage and attribute values, kept for consecutive draws: their arrays key the pipeline and are costly to build
+	struct StageConstants
+	{
+		public CompiledStage Stage;
+		public ShaderAttributes Attributes;
+		public int Version;
+		public bool PerPixel;
+		public SpecializationConstant[] Constants;
+		public ulong Key;
+	}
+
+	readonly StageConstants[] stageConstants = new StageConstants[4];
+	int stageConstantsNext;
+	static readonly int VertexAnimationId = Borealis.Source2.Shaders.AttributeIds.Of( "D_CS_VERTEX_ANIMATION" );
+	static readonly int LightmapId = Borealis.Source2.Shaders.AttributeIds.Of( "D_BAKED_LIGHTING_FROM_LIGHTMAP" );
+	static readonly int OpaqueFadeId = Borealis.Source2.Shaders.AttributeIds.Of( "D_OPAQUE_FADE" );
+	static readonly int SkyboxComboId = Borealis.Source2.Shaders.AttributeIds.Of( "D_SKYBOX" );
+
 	SpecializationConstant[] SurfaceStageConstants( CompiledStage stage, ShaderAttributes attributes, out ulong key )
 	{
 		var perPixel = device.Surfaces.MaterialOffsetPerPixel;
-		var fade = attributes.GetCombo( "D_OPAQUE_FADE" ) is > 0;
-		var skybox = attributes.GetCombo( "D_SKYBOX" ) is > 0;
+		if ( attributes.Stable )
+		{
+			foreach ( ref var kept in stageConstants.AsSpan() )
+			{
+				if ( ReferenceEquals( kept.Stage, stage ) && ReferenceEquals( kept.Attributes, attributes ) && kept.Version == attributes.Version && kept.PerPixel == perPixel )
+				{
+					key = kept.Key;
+					return kept.Constants;
+				}
+			}
+		}
+
+		var made = MakeSurfaceStageConstants( stage, attributes, perPixel, out key );
+		if ( attributes.Stable )
+		{
+			stageConstants[stageConstantsNext] = new StageConstants { Stage = stage, Attributes = attributes, Version = attributes.Version, PerPixel = perPixel, Constants = made, Key = key };
+			stageConstantsNext = (stageConstantsNext + 1) & 3;
+		}
+
+		return made;
+	}
+
+	SpecializationConstant[] MakeSurfaceStageConstants( CompiledStage stage, ShaderAttributes attributes, bool perPixel, out ulong key )
+	{
+		var fade = attributes.GetCombo( OpaqueFadeId ) is > 0;
+		var skybox = attributes.GetCombo( SkyboxComboId ) is > 0;
 		key = (perPixel ? 1u : 2u) + (fade ? 4u : 0u) + (skybox ? 8u : 0u);
 
 		var constants = new SpecializationConstant[stage.Specializations.Count + 3];
@@ -127,19 +169,28 @@ public sealed partial class ShaderDrawer
 		if ( !pass.Sets[set].IsValid ) return;
 		Span<Binding> bindings = stackalloc Binding[64];
 		var count = 0;
-		foreach ( var b in stage.Bindings )
+		var kept = surfaceNames.GetValue( stage, static s =>
 		{
+			var ids = new int[s.Bindings.Count];
+			for ( int i = 0; i < ids.Length; i++ ) ids[i] = s.Bindings[i].Name is { } name ? Borealis.Source2.Shaders.AttributeIds.Of( name ) : -1;
+			return new StageBindingNames { Ids = ids, Samplers = new Binding?[ids.Length] };
+		} );
+		var names = kept.Ids;
+
+		for ( int i = 0; i < names.Length; i++ )
+		{
+			var b = stage.Bindings[i];
 			if ( b.Set != set ) continue;
 			if ( count == bindings.Length ) throw new InvalidOperationException( $"{stage.Entry} binds more than {bindings.Length} resources in set {set}" );
 			bindings[count++] = b.Kind switch
 			{
 				BindingKind.Globals => SurfaceGlobals( list, stage.Globals, b.Binding, attributes, tangent ),
 				BindingKind.MaterialRecords => Binding.Storage( b.Binding, records ),
-				BindingKind.ConstantBuffer => SurfaceConstantBuffer( list, b, attributes.Get( b.Name ) as byte[] ),
-				BindingKind.Buffer => Binding.Storage( b.Binding, attributes.Get( b.Name ) is BufferHandle { IsValid: true } buffer ? buffer : defaults.Storage ),
-				BindingKind.Sampler => Binding.SamplerState( b.Binding, defaults.Sampler( BackendContext.SurfaceSampler( b.Annotations ) ) ),
+				BindingKind.ConstantBuffer => SurfaceConstantBuffer( list, b, attributes.Get( names[i] ) as byte[] ),
+				BindingKind.Buffer => Binding.Storage( b.Binding, attributes.Get( names[i] ) is BufferHandle { IsValid: true } buffer ? buffer : defaults.Storage ),
+				BindingKind.Sampler => kept.Samplers[i] ??= Binding.SamplerState( b.Binding, defaults.Sampler( BackendContext.SurfaceSampler( b.Annotations ) ) ),
 				BindingKind.StorageTexture => Binding.StorageTexture( b.Binding, defaults.StorageTexture( BackendContext.Dimension( b.Shape ) ) ),
-				_ => attributes.Get( b.Name ) switch
+				_ => attributes.Get( names[i] ) switch
 				{
 					TextureHandle { IsValid: true } texture => Binding.Sampled( b.Binding, texture, (b.Annotations?.SrgbRead ?? false) && gpu.InfoOf( texture ).Format.HasSrgb() ),
 					TextureViewHandle { IsValid: true } view => Binding.Sampled( b.Binding, view ),
@@ -150,6 +201,16 @@ public sealed partial class ShaderDrawer
 
 		list.SetBindings( set, pass.Sets[set], bindings[..count] );
 	}
+
+	// The attribute ids of a stage's bindings, in order (-1 for one with no name), and the sampler bindings made for them
+	sealed class StageBindingNames
+	{
+		public int[] Ids;
+		public Binding?[] Samplers;
+	}
+
+	readonly ConditionalWeakTable<CompiledStage, StageBindingNames> surfaceNames = new();
+	static readonly int TangentFrameId = Borealis.Source2.Shaders.AttributeIds.Of( "UncompressedTangentFrame" );
 
 	Binding SurfaceConstantBuffer( CommandList list, ShaderBinding b, byte[] data )
 	{
@@ -173,15 +234,15 @@ public sealed partial class ShaderDrawer
 		var layout = BackendContext.GlobalLayouts.GetValue( globals, static g => new BackendContext.SurfaceGlobalsLayout( g ) );
 		layout.Defaults.AsSpan( 0, Math.Min( layout.Defaults.Length, size ) ).CopyTo( data );
 		Span<float> one = stackalloc float[1];
-		foreach ( var index in layout.Bound )
+		for ( int a = 0; a < layout.Bound.Length; a++ )
 		{
-			var member = globals.Members[index];
-			if ( member.Attribute == "UncompressedTangentFrame" )
+			var member = globals.Members[layout.Bound[a]];
+			if ( layout.Ids[a] == TangentFrameId )
 			{
 				one[0] = tangent ? 1 : 0;
 				BackendContext.SurfaceGlobalsLayout.Write( data, member, one );
 			}
-			else if ( attributes.Get( member.Attribute ) is float[] value )
+			else if ( attributes.Get( layout.Ids[a] ) is float[] value )
 			{
 				BackendContext.SurfaceGlobalsLayout.Write( data, member, value );
 			}

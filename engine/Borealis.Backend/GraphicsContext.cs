@@ -24,6 +24,16 @@ public sealed class GraphicsContext
 	readonly ShaderDrawer drawer;
 	readonly Dictionary<TextureHandle, ImageLayout> layouts = new();
 	readonly Dictionary<(TextureHandle Texture, int Mip), TextureViewHandle> mipViews = new();
+
+	// Bumped when a texture enters a layout other than ShaderRead; with readableSets (attributes BeginScope found fully readable, no targets among them) lets it skip rechecking
+	int layoutEpoch;
+	const int ReadableKept = 4;
+	readonly ShaderAttributes[] readableSets = new ShaderAttributes[ReadableKept];
+	readonly int[] readableRevisions = new int[ReadableKept], readableEpochs = new int[ReadableKept];
+	int readableNext;
+
+	Format targetFormat, depthFormat;
+	int targetSamples;
 	readonly List<TextureHandle> owned = new();
 	BufferHandle quadIndices;
 	bool rendering;
@@ -92,7 +102,7 @@ public sealed class GraphicsContext
 	public ImageLayout LayoutOf( TextureHandle texture ) => Layout( texture );
 
 	/// <summary>Say which layout a texture is in now, for textures made or used outside this context.</summary>
-	public void Track( TextureHandle texture, ImageLayout layout ) => layouts[texture] = layout;
+	public void Track( TextureHandle texture, ImageLayout layout ) => SetLayout( texture, layout );
 
 	/// <summary>
 	/// Before work recorded straight into <see cref="List"/> (a stretch blit, a vendor upscaler through
@@ -132,7 +142,7 @@ public sealed class GraphicsContext
 		info.Mips = Math.Max( mips, 1 );
 		info.Usage |= TextureUsage.Storage;
 		var texture = gpu.CreateTexture( info );
-		layouts[texture] = ImageLayout.Undefined;
+		SetLayout( texture, ImageLayout.Undefined );
 		owned.Add( texture );
 		return texture;
 	}
@@ -172,16 +182,19 @@ public sealed class GraphicsContext
 		SrgbWrite = srgb;
 		var info = gpu.InfoOf( texture.IsValid ? texture : depth );
 		Viewport = new Num.Vector4( 0, 0, info.Width, info.Height );
+		targetFormat = !texture.IsValid ? Format.Unknown : srgb ? info.Format.Srgb() : info.Format;
+		targetSamples = info.Samples;
+		depthFormat = depth.IsValid ? gpu.InfoOf( depth ).Format : Format.Unknown;
 	}
 
 	/// <summary>Whether the colour target is written through its sRGB view (<see cref="SetTarget(TextureHandle, TextureHandle, bool)"/>).</summary>
 	public bool SrgbWrite { get; private set; }
 
 	/// <summary>The colour target's format as drawing sees it: its sRGB twin while <see cref="SrgbWrite"/>; none for depth alone.</summary>
-	Format TargetFormat => !Target.IsValid ? Format.Unknown : SrgbWrite ? gpu.InfoOf( Target ).Format.Srgb() : gpu.InfoOf( Target ).Format;
+	Format TargetFormat => targetFormat;
 
 	/// <summary>The targets' samples: a multisampled frame's when drawing inside one (a camera's stage).</summary>
-	int TargetSamples => gpu.InfoOf( Target.IsValid ? Target : Depth ).Samples;
+	int TargetSamples => targetSamples;
 
 	/// <summary>Fill the whole target with <paramref name="color"/>. Nothing with depth alone bound.</summary>
 	public void Clear( Num.Vector4 color )
@@ -270,7 +283,7 @@ public sealed class GraphicsContext
 		Draws++;
 
 		// CPU vertices draw with the identity transform unless the draw sets its own, as native's do
-		if ( attributes.Get( TransformBufferName ) is null ) attributes.Set( TransformBufferName, IdentityTransform() );
+		if ( attributes.Get( TransformBufferId ) is null ) attributes.Set( TransformBufferName, IdentityTransform() );
 		return Drawn( attributes, drawer.Draw( List, shader, attributes, TargetFormat, depth, TargetSamples, upload.Buffer, upload.Offset, layout, count, topology, Viewport, mode ) );
 	}
 
@@ -284,7 +297,7 @@ public sealed class GraphicsContext
 		if ( !ModeOf( shader, out var mode ) || !HasTarget( shader ) ) return false;
 		var depth = BeginScope( shader, attributes, mode );
 		Draws++;
-		if ( attributes.Get( TransformBufferName ) is null ) attributes.Set( TransformBufferName, IdentityTransform() );
+		if ( attributes.Get( TransformBufferId ) is null ) attributes.Set( TransformBufferName, IdentityTransform() );
 		return Drawn( attributes, drawer.Draw( List, shader, attributes, TargetFormat, depth, TargetSamples, vertices, offset, layout, count, topology, Viewport, mode ) );
 	}
 
@@ -299,7 +312,7 @@ public sealed class GraphicsContext
 		if ( !ModeOf( shader, out var mode ) || !HasTarget( shader ) ) return false;
 		var depth = BeginScope( shader, attributes, mode );
 		Draws++;
-		if ( attributes.Get( TransformBufferName ) is null ) attributes.Set( TransformBufferName, IdentityTransform() );
+		if ( attributes.Get( TransformBufferId ) is null ) attributes.Set( TransformBufferName, IdentityTransform() );
 		return Drawn( attributes, drawer.DrawIndexed( List, shader, attributes, TargetFormat, depth, TargetSamples, vertices, layout, indices, firstIndex, indexCount, baseVertex, instances, Viewport, mode ) );
 	}
 
@@ -313,7 +326,7 @@ public sealed class GraphicsContext
 		if ( !ModeOf( shader, out var mode ) || !HasTarget( shader ) ) return false;
 		var depth = BeginScope( shader, attributes, mode );
 		Draws++;
-		if ( attributes.Get( TransformBufferName ) is null ) attributes.Set( TransformBufferName, IdentityTransform() );
+		if ( attributes.Get( TransformBufferId ) is null ) attributes.Set( TransformBufferName, IdentityTransform() );
 		return Drawn( attributes, drawer.Draw( List, shader, attributes, TargetFormat, depth, TargetSamples, draw, Viewport, mode ) );
 	}
 
@@ -327,7 +340,7 @@ public sealed class GraphicsContext
 	{
 		if ( !Target.IsValid && !Depth.IsValid ) return false;
 		var depth = BeginScope( material, attributes );
-		if ( attributes.Get( TransformBufferName ) is null ) attributes.Set( TransformBufferName, IdentityTransform() );
+		if ( attributes.Get( TransformBufferId ) is null ) attributes.Set( TransformBufferName, IdentityTransform() );
 		if ( !drawer.DrawSurface( List, material, attributes, TargetFormat, depth, TargetSamples, draw, Viewport, Mode ) ) return false;
 		Draws++;
 		return true;
@@ -415,7 +428,7 @@ public sealed class GraphicsContext
 			}
 
 			countDepth = gpu.CreateTexture( TextureInfo.RenderTarget( info.Width, info.Height, Format.D32Float, name: "Counted draws" ) );
-			layouts[countDepth] = ImageLayout.Undefined;
+			SetLayout( countDepth, ImageLayout.Undefined );
 			owned.Add( countDepth );
 		}
 
@@ -468,7 +481,7 @@ public sealed class GraphicsContext
 				}
 
 				resolvedTarget = gpu.CreateTexture( TextureInfo.RenderTarget( info.Width, info.Height, info.Format, name: "Resolved target" ) );
-				layouts[resolvedTarget] = ImageLayout.Undefined;
+				SetLayout( resolvedTarget, ImageLayout.Undefined );
 				owned.Add( resolvedTarget );
 			}
 
@@ -505,7 +518,7 @@ public sealed class GraphicsContext
 			}
 
 			targetCopy = gpu.CreateTexture( TextureInfo.RenderTarget( info.Width, info.Height, info.Format, name: "Sampled target" ) );
-			layouts[targetCopy] = ImageLayout.Undefined;
+			SetLayout( targetCopy, ImageLayout.Undefined );
 			owned.Add( targetCopy );
 		}
 
@@ -979,7 +992,7 @@ public sealed class GraphicsContext
 		var to = gpu.InfoOf( image );
 		EndScope();
 		Transition( source, ImageLayout.CopySource );
-		layouts[image] = ImageLayout.Undefined;
+		SetLayout( image, ImageLayout.Undefined );
 		Transition( image, ImageLayout.CopyDestination );
 		List.Blit( source, (0, 0, Math.Min( from.Width, to.Width ), Math.Min( from.Height, to.Height )), image, (0, 0, Math.Min( from.Width, to.Width ), Math.Min( from.Height, to.Height )), Filter.Nearest );
 		Transition( image, ImageLayout.Present );
@@ -1014,10 +1027,18 @@ public sealed class GraphicsContext
 		owned.Clear();
 		quadIndices = default;
 		identityTransform = default;
+		Array.Clear( readableSets );
+	}
+
+	/// <summary>Gives <paramref name="attributes"/> the identity transform unless they set one, as every draw does, so drawing doesn't change a kept set.</summary>
+	public void EnsureTransform( ShaderAttributes attributes )
+	{
+		if ( attributes.Get( TransformBufferId ) is null ) attributes.Set( TransformBufferName, IdentityTransform() );
 	}
 
 	BufferHandle identityTransform;
 	const string TransformBufferName = "g_TransformBuffer";
+	static readonly int TransformBufferId = AttributeIds.Of( TransformBufferName );
 
 	/// <summary>
 	/// One <c>TransformBufferData_t</c> holding the identity (a 3x4 matrix, alpha 1, white tint): the transform a shader that
@@ -1083,28 +1104,40 @@ public sealed class GraphicsContext
 
 		if ( dispatched.Count > 0 ) ReadableAfterDispatches( attributes );
 
-		foreach ( var (name, value) in attributes.Values )
+		var known = false;
+		for ( int i = 0; i < ReadableKept && !known; i++ ) known = ReferenceEquals( readableSets[i], attributes ) && readableRevisions[i] == attributes.Revision && readableEpochs[i] == layoutEpoch;
+		if ( !known )
 		{
-			if ( value is not TextureHandle texture || Layout( texture ) == ImageLayout.ShaderRead ) continue;
-
-			// The targets may be among the attributes (a post process's view colour and depth) without the shader reading them
-			if ( texture == Target || texture == Depth )
+			var targets = false;
+			foreach ( var (name, value) in attributes.Values )
 			{
-				if ( shader is null || !Reads( variant ?? drawer.Variant( shader, attributes, mode ), name ) ) continue;
+				if ( value is not TextureHandle texture || Layout( texture ) == ImageLayout.ShaderRead ) continue;
 
-				// A draw that samples the colour it draws into (a feedback effect: RUN IT AGAIN's menu, its last frame) reads it
-				// as it was before the draw: a copy stands in for it while it draws
-				if ( texture == Target )
+				if ( texture == Target || texture == Depth )
 				{
-					sampledTargets.Add( name );
-					continue;
+					targets = true;
+					if ( shader is null || !Reads( variant ?? drawer.Variant( shader, attributes, mode ), name ) ) continue;
+
+					// A draw sampling its own target (feedback effect) reads a copy of it from before the draw
+					if ( texture == Target )
+					{
+						sampledTargets.Add( name );
+						continue;
+					}
+
+					if ( depth != DepthUse.None ) throw new InvalidOperationException( $"{name} samples a target being drawn to." );
 				}
 
-				if ( depth != DepthUse.None ) throw new InvalidOperationException( $"{name} samples a target being drawn to." );
+				EndScope();
+				Transition( texture, ImageLayout.ShaderRead );
 			}
 
-			EndScope();
-			Transition( texture, ImageLayout.ShaderRead );
+			if ( !targets )
+			{
+				var slot = Array.IndexOf( readableSets, attributes );
+				if ( slot < 0 ) slot = readableNext++ % ReadableKept;
+				(readableSets[slot], readableRevisions[slot], readableEpochs[slot]) = (attributes, attributes.Revision, layoutEpoch);
+			}
 		}
 
 		if ( sampledTargets.Count > 0 )
@@ -1113,7 +1146,8 @@ public sealed class GraphicsContext
 			foreach ( var name in sampledTargets ) attributes.Set( name, copy );
 		}
 
-		if ( rendering && scopeDepth == depth ) return depth == DepthUse.None ? Format.Unknown : gpu.InfoOf( Depth ).Format;
+		// A depth-writing scope also takes depth-test-only draws, else opaque then blended draws would end the scope each time
+		if ( rendering && (scopeDepth == depth || scopeDepth == DepthUse.Write && depth == DepthUse.ReadOnly) ) return depth == DepthUse.None ? Format.Unknown : depthFormat;
 		EndScope();
 
 		var depthTarget = default( DepthTarget );
@@ -1131,7 +1165,7 @@ public sealed class GraphicsContext
 		else List.BeginRendering( [], depthTarget );
 		rendering = true;
 		scopeDepth = depth;
-		return depth == DepthUse.None ? Format.Unknown : gpu.InfoOf( Depth ).Format;
+		return depth == DepthUse.None ? Format.Unknown : depthFormat;
 	}
 
 	/// <summary>
@@ -1180,6 +1214,12 @@ public sealed class GraphicsContext
 
 	ImageLayout Layout( TextureHandle texture ) => layouts.TryGetValue( texture, out var layout ) ? layout : ImageLayout.ShaderRead;
 
+	void SetLayout( TextureHandle texture, ImageLayout layout )
+	{
+		layouts[texture] = layout;
+		if ( layout != ImageLayout.ShaderRead ) layoutEpoch++;
+	}
+
 	/// <summary>
 	/// <see cref="Transition"/> for a write: one already in <paramref name="layout"/> still waits for what wrote it last, as
 	/// two clears in a row must.
@@ -1225,7 +1265,7 @@ public sealed class GraphicsContext
 			MipCount = 0,
 			LayerCount = 0,
 		} );
-		layouts[texture] = layout;
+		SetLayout( texture, layout );
 	}
 
 	/// <summary>Four bytes, red first, for a vertex colour.</summary>

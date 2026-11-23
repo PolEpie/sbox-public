@@ -19,39 +19,66 @@ public sealed class ShaderAttributes
 	int[] stamps = [];
 	int generation = 1;
 	readonly List<int> set = new();
-	readonly Dictionary<string, int> combos = new( StringComparer.OrdinalIgnoreCase );
+	readonly Dictionary<int, int> combos = new();
+
+	// Arrays CopyValuesFrom owns per id, reused by the next copy
+	object[] copies = [];
+	int revision;
+
+	// Bumped on any change; external: a caller's own array is held and may change in place unseen
+	int version;
+	bool external;
 
 	// Values and combos that show through where this set has none of its own (Under)
 	ShaderAttributes under;
 
 	/// <summary>Constants: a number, a vector or a matrix, as floats.</summary>
-	public void Set( string name, params float[] value ) => Put( AttributeIds.Of( name ), value );
+	public void Set( string name, params float[] value )
+	{
+		external = true;
+		version++;
+		Put( AttributeIds.Of( name ), value );
+	}
 
 	/// <summary>
 	/// A single number: kept in a one-float array this set owns for the name and reuses, so setting numbers every draw
 	/// allocates nothing. The array holds the latest value set; read it before setting the name again.
 	/// </summary>
-	public void Set( string name, float value ) => Owned( name, 1 )[0] = value;
+	public void Set( string name, float value ) => SetById( AttributeIds.Of( name ), value );
+
+	internal void SetById( int id, float value )
+	{
+		var array = Owned( id, 1 );
+		if ( array[0] == value ) return;
+		array[0] = value;
+		version++;
+	}
 
 	/// <summary>A two-component vector, kept as <see cref="Set(string, float)"/> keeps a number.</summary>
 	public void Set( string name, float x, float y )
 	{
-		var array = Owned( name, 2 );
+		var array = Owned( AttributeIds.Of( name ), 2 );
+		if ( array[0] == x && array[1] == y ) return;
 		(array[0], array[1]) = (x, y);
+		version++;
 	}
 
 	/// <summary>A three-component vector, kept as <see cref="Set(string, float)"/> keeps a number.</summary>
 	public void Set( string name, float x, float y, float z )
 	{
-		var array = Owned( name, 3 );
+		var array = Owned( AttributeIds.Of( name ), 3 );
+		if ( array[0] == x && array[1] == y && array[2] == z ) return;
 		(array[0], array[1], array[2]) = (x, y, z);
+		version++;
 	}
 
 	/// <summary>A four-component vector, kept as <see cref="Set(string, float)"/> keeps a number.</summary>
 	public void Set( string name, float x, float y, float z, float w )
 	{
-		var array = Owned( name, 4 );
+		var array = Owned( AttributeIds.Of( name ), 4 );
+		if ( array[0] == x && array[1] == y && array[2] == z && array[3] == w ) return;
 		(array[0], array[1], array[2], array[3]) = (x, y, z, w);
+		version++;
 	}
 
 	// Arrays of 1-4 floats this set owns, by component count and attribute id, reused for every set of the name
@@ -59,17 +86,15 @@ public sealed class ShaderAttributes
 
 	bool Owns( int id, float[] array ) => owned[array.Length - 1] is var arrays && id < arrays.Length && ReferenceEquals( arrays[id], array );
 
-	/// <summary>A single number under an <see cref="AttributeIds"/> id, kept as <see cref="Set(string, float)"/> keeps one.</summary>
-	internal void SetById( int id, float value ) => Owned( id, 1 )[0] = value;
-
 	/// <summary>One to four floats under an <see cref="AttributeIds"/> id, kept as the vector setters keep them.</summary>
 	internal void SetFloatsById( int id, ReadOnlySpan<float> values )
 	{
 		if ( values.Length is < 1 or > 4 ) throw new ArgumentOutOfRangeException( nameof( values ), "One to four floats" );
-		values.CopyTo( Owned( id, values.Length ) );
+		var array = Owned( id, values.Length );
+		if ( array.AsSpan().SequenceEqual( values ) ) return;
+		values.CopyTo( array );
+		version++;
 	}
-
-	float[] Owned( string name, int components ) => Owned( AttributeIds.Of( name ), components );
 
 	float[] Owned( int id, int components )
 	{
@@ -90,13 +115,29 @@ public sealed class ShaderAttributes
 	public void Set( string name, TextureViewHandle view ) => Put( AttributeIds.Of( name ), Box( viewBoxes, view ) );
 
 	/// <summary>A constant buffer's bytes.</summary>
-	public void SetData( string name, byte[] data ) => Put( AttributeIds.Of( name ), data );
+	public void SetData( string name, byte[] data )
+	{
+		external = true;
+		version++;
+		Put( AttributeIds.Of( name ), data );
+	}
 
 	/// <summary>A dynamic combo (<c>D_*</c>).</summary>
-	public void SetCombo( string name, int value ) => combos[name] = value;
+	public void SetCombo( string name, int value ) => SetComboById( AttributeIds.Of( name ), value );
+
+	internal void SetComboById( int id, int value )
+	{
+		if ( combos.TryGetValue( id, out var current ) && current == value ) return;
+		combos[id] = value;
+		version++;
+	}
 
 	/// <summary>A value of one of the kinds above under an <see cref="AttributeIds"/> id, for callers that keep the ids.</summary>
-	internal void SetById( int id, object value ) => Put( id, value );
+	internal void SetById( int id, object value )
+	{
+		version++;
+		Put( id, value );
+	}
 
 	/// <inheritdoc cref="SetById(int, object)"/>
 	internal void SetById( int id, TextureHandle texture ) => Put( id, Box( textureBoxes, texture ) );
@@ -127,7 +168,9 @@ public sealed class ShaderAttributes
 	public object Get( int id ) => (uint)id < (uint)stamps.Length && stamps[id] == generation ? slots[id] : under?.Get( id );
 
 	/// <summary>A combo's value, or null when it wasn't set.</summary>
-	public int? GetCombo( string name ) => combos.TryGetValue( name, out var value ) ? value : under?.GetCombo( name );
+	public int? GetCombo( string name ) => combos.Count == 0 && under is null ? null : GetCombo( AttributeIds.Of( name ) );
+
+	internal int? GetCombo( int id ) => combos.Count != 0 && combos.TryGetValue( id, out var value ) ? value : under?.GetCombo( id );
 
 	// Whether a value is set here, not under
 	bool Own( int id ) => (uint)id < (uint)stamps.Length && stamps[id] == generation;
@@ -143,7 +186,10 @@ public sealed class ShaderAttributes
 		set
 		{
 			if ( value?.under is not null ) throw new ArgumentException( "A set under another has none under it" );
+			if ( ReferenceEquals( under, value ) ) return;
 			under = value;
+			version++;
+			revision++;
 		}
 	}
 
@@ -218,14 +264,33 @@ public sealed class ShaderAttributes
 		{
 			stamps[id] = generation;
 			set.Add( id );
+			revision++;
+			version++;
+		}
+		else if ( !ReferenceEquals( slots[id], value ) )
+		{
+			revision++;
+			version++;
 		}
 
 		slots[id] = value;
 	}
 
+	/// <summary>Moves on when a handle is added, replaced or cleared; numbers in owned arrays and combos don't move it.</summary>
+	internal int Revision => under is null ? revision : HashCode.Combine( revision, under.revision, RuntimeHelpers.GetHashCode( under ) );
+
+	/// <summary>Moves on any set, replace or clear; equal versions mean equal values only while <see cref="Stable"/>.</summary>
+	internal int Version => under is null ? version : HashCode.Combine( version, under.version, RuntimeHelpers.GetHashCode( under ) );
+
+	/// <summary>False once a caller's own arrays are held: they may change in place.</summary>
+	internal bool Stable => !external && (under?.Stable ?? true);
+
 	/// <summary>Forget everything.</summary>
 	public void Clear()
 	{
+		if ( set.Count > 0 || combos.Count > 0 || under is not null ) version++;
+		if ( set.Count > 0 ) revision++;
+		external = false;
 		foreach ( var id in set ) slots[id] = null;
 		set.Clear();
 		combos.Clear();
@@ -237,6 +302,132 @@ public sealed class ShaderAttributes
 		}
 	}
 
+	/// <summary>Same ids with the same values: numbers and bytes by content. Combos aren't compared.</summary>
+	internal bool SameValues( ShaderAttributes other )
+	{
+		if ( EffectiveCount() != other.EffectiveCount() ) return false;
+		foreach ( var id in set )
+		{
+			if ( !SameValue( slots[id], other.Get( id ) ) ) return false;
+		}
+
+		if ( under is not null )
+		{
+			foreach ( var id in under.set )
+			{
+				if ( !Own( id ) && !SameValue( under.slots[id], other.Get( id ) ) ) return false;
+			}
+		}
+
+		return true;
+	}
+
+	int EffectiveCount()
+	{
+		var count = set.Count;
+		if ( under is not null )
+		{
+			foreach ( var id in under.set )
+			{
+				if ( !Own( id ) ) count++;
+			}
+		}
+
+		return count;
+	}
+
+	static bool SameValue( object mine, object theirs ) => mine switch
+	{
+		float[] a => theirs is float[] b && a.AsSpan().SequenceEqual( b ),
+		byte[] a => theirs is byte[] b && a.AsSpan().SequenceEqual( b ),
+		_ => ReferenceEquals( mine, theirs ) || Equals( mine, theirs ),
+	};
+
+	static bool SameShape( object mine, object theirs ) => mine switch
+	{
+		float[] => theirs is float[],
+		byte[] a => theirs is byte[] b && a.Length == b.Length,
+		_ => ReferenceEquals( mine, theirs ) || Equals( mine, theirs ),
+	};
+
+	static int ShapeHash( int id, object value ) => HashCode.Combine( id, value switch
+	{
+		float[] => 1,
+		byte[] a => a.Length,
+		null => 0,
+		_ => value.GetHashCode(),
+	} );
+
+	/// <summary>Same ids with the same handles; numbers and bytes need only the same ids, as constants are rewritten per draw. Combos aren't compared.</summary>
+	internal bool SameStructure( ShaderAttributes other )
+	{
+		if ( EffectiveCount() != other.EffectiveCount() ) return false;
+		foreach ( var id in set )
+		{
+			if ( !SameShape( slots[id], other.Get( id ) ) ) return false;
+		}
+
+		if ( under is not null )
+		{
+			foreach ( var id in under.set )
+			{
+				if ( !Own( id ) && !SameShape( under.slots[id], other.Get( id ) ) ) return false;
+			}
+		}
+
+		return true;
+	}
+
+	/// <summary>A hash of what <see cref="SameStructure"/> compares, whatever the order the values were set in.</summary>
+	internal int StructureHash()
+	{
+		var hash = 0;
+		foreach ( var id in set ) hash += ShapeHash( id, slots[id] );
+		if ( under is not null )
+		{
+			foreach ( var id in under.set )
+			{
+				if ( !Own( id ) ) hash += ShapeHash( id, under.slots[id] );
+			}
+		}
+
+		return hash;
+	}
+
+	/// <summary>Copies <paramref name="other"/>'s values (not combos) into arrays this set owns, so a warm copy allocates nothing.</summary>
+	internal void CopyValuesFrom( ShaderAttributes other )
+	{
+		Clear();
+		if ( other.under is not null ) CopyOwnValuesFrom( other.under );
+		CopyOwnValuesFrom( other );
+	}
+
+	void CopyOwnValuesFrom( ShaderAttributes other )
+	{
+		foreach ( var id in other.set )
+		{
+			if ( id >= copies.Length ) Array.Resize( ref copies, Math.Max( Math.Max( copies.Length * 2, 64 ), AttributeIds.Count ) );
+			var value = other.slots[id];
+			switch ( value )
+			{
+				case float[] floats:
+					var floatCopy = copies[id] as float[];
+					if ( floatCopy is null || floatCopy.Length != floats.Length ) copies[id] = floatCopy = new float[floats.Length];
+					floats.CopyTo( floatCopy, 0 );
+					value = floatCopy;
+					break;
+				case byte[] bytes:
+					var byteCopy = copies[id] as byte[];
+					if ( byteCopy is null || byteCopy.Length != bytes.Length ) copies[id] = byteCopy = new byte[bytes.Length];
+					bytes.CopyTo( byteCopy, 0 );
+					value = byteCopy;
+					break;
+			}
+
+			Put( id, value );
+		}
+	}
+
 	/// <summary>
 	/// Add <paramref name="other"/>'s values and combos, replacing any of the same name, sharing its values: for a set lowered
 	/// once and copied under several draws' (the engine's block attributes), which must not change while the copies are used.
@@ -244,28 +435,29 @@ public sealed class ShaderAttributes
 	internal void CopyFrom( ShaderAttributes other )
 	{
 		if ( other.under is not null ) CopyFrom( other.under );
+		external |= other.external;
 		foreach ( var id in other.set ) Put( id, other.slots[id] );
-		foreach ( var (name, value) in other.combos ) combos[name] = value;
+		foreach ( var (id, value) in other.combos ) SetComboById( id, value );
 	}
 
 	/// <summary>Add <paramref name="other"/>'s values and combos, replacing any of the same name.</summary>
 	public void Merge( ShaderAttributes other )
 	{
 		if ( other.under is not null ) Merge( other.under );
+		external |= other.external;
+
 		// Arrays the other set reuses for its numbers are copied: setting them there again mustn't change this set
 		foreach ( var id in other.set ) Put( id, other.slots[id] is float[] { Length: >= 1 and <= 4 } floats && other.Owns( id, floats ) ? (float[])floats.Clone() : other.slots[id] );
-		foreach ( var (name, value) in other.combos ) combos[name] = value;
+		foreach ( var (id, value) in other.combos ) SetComboById( id, value );
 	}
 
 	internal string ComboKey( ShaderFile shader )
 	{
+		var info = ShaderInfo.Of( shader );
 		var key = new System.Text.StringBuilder();
-		foreach ( var type in (ReadOnlySpan<ShaderProgramType>)[ShaderProgramType.Vertex, ShaderProgramType.Pixel, ShaderProgramType.Compute] )
+		for ( int i = 0; i < info.ComboIds.Length; i++ )
 		{
-			foreach ( var combo in shader[type]?.DynamicCombos ?? [] )
-			{
-				if ( GetCombo( combo.Name ) is int value && value != 0 ) key.Append( combo.Name ).Append( '=' ).Append( value ).Append( ';' );
-			}
+			if ( GetCombo( info.ComboIds[i] ) is int value && value != 0 ) key.Append( info.ComboNames[i] ).Append( '=' ).Append( value ).Append( ';' );
 		}
 
 		return key.ToString();
@@ -275,30 +467,71 @@ public sealed class ShaderAttributes
 	/// <see cref="ComboKey"/> without building it: the shader's dynamic combos' values in turn, a byte each, for a shader of
 	/// at most eight whose values fit. False otherwise, and the caller keys by <see cref="ComboKey"/>.
 	/// </summary>
-	internal bool ComboBits( ShaderFile shader, out ulong bits ) => ComboBits( shader, out bits, out var more ) && more == 0 && CombosOf( shader ) <= 8;
+	internal bool ComboBits( ShaderFile shader, out ulong bits ) => ComboBits( shader, out bits, out var more ) && more == 0 && ShaderInfo.Of( shader ).ComboIds.Length <= 8;
 
 	/// <summary>As <see cref="ComboBits(ShaderFile, out ulong)"/> for up to sixteen combos: the first eight in <paramref name="bits"/>, the rest in <paramref name="more"/>.</summary>
 	internal bool ComboBits( ShaderFile shader, out ulong bits, out ulong more )
 	{
 		bits = more = 0;
-		var shift = 0;
-		foreach ( var type in (ReadOnlySpan<ShaderProgramType>)[ShaderProgramType.Vertex, ShaderProgramType.Pixel, ShaderProgramType.Compute] )
+		var ids = ShaderInfo.Of( shader ).ComboIds;
+		if ( ids.Length > 16 ) return false;
+		if ( combos.Count == 0 && under is null ) return true;
+
+		for ( int i = 0; i < ids.Length; i++ )
 		{
-			foreach ( var combo in shader[type]?.DynamicCombos ?? [] )
-			{
-				if ( shift == 128 ) return false;
-				var value = combos.Count == 0 && under is null ? 0 : GetCombo( combo.Name ) ?? 0;
-				if ( (uint)value > byte.MaxValue ) return false;
-				if ( shift < 64 ) bits |= (ulong)value << shift;
-				else more |= (ulong)value << (shift - 64);
-				shift += 8;
-			}
+			var value = GetCombo( ids[i] ) ?? 0;
+			if ( (uint)value > byte.MaxValue ) return false;
+			if ( i < 8 ) bits |= (ulong)value << (i * 8);
+			else more |= (ulong)value << ((i - 8) * 8);
 		}
 
 		return true;
 	}
+}
 
-	static int CombosOf( ShaderFile shader ) => (shader[ShaderProgramType.Vertex]?.DynamicCombos.Length ?? 0) + (shader[ShaderProgramType.Pixel]?.DynamicCombos.Length ?? 0) + (shader[ShaderProgramType.Compute]?.DynamicCombos.Length ?? 0);
+/// <summary>What a drawer reads of a shader for every draw, worked out once: dynamic combos and specialization attribute ids.</summary>
+internal sealed class ShaderInfo
+{
+	public ShaderFile Shader;
+	public int[] ComboIds;
+	public string[] ComboNames;
+	public int[] SpecializationIds;
+
+	static readonly ConditionalWeakTable<ShaderFile, ShaderInfo> table = new();
+	static readonly ShaderInfo[] recent = new ShaderInfo[4];
+	static int next;
+
+	public static ShaderInfo Of( ShaderFile shader )
+	{
+		var ring = recent;
+		for ( int i = 0; i < ring.Length; i++ )
+		{
+			var info = ring[i];
+			if ( info is not null && ReferenceEquals( info.Shader, shader ) ) return info;
+		}
+
+		var made = table.GetValue( shader, static s => new ShaderInfo( s ) );
+		ring[System.Threading.Interlocked.Increment( ref next ) & 3] = made;
+		return made;
+	}
+
+	ShaderInfo( ShaderFile shader )
+	{
+		Shader = shader;
+		ReadOnlySpan<ShaderProgramType> types = [ShaderProgramType.Vertex, ShaderProgramType.Pixel, ShaderProgramType.Compute];
+		var names = new List<string>();
+		foreach ( var type in types )
+		{
+			if ( shader[type] is { } program ) names.AddRange( program.DynamicCombos.Select( c => c.Name ) );
+		}
+
+		ComboNames = [.. names];
+		ComboIds = [.. names.Select( AttributeIds.Of )];
+		SpecializationIds = [.. types.ToArray()
+			.SelectMany( t => shader[t]?.Variables ?? [] )
+			.Where( v => v.Register == RegisterType.Specialization && v.Source == VariableSource.Attribute && !string.IsNullOrEmpty( v.Attribute ) )
+			.Select( v => v.Attribute ).Distinct( StringComparer.Ordinal ).Select( AttributeIds.Of )];
+	}
 }
 
 /// <summary>
@@ -424,12 +657,18 @@ public sealed partial class ShaderDrawer : IDisposable
 
 	// Variants by their combos' values packed (ShaderAttributes.ComboBits) and the material's features array, built with no
 	// strings: what most draws find theirs by
-	readonly Dictionary<(ShaderFile Shader, string Mode, int[] Features, ulong Combos, ulong More, ulong Specialization), ShaderVariant> packedVariants = new();
-	readonly Dictionary<(ShaderVariant Variant, Format Color, Format Depth, int Samples, VertexStreamLayout Layout, PrimitiveTopology Topology, bool Ids, ToolsPass Tools, bool Redrawn), PipelineHandle> pipelines = new();
+	readonly Dictionary<(ShaderFile Shader, string Mode, int[] Features, ulong Combos, ulong More, ulong Specialization), ShaderVariant> packedVariants = new( new PackedKeyComparer() );
 
-	// The attribute ids a shader's specialization constants come from (ToolsVisMode, ShadowFilterQuality...), whose values
-	// pick its variant as its combos' do
-	readonly ConditionalWeakTable<ShaderFile, int[]> specializations = new();
+	// Compared without hashing the mode name: a variant is looked up every draw
+	sealed class PackedKeyComparer : IEqualityComparer<(ShaderFile Shader, string Mode, int[] Features, ulong Combos, ulong More, ulong Specialization)>
+	{
+		public bool Equals( (ShaderFile Shader, string Mode, int[] Features, ulong Combos, ulong More, ulong Specialization) a, (ShaderFile Shader, string Mode, int[] Features, ulong Combos, ulong More, ulong Specialization) b )
+			=> ReferenceEquals( a.Shader, b.Shader ) && ReferenceEquals( a.Features, b.Features ) && a.Combos == b.Combos && a.More == b.More && a.Specialization == b.Specialization && string.Equals( a.Mode, b.Mode );
+
+		public int GetHashCode( (ShaderFile Shader, string Mode, int[] Features, ulong Combos, ulong More, ulong Specialization) key )
+			=> HashCode.Combine( RuntimeHelpers.GetHashCode( key.Shader ), RuntimeHelpers.GetHashCode( key.Features ), key.Combos, key.More, key.Specialization );
+	}
+	readonly Dictionary<(ShaderVariant Variant, Format Color, Format Depth, int Samples, VertexStreamLayout Layout, PrimitiveTopology Topology, bool Ids, ToolsPass Tools, bool Redrawn), PipelineHandle> pipelines = new();
 
 	/// <summary>
 	/// The tools pass colour draws take (<see cref="ToolsViews"/>): a custom object in a debug view's colour layer draws with
@@ -498,8 +737,71 @@ public sealed partial class ShaderDrawer : IDisposable
 
 	BackendMaterial MaterialOf( ShaderFile shader ) => Material is { } material && ReferenceEquals( material.Shader, shader ) ? material : null;
 
-	/// <summary>A material's texture for a material variable, when it's ready to sample and the shape the shader expects.</summary>
-	Binding MaterialTexture( BackendMaterial material, in ShaderResource resource )
+	// A material's texture bindings by layout, pass slot and set, for one version of it: its textures change only with the version
+	sealed class MaterialTextures
+	{
+		public BackendMaterial Material;
+		public int Version = -1;
+		public readonly MaterialLayout[] Layouts = new MaterialLayout[4];
+		public readonly Binding?[][][] Sets = new Binding?[4][][];
+		public int NextLayout;
+		public readonly Dictionary<MaterialLayout, Binding?[][]> ByLayout = new( ReferenceEqualityComparer.Instance );
+	}
+
+	readonly ConditionalWeakTable<BackendMaterial, MaterialTextures> materialTextures = new();
+
+	readonly MaterialTextures[] recentTextures = new MaterialTextures[4];
+	int recentTexturesNext;
+
+	// The material's texture for a variable when ready and the expected shape; kept per pass slot of the layout
+	Binding MaterialTexture( BackendMaterial material, in ShaderResource resource, MaterialLayout layout, int set, int slot )
+	{
+		if ( layout is null ) return FindMaterialTexture( material, resource );
+
+		MaterialTextures textures = null;
+		foreach ( var recent in recentTextures )
+		{
+			if ( recent is not null && ReferenceEquals( recent.Material, material ) ) { textures = recent; break; }
+		}
+
+		if ( textures is null )
+		{
+			textures = materialTextures.GetValue( material, static m => new MaterialTextures { Material = m } );
+			recentTextures[recentTexturesNext] = textures;
+			recentTexturesNext = (recentTexturesNext + 1) & 3;
+		}
+
+		var version = material.Version;
+		if ( textures.Version != version )
+		{
+			textures.ByLayout.Clear();
+			Array.Clear( textures.Layouts );
+			textures.Version = version;
+		}
+
+		Binding?[][] sets = null;
+		for ( int i = 0; i < textures.Layouts.Length; i++ )
+		{
+			if ( ReferenceEquals( textures.Layouts[i], layout ) ) { sets = textures.Sets[i]; break; }
+		}
+
+		if ( sets is null )
+		{
+			if ( !textures.ByLayout.TryGetValue( layout, out sets ) ) textures.ByLayout[layout] = sets = new Binding?[ShaderAbi.BindlessSet][];
+			var next = textures.NextLayout;
+			(textures.Layouts[next], textures.Sets[next]) = (layout, sets);
+			textures.NextLayout = (next + 1) & 3;
+		}
+
+		var held = sets[set] ??= new Binding?[layout.PassSlots[set].Length];
+		if ( held[slot] is { } found ) return found;
+
+		var binding = FindMaterialTexture( material, resource );
+		held[slot] = binding;
+		return binding;
+	}
+
+	Binding FindMaterialTexture( BackendMaterial material, in ShaderResource resource )
 	{
 		var expected = resource.Dimension switch
 		{
@@ -563,13 +865,54 @@ public sealed partial class ShaderDrawer : IDisposable
 		cache = null;
 	}
 
+	// Last lookups' variants: a draw asks twice (scope depth, then binds)
+	struct VariantMemo
+	{
+		public ShaderFile Shader;
+		public string Mode;
+		public ShaderAttributes Attributes;
+		public int Version;
+		public BackendMaterial Material;
+		public int MaterialVersion;
+		public ShaderVariant Found;
+	}
+
+	const int VariantMemos = 256;
+	readonly VariantMemo[] variantMemo = new VariantMemo[VariantMemos];
+
 	/// <summary>
 	/// The shader's variant for its first mode (or <paramref name="mode"/>) and the attributes' dynamic combos.
 	/// </summary>
 	public ShaderVariant Variant( ShaderFile shader, ShaderAttributes attributes, string mode = null )
 	{
 		mode ??= shader.Modes[0].Name;
-		var features = MaterialOf( shader )?.Features ?? [];
+		var material = MaterialOf( shader );
+		var materialVersion = material?.Version ?? 0;
+		var version = attributes.Version;
+		var stable = attributes.Stable;
+
+		// By where the lookup lands: a scene draws hundreds of materials, each asking again for every pass
+		var slot = (RuntimeHelpers.GetHashCode( (object)material ?? shader ) + RuntimeHelpers.GetHashCode( attributes ) * 31 + version) & (VariantMemos - 1);
+		if ( stable )
+		{
+			ref readonly var memo = ref variantMemo[slot];
+			if ( ReferenceEquals( memo.Attributes, attributes ) && memo.Version == version && ReferenceEquals( memo.Shader, shader ) && ReferenceEquals( memo.Material, material ) && memo.MaterialVersion == materialVersion && (ReferenceEquals( memo.Mode, mode ) || memo.Mode == mode) ) return memo.Found;
+		}
+
+		pendingVariant = false;
+		var found = FindVariant( shader, attributes, mode, material?.Features ?? [] );
+
+		// Not while its module compiles: it changes when that's done
+		if ( stable && found is not null && !pendingVariant )
+		{
+			variantMemo[slot] = new VariantMemo { Shader = shader, Mode = mode, Attributes = attributes, Version = version, Material = material, MaterialVersion = materialVersion, Found = found };
+		}
+
+		return found;
+	}
+
+	ShaderVariant FindVariant( ShaderFile shader, ShaderAttributes attributes, string mode, int[] features )
+	{
 		var specialization = SpecializationKey( shader, attributes );
 		if ( attributes.ComboBits( shader, out var bits, out var more ) )
 		{
@@ -586,10 +929,7 @@ public sealed partial class ShaderDrawer : IDisposable
 	/// <summary>The values of the shader's specialization attributes in <paramref name="attributes"/>, as one key.</summary>
 	ulong SpecializationKey( ShaderFile shader, ShaderAttributes attributes )
 	{
-		var ids = specializations.GetValue( shader, static s => new[] { ShaderProgramType.Vertex, ShaderProgramType.Pixel, ShaderProgramType.Compute }
-			.SelectMany( t => s[t]?.Variables ?? [] )
-			.Where( v => v.Register == RegisterType.Specialization && v.Source == VariableSource.Attribute && !string.IsNullOrEmpty( v.Attribute ) )
-			.Select( v => v.Attribute ).Distinct( StringComparer.Ordinal ).Select( AttributeIds.Of ).ToArray() );
+		var ids = ShaderInfo.Of( shader ).SpecializationIds;
 
 		ulong key = 0;
 		foreach ( var id in ids ) key = key * 1000003 + (uint)(attributes.Get( id ) is float[] { Length: > 0 } f ? (int)f[0] : 0) + 1;
@@ -752,23 +1092,55 @@ public sealed partial class ShaderDrawer : IDisposable
 		return true;
 	}
 
+	struct ObjectMemo
+	{
+		public ShaderVariant Variant;
+		public VertexStreamLayout Layout;
+		public bool Ids, Redrawn;
+		public Format Color, Depth;
+		public int Samples;
+		public PrimitiveTopology Topology;
+		public ToolsPass Tools;
+		public MaterialObject Found;
+	}
+
+	const int ObjectMemos = 128;
+	readonly ObjectMemo[] objectMemo = new ObjectMemo[ObjectMemos];
+
+	static int ObjectSlot( ShaderVariant variant, VertexStreamLayout layout, Format color, Format depth, int samples ) =>
+		(RuntimeHelpers.GetHashCode( variant ) + RuntimeHelpers.GetHashCode( layout ) * 31 + (int)color * 7 + (int)depth * 13 + samples) & (ObjectMemos - 1);
+
+	MaterialObject RememberedObject( ShaderVariant variant, VertexStreamLayout layout, bool ids, Format color, Format depth, int samples, PrimitiveTopology topology, ToolsPass tools, bool redrawn )
+	{
+		ref readonly var memo = ref objectMemo[ObjectSlot( variant, layout, color, depth, samples )];
+		if ( ReferenceEquals( memo.Variant, variant ) && ReferenceEquals( memo.Layout, layout ) && memo.Ids == ids && memo.Color == color && memo.Depth == depth && memo.Samples == samples && memo.Topology == topology && memo.Tools == tools && memo.Redrawn == redrawn ) return memo.Found;
+		return null;
+	}
+
 	// Bind a draw's pipeline and resources; true when it reads the lent instance ids, which the caller binds after its streams
 	bool BindForDraw( CommandList list, ShaderVariant variant, ShaderAttributes attributes, Format color, Format depth, int samples, VertexStreamLayout layout, PrimitiveTopology topology, System.Numerics.Vector4 viewport )
 	{
 		if ( BackendDevice.DrawMarkers ) list.Marker( BackendDevice.DrawMarkerName( variant ) );
 		var ids = ReadsInstanceIds( variant );
-		if ( Objects( variant ) )
+		var redrawn = RedrawnEveryFrame.Active;
+		var tools = color == Format.Unknown ? ToolsPass.None : ToolsPass;
+		var materialObject = MaterialObjects ? RememberedObject( variant, layout, ids, color, depth, samples, topology, tools, redrawn ) : null;
+		if ( materialObject is not null ? HasPassSpace( materialObject.Layout ) : Objects( variant ) )
 		{
-			var redrawn = RedrawnEveryFrame.Active;
-			var key = new MaterialObjectCache.Key( null, variant, LayoutKey( layout, ids ), color, depth, samples, false, false, topology, Tools: color == Format.Unknown ? ToolsPass.None : ToolsPass, Redrawn: redrawn );
-			var materialObject = cache.Get( key, immediate: true, (Drawer: this, Variant: variant, Color: color, Depth: depth, Samples: samples, Layout: layout, Topology: topology, Ids: ids, Redrawn: redrawn),
-				static ( s, materialLayout ) => s.Drawer.Pipeline( s.Variant, s.Color, s.Depth, s.Samples, s.Layout, s.Topology, materialLayout.Sets, s.Ids, s.Redrawn ) );
+			if ( materialObject is null )
+			{
+				var key = new MaterialObjectCache.Key( null, variant, LayoutKey( layout, ids ), color, depth, samples, false, false, topology, Tools: tools, Redrawn: redrawn );
+				materialObject = cache.Get( key, immediate: true, (Drawer: this, Variant: variant, Color: color, Depth: depth, Samples: samples, Layout: layout, Topology: topology, Ids: ids, Redrawn: redrawn),
+					static ( s, materialLayout ) => s.Drawer.Pipeline( s.Variant, s.Color, s.Depth, s.Samples, s.Layout, s.Topology, materialLayout.Sets, s.Ids, s.Redrawn ) );
+				objectMemo[ObjectSlot( variant, layout, color, depth, samples )] = new ObjectMemo { Variant = variant, Layout = layout, Ids = ids, Redrawn = redrawn, Color = color, Depth = depth, Samples = samples, Topology = topology, Tools = tools, Found = materialObject };
+			}
+
 			SetViewport( list, viewport );
 			BindObject( list, materialObject, attributes, viewport );
 		}
 		else
 		{
-			list.SetPipeline( Pipeline( variant, color, depth, samples, layout, topology, null, ids, RedrawnEveryFrame.Active ) );
+			list.SetPipeline( Pipeline( variant, color, depth, samples, layout, topology, null, ids, redrawn ) );
 			SetViewport( list, viewport );
 			Bind( list, variant, attributes, viewport );
 		}
@@ -782,10 +1154,11 @@ public sealed partial class ShaderDrawer : IDisposable
 	}
 
 	/// <summary>Whether this draw binds through material objects: they're on, and the frame's pass constants have room for it.</summary>
-	bool Objects( ShaderVariant variant )
+	bool Objects( ShaderVariant variant ) => MaterialObjects && HasPassSpace( Cache.LayoutOf( variant, immediate: true ) );
+
+	bool HasPassSpace( MaterialLayout layout )
 	{
-		if ( !MaterialObjects ) return false;
-		if ( Cache.PassSpace >= cache.LayoutOf( variant, immediate: true ).ImmediateBytes ) return true;
+		if ( Cache.PassSpace >= layout.ImmediateBytes ) return true;
 		Fallbacks++;
 		return false;
 	}
@@ -796,8 +1169,119 @@ public sealed partial class ShaderDrawer : IDisposable
 		bindings.Attributes = attributes;
 		bindings.Viewport = viewport;
 		var bound = default( PipelineHandle );
-		materialObject.Bind( list, ref bound, cache.NextEpoch(), bindings );
+		var values = AttributeStateOf( list, attributes, viewport );
+		bindings.AttributesEpoch = values.Id;
+		bindings.Structure = values.Structure >= 0 ? values.Structure : values.Structure = StructureOf( attributes );
+		var material = Material;
+		materialObject.BindImmediate( list, ref bound, material, material?.Version ?? 0, bindings );
 		bindings.Attributes = null;
+	}
+
+	// Values draws bound in, per list, frame and viewport. Id: values constants were written from; Structure: handles the sets bind.
+	sealed class AttributeState
+	{
+		public ShaderAttributes Source;
+		public int Version;
+		public long Id;
+		public long Structure = -1;
+		public readonly ShaderAttributes Values = new();
+
+		public void Forget()
+		{
+			Source = null;
+			Structure = -1;
+			Values.Clear();
+		}
+	}
+
+	const int AttributeStatesKept = 3, StructuresKept = 1024;
+	readonly AttributeState[] attributeStates = new AttributeState[AttributeStatesKept];
+	int attributeStateNext;
+
+	// Handle sets by content (SameStructure), each with a stable id; hashed since attribute sets churn every frame.
+	sealed class StructureKey
+	{
+		public long Id;
+		public StructureKey Next;
+		public readonly ShaderAttributes Reference = new();
+	}
+
+	readonly Dictionary<int, StructureKey> structures = new();
+
+	long StructureOf( ShaderAttributes attributes )
+	{
+		var hash = attributes.StructureHash();
+		structures.TryGetValue( hash, out var first );
+		for ( var known = first; known is not null; known = known.Next )
+		{
+			if ( attributes.SameStructure( known.Reference ) ) return known.Id;
+		}
+
+		// Past the limit: forget them all; ids stay unique, so what was resolved under them is only resolved again
+		if ( structures.Count >= StructuresKept )
+		{
+			structures.Clear();
+			first = null;
+		}
+
+		var made = new StructureKey { Next = first, Id = cache.NextEpoch() };
+		made.Reference.CopyValuesFrom( attributes );
+		structures[hash] = made;
+		return made.Id;
+	}
+
+	// What the attribute states were made for: they hold only while a draw has the same list, device frame and viewport
+	CommandList passList;
+	long passFrame;
+	System.Numerics.Vector4 passViewport;
+
+	// The state a draw binds in; another list, frame, values or viewport never reuses an old one.
+	AttributeState AttributeStateOf( CommandList list, ShaderAttributes attributes, System.Numerics.Vector4 viewport )
+	{
+		var frame = cache.Frame;
+		if ( !ReferenceEquals( list, passList ) || frame != passFrame || viewport != passViewport )
+		{
+			(passList, passFrame, passViewport) = (list, frame, viewport);
+			foreach ( var state in attributeStates ) state?.Forget();
+		}
+
+		var version = attributes.Version;
+		if ( attributes.Stable )
+		{
+			foreach ( var state in attributeStates )
+			{
+				if ( state is not null && ReferenceEquals( state.Source, attributes ) && state.Version == version ) return state;
+			}
+		}
+
+		// Another set, or the same one set again, with the same values
+		foreach ( var state in attributeStates )
+		{
+			if ( state?.Source is null || !attributes.SameValues( state.Values ) ) continue;
+			state.Source = attributes;
+			state.Version = version;
+			return state;
+		}
+
+		var made = attributeStates[attributeStateNext] ??= new AttributeState();
+		attributeStateNext = (attributeStateNext + 1) % AttributeStatesKept;
+		made.Forget();
+		made.Source = attributes;
+		made.Version = version;
+		made.Values.CopyValuesFrom( attributes );
+		made.Id = cache.NextEpoch();
+		return made;
+	}
+
+	/// <summary>Forget the last draws' lists, materials and attributes so their owners can be collected.</summary>
+	internal void ReleasePass()
+	{
+		passList = null;
+		foreach ( var state in attributeStates ) state?.Forget();
+		structures.Clear();
+		Array.Clear( variantMemo );
+		Array.Clear( objectMemo );
+		Array.Clear( stageConstants );
 	}
 
 	/// <summary>
@@ -993,19 +1477,32 @@ public sealed partial class ShaderDrawer : IDisposable
 
 	/// <summary>
 	/// The binding a reflected resource gets from a draw's attribute value, or for a material variable the material's
-	/// texture (<see cref="Material"/>), or its placeholder.
+	/// texture (<see cref="Material"/>) or its placeholder, kept per pass slot of the layout.
 	/// </summary>
-	Binding Resource( in ShaderResource resource, object value ) => resource.Kind switch
+	Binding Resource( in ShaderResource resource, object value, MaterialLayout layout = null, int set = 0, int slot = 0 )
 	{
-		ShaderResourceKind.Texture when resource.Variable?.Source == VariableSource.Material && Material is { } material => MaterialTexture( material, resource ),
-		ShaderResourceKind.Buffer when value is BufferHandle buffer => Binding.Storage( resource.Binding, buffer ),
-		ShaderResourceKind.Texture when value is TextureHandle texture => Binding.Sampled( resource.Binding, texture, resource.Variable.RenderStateId == 1 && gpu.InfoOf( texture ).Format.HasSrgb() ),
-		ShaderResourceKind.Texture when value is TextureViewHandle view => Binding.Sampled( resource.Binding, view ),
-		ShaderResourceKind.StorageTexture when value is TextureHandle texture => Binding.StorageTexture( resource.Binding, texture ),
-		ShaderResourceKind.StorageTexture when value is TextureViewHandle view => Binding.StorageTexture( resource.Binding, view ),
-		ShaderResourceKind.Counter when value is BufferHandle counter => Binding.Storage( resource.Binding, counter ),
-		_ => defaults.For( resource ),
-	};
+		switch ( resource.Kind )
+		{
+			case ShaderResourceKind.Texture:
+				if ( resource.Variable?.Source == VariableSource.Material && Material is { } material ) return MaterialTexture( material, resource, layout, set, slot );
+				if ( value is TextureHandle texture ) return Binding.Sampled( resource.Binding, texture, resource.Variable.RenderStateId == 1 && gpu.InfoOf( texture ).Format.HasSrgb() );
+				if ( value is TextureViewHandle view ) return Binding.Sampled( resource.Binding, view );
+				break;
+
+			case ShaderResourceKind.Buffer when value is BufferHandle buffer:
+				return Binding.Storage( resource.Binding, buffer );
+
+			case ShaderResourceKind.StorageTexture:
+				if ( value is TextureHandle storage ) return Binding.StorageTexture( resource.Binding, storage );
+				if ( value is TextureViewHandle storageView ) return Binding.StorageTexture( resource.Binding, storageView );
+				break;
+
+			case ShaderResourceKind.Counter when value is BufferHandle counter:
+				return Binding.Storage( resource.Binding, counter );
+		}
+
+		return layout is null ? defaults.For( resource ) : layout.Placeholder( set, slot );
+	}
 
 	/// <summary>
 	/// The attribute value a resource binds: the one set under its name, or for a buffer's hidden counter, under the counter's
@@ -1066,10 +1563,26 @@ public sealed partial class ShaderDrawer : IDisposable
 	{
 		var material = Material;
 		var plan = PlanFor( stage, material );
-		plan.Base.AsSpan( 0, Math.Min( plan.Base.Length, data.Length ) ).CopyTo( data );
-		if ( data.Length > plan.Base.Length ) data[plan.Base.Length..].Clear();
+		var stable = attributes.Stable;
+
+		// The same attributes, viewport and plan as the last write: its bytes again
+		if ( stable && plan.Image is { } image && image.Length == data.Length && ReferenceEquals( plan.ImageAttributes, attributes ) && plan.ImageAttributesVersion == attributes.Version
+			&& plan.ImageVersion == plan.Version && ReferenceEquals( plan.ImageFeatures, plan.Features ) && plan.ImageViewport == viewport )
+		{
+			image.CopyTo( data );
+			return;
+		}
+
+		// Written here and copied out once: data is mapped upload memory, which is write-combined and very slow to read back
+		if ( plan.Image is null || plan.Image.Length != data.Length ) plan.Image = new byte[data.Length];
+		var written = plan.Image.AsSpan();
+		plan.ImageAttributes = null;
+
+		plan.Base.AsSpan( 0, Math.Min( plan.Base.Length, written.Length ) ).CopyTo( written );
+		if ( written.Length > plan.Base.Length ) written[plan.Base.Length..].Clear();
 
 		var features = material?.Features ?? default;
+		var cacheable = stable;
 		foreach ( var index in plan.PerDraw )
 		{
 			var variable = stage.MaterialConstants[index].Variable;
@@ -1088,12 +1601,18 @@ public sealed partial class ShaderDrawer : IDisposable
 					given = string.IsNullOrEmpty( variable.Attribute ) ? null : attributes.Get( variable.BindingId ) as float[];
 					break;
 				default:
+					// A texture's size can change with no change to the attributes
+					cacheable = false;
 					given = TextureSize( stage, variable, attributes );
 					break;
 			}
 
-			stage.WriteMaterialConstant( data, index, given, features );
+			stage.WriteMaterialConstant( written, index, given, features );
 		}
+
+		written.CopyTo( data );
+		if ( !cacheable ) return;
+		(plan.ImageAttributes, plan.ImageAttributesVersion, plan.ImageVersion, plan.ImageFeatures, plan.ImageViewport) = (attributes, attributes.Version, plan.Version, plan.Features, viewport);
 	}
 
 	readonly float[] scratch4 = new float[4], scratch2 = new float[2], scratch1 = new float[1];
@@ -1108,16 +1627,61 @@ public sealed partial class ShaderDrawer : IDisposable
 		public int[] PerDraw;
 		public int Version;
 		public int[] Features;
+		public ShaderStage Stage;
+		public BackendMaterial Material;
+
+		// What the last write made, and from what, where the draw's variables came from stable attributes
+		public byte[] Image;
+		public ShaderAttributes ImageAttributes;
+		public int ImageAttributesVersion;
+		public int ImageVersion;
+		public int[] ImageFeatures;
+		public System.Numerics.Vector4 ImageViewport;
 	}
 
 	static bool DrawnPerDraw( VariableSource source ) => source is VariableSource.Viewport or VariableSource.InvViewportSize or VariableSource.Attribute
 		or VariableSource.TextureDimensions or VariableSource.InvTextureDimensions or VariableSource.TextureDimensionsLog2;
 
+	// Plans by stage and material, kept as long as the drawer is (and dropped when there are many)
+	readonly Dictionary<(ShaderStage Stage, BackendMaterial Material), ConstantPlan> planCache = new( new PlanKeyComparer() );
+
+	sealed class PlanKeyComparer : IEqualityComparer<(ShaderStage Stage, BackendMaterial Material)>
+	{
+		public bool Equals( (ShaderStage Stage, BackendMaterial Material) a, (ShaderStage Stage, BackendMaterial Material) b ) => ReferenceEquals( a.Stage, b.Stage ) && ReferenceEquals( a.Material, b.Material );
+		public int GetHashCode( (ShaderStage Stage, BackendMaterial Material) key ) => RuntimeHelpers.GetHashCode( key.Stage ) * 31 + RuntimeHelpers.GetHashCode( key.Material );
+	}
+
+	readonly ConstantPlan[] recentPlans = new ConstantPlan[4];
+	int recentPlansNext;
+
+	ConstantPlan PlanFor( ShaderStage stage, BackendMaterial material )
+	{
+		var version = material?.Version ?? 0;
+		var features = material?.Features;
+		foreach ( var recent in recentPlans )
+		{
+			if ( recent is not null && ReferenceEquals( recent.Stage, stage ) && ReferenceEquals( recent.Material, material ) && recent.Version == version && ReferenceEquals( recent.Features, features ) ) return recent;
+		}
+
+		if ( !planCache.TryGetValue( (stage, material), out var plan ) || plan.Version != version || !ReferenceEquals( plan.Features, features ) )
+		{
+			plan = FindPlan( stage, material );
+			// Generous: a map's foliage alone can be a thousand stage and material pairs, and a cleared cache rebuilds them all
+			if ( planCache.Count >= 8192 ) planCache.Clear();
+			planCache[(stage, material)] = plan;
+		}
+
+		(plan.Stage, plan.Material) = (stage, material);
+		recentPlans[recentPlansNext] = plan;
+		recentPlansNext = (recentPlansNext + 1) & 3;
+		return plan;
+	}
+
 	// Plans by stage, for no material and for each material (kept as long as the material is)
 	readonly Dictionary<ShaderStage, ConstantPlan> plainPlans = new();
 	readonly System.Runtime.CompilerServices.ConditionalWeakTable<BackendMaterial, Dictionary<ShaderStage, ConstantPlan>> materialPlans = new();
 
-	ConstantPlan PlanFor( ShaderStage stage, BackendMaterial material )
+	ConstantPlan FindPlan( ShaderStage stage, BackendMaterial material )
 	{
 		var plans = material is null ? plainPlans : materialPlans.GetOrCreateValue( material );
 		var version = material?.Version ?? 0;
@@ -1208,7 +1772,9 @@ public sealed partial class ShaderDrawer : IDisposable
 
 		public override float[] Floats( string attribute ) => Attributes.Get( attribute ) as float[];
 
-		public override Binding Resolve( in ShaderResource resource, ShaderStage stage, bool dynamic, out uint dynamicOffset )
+		public override Binding Resolve( in ShaderResource resource, ShaderStage stage, bool dynamic, out uint dynamicOffset ) => Resolve( null, 0, 0, resource, stage, dynamic, out dynamicOffset );
+
+		public override Binding Resolve( MaterialLayout layout, int set, int slot, in ShaderResource resource, ShaderStage stage, bool dynamic, out uint dynamicOffset )
 		{
 			dynamicOffset = 0;
 			var value = drawer.Value( resource, Attributes );
@@ -1234,13 +1800,13 @@ public sealed partial class ShaderDrawer : IDisposable
 
 				case ShaderResourceKind.ConstantBuffer:
 					{
-						var placeholder = drawer.defaults.For( resource );
+						var placeholder = layout is null ? drawer.defaults.For( resource ) : layout.Placeholder( set, slot );
 						if ( dynamic ) placeholder.Type = BindingType.UniformBufferDynamic;
 						return placeholder;
 					}
 
 				default:
-					return drawer.Resource( resource, value );
+					return drawer.Resource( resource, value, layout, set, slot );
 			}
 		}
 
