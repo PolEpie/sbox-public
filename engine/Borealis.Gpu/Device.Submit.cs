@@ -467,6 +467,7 @@ public sealed unsafe partial class Device
 	/// </summary>
 	void TrimSpares()
 	{
+		for ( int i = 0; i < ListsFreedPerFrame && listsToFree.TryDequeue( out var spare ); i++ ) spare.Destroy();
 		for ( int c = 0; c < FreePages.Length; c++ ) freePagesLow[c] = Math.Min( freePagesLow[c], FreePages[c].Count );
 		if ( FrameNumber - listTrimFrom >= UploadPageIdleFrames && ListsKeptLongEnough() ) TrimSpareLists();
 		if ( FrameNumber - trimFrom < UploadPageIdleFrames || !Allocator.KeptLongEnough( trimFromTicks ) ) return;
@@ -504,6 +505,14 @@ public sealed unsafe partial class Device
 	ulong listTrimFrom;
 	long listTrimFromTicks;
 
+	// Spare lists taken out to be freed, a few each frame: a load's sixty-odd lists destroyed at once took 33 ms of one
+	// frame while the window was captured (0.3-0.5 ms each)
+	readonly Queue<CommandList> listsToFree = new();
+	internal const int ListsFreedPerFrame = 2;
+
+	/// <summary>Spare lists taken out to be freed and not yet destroyed, for tests.</summary>
+	internal int ListsWaitingToBeFreed => listsToFree.Count;
+
 	bool ListsKeptLongEnough() => Allocator.SpareSeconds <= 0 || System.Diagnostics.Stopwatch.GetElapsedTime( listTrimFromTicks ).TotalSeconds >= CommandListSpareSeconds;
 
 	/// <summary>Free the spare command lists every frame in the window left unused, past <see cref="KeptFreeCommandLists"/> (<see cref="TrimSpares"/>).</summary>
@@ -515,7 +524,7 @@ public sealed unsafe partial class Device
 			int freed = 0;
 			for ( int i = KeptFreeCommandLists; i < freeListsLow[q] && freeLists[q].TryTake( out var list ); i++ )
 			{
-				list.Destroy();
+				listsToFree.Enqueue( list );
 				freed++;
 			}
 
@@ -1268,6 +1277,8 @@ public sealed unsafe partial class Device
 		{
 			while ( bag.TryTake( out var list ) ) list.Destroy();
 		}
+
+		while ( listsToFree.TryDequeue( out var spare ) ) spare.Destroy();
 
 		foreach ( var pages in FreePages )
 		{

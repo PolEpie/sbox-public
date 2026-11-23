@@ -132,6 +132,33 @@ public class UploadPageTests : GpuTest
 		Device.Wait( Device.Submit( again ) );
 	}
 
+	/// <summary>
+	/// Spare lists a window frees are destroyed a few a frame, not all in the frame the window ends: a load's sixty-odd took
+	/// 33 ms of one frame.
+	/// </summary>
+	[TestMethod]
+	public void SpareListsAreFreedAFewAFrame()
+	{
+		for ( ulong i = 0; i <= 2 * Device.UploadPageIdleFrames; i++ ) Device.BeginFrame();
+		var lists = new CommandList[48];
+		for ( int i = 0; i < lists.Length; i++ ) lists[i] = Device.BeginCommandList( QueueType.Graphics, "Burst" );
+		SyncPoint done = default;
+		foreach ( var list in lists ) done = Device.Submit( list );
+		Device.Wait( done );
+
+		// Up to the frame whose window frees the burst's lists
+		var freedBefore = Device.CommandListsFreed;
+		for ( ulong i = 0; i <= 3 * Device.UploadPageIdleFrames && Device.CommandListsFreed == freedBefore; i++ ) Device.BeginFrame();
+		var freed = Device.CommandListsFreed - freedBefore;
+		Assert.IsTrue( freed > Device.ListsFreedPerFrame, $"{freed} lists freed" );
+		Assert.AreEqual( freed, Device.ListsWaitingToBeFreed, "none destroyed in the frame the window ended" );
+
+		Device.BeginFrame();
+		Assert.AreEqual( freed - Device.ListsFreedPerFrame, Device.ListsWaitingToBeFreed );
+		for ( int i = 0; i < freed; i++ ) Device.BeginFrame();
+		Assert.AreEqual( 0, Device.ListsWaitingToBeFreed );
+	}
+
 	/// <summary>Frames that each take many lists keep them: none are freed and made again every window.</summary>
 	[TestMethod]
 	public void BusyFramesKeepTheirCommandLists()
