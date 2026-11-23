@@ -1554,7 +1554,8 @@ internal sealed partial class BackendContext : GpuContext
 	{
 		if ( recording is null || material is not BackendMaterial { Shader: { } shader } || shader.Modes.Count == 0 ) return false;
 
-		var mode = ModeName( shader, shaderMode ) is null ? Token( shader.Modes[0].Name ) : shaderMode;
+		// The mode's name is looked up once per shader: the lookup walks the shader's modes, whose enumerator is an allocation
+		var mode = CachedModeName( shader, shaderMode ) is null ? Token( shader.Modes[0].Name ) : shaderMode;
 
 		// What it samples is read where it was drawn: a frame's colour, moved there first, as Source 2's blit does
 		if ( parameters is BackendParameters own )
