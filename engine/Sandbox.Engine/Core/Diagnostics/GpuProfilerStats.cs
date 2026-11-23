@@ -168,7 +168,7 @@ public static class GpuProfilerStats
 	{
 		Renderer = "borealis";
 		var frame = borealis.GpuBusyFrame;
-		if ( frame == _borealisFrame )
+		if ( frame == _borealisFrame && _rows.Count > 0 )
 		{
 			// Keep the rows' samples from being pruned while no new frame is read
 			foreach ( var row in _rows )
@@ -183,13 +183,19 @@ public static class GpuProfilerStats
 
 		var delta = (float)_sinceBorealisFrame;
 		_sinceBorealisFrame = 0;
-		_borealisFrame = frame;
-		FrameId = frame;
 		_paths = null;
 
+		// The backend swaps in each frame it reads under its lock: the frame and its timings are taken together
 		_borealisScopes.Clear();
-		foreach ( var timing in borealis.GpuBusyTimings )
-			_borealisScopes.Add( new GpuScope( timing.Name, timing.Kind == Borealis.Backend.PassTimer.ScopeKind.List, timing.Start, timing.End ) );
+		lock ( borealis.GpuBusyLock )
+		{
+			frame = borealis.GpuBusyFrame;
+			foreach ( var timing in borealis.GpuBusyTimings )
+				_borealisScopes.Add( new GpuScope( timing.Name, timing.Kind == Borealis.Backend.PassTimer.ScopeKind.List, timing.Start, timing.End ) );
+		}
+
+		_borealisFrame = frame;
+		FrameId = frame;
 
 		BuildRows( _borealisScopes, _rows, _borealisOpen, _borealisSeen );
 
@@ -220,7 +226,17 @@ public static class GpuProfilerStats
 		foreach ( var scope in scopes )
 		{
 			while ( open.Count > 0 && scopes[open[^1]].End <= scope.Start ) open.RemoveAt( open.Count - 1 );
-			var parent = open.Count > 0 ? open[^1] : -1;
+
+			// Under the innermost open scope that holds all of it. Lists on one queue run one after another, but another
+			// queue's list (async compute), or a list of the next frame's submitted while the last one's ran, can start inside
+			// one and end past it: nested there, its parent wouldn't contain it, and the timeline would drop the whole frame
+			var parent = -1;
+			for ( int k = open.Count - 1; k >= 0; k-- )
+			{
+				if ( scopes[open[k]].End < scope.End ) continue;
+				parent = open[k];
+				break;
+			}
 
 			seen.TryGetValue( scope.Name, out var count );
 			seen[scope.Name] = count + 1;
