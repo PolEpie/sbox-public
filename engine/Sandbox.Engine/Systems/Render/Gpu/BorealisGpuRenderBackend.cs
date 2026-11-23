@@ -1693,7 +1693,14 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	{
 		public string Path;
 		public int ShaderVersion = -1;
+
+		// The shader the path loaded, as of shadersVersion: found again without hashing the path
+		public ShaderFile Shader;
+		public int Loaded = -1;
 	}
+
+	// Moves on whenever the shaders found by path are forgotten (ShaderCompiled)
+	int shadersVersion;
 
 	readonly ConditionalWeakTable<Material, ShaderName> shaderNames = new();
 
@@ -1706,11 +1713,17 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 			// read (an error material keeps the error shader it was given)
 			name.Path = material.ShaderNameFromCode ?? FileShaderName( material.FilePath, reread: name.ShaderVersion >= 0 ) ?? material.native.GetString( "shader", "" );
 			name.ShaderVersion = material.ShaderVersion;
+			name.Loaded = -1;
 		}
 
+		if ( name.Loaded == shadersVersion ) return name.Shader;
 		var path = name.Path;
 		if ( string.IsNullOrEmpty( path ) ) return null;
-		if ( shaders.TryGetValue( path, out var shader ) ) return shader;
+		if ( shaders.TryGetValue( path, out var shader ) )
+		{
+			(name.Shader, name.Loaded) = (shader, shadersVersion);
+			return shader;
+		}
 
 		var file = path.Replace( '\\', '/' );
 		if ( file.EndsWith( ".vfx", StringComparison.OrdinalIgnoreCase ) ) file = file[..^4] + ".shader";
@@ -1764,7 +1777,11 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	{
 		try
 		{
-			if ( services.Shaders.Add( path, compiled ) ) shaders.Clear();
+			if ( services.Shaders.Add( path, compiled ) )
+			{
+				shaders.Clear();
+				shadersVersion++;
+			}
 		}
 		catch ( Exception e ) when ( e is System.IO.InvalidDataException or System.IO.IOException )
 		{
@@ -1838,14 +1855,14 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 			throw new NotSupportedException( "Native render attributes can't be drawn with on Borealis.Gpu" );
 
 		// A lent frame's transforms under everything, then a draw's attributes over the block's: a post process's blit reads
-		// the frame grab its command list set on the block
-		if ( blockAttributes?.Managed is { } block && !ReferenceEquals( block, attributes.Managed ) ) lowered.CopyFrom( LoweredBlock( block ) );
+		// the frame grab its command list set on the block. The block's lowered set shows through under the draw's, not copied
+		if ( blockAttributes?.Managed is { } block && !ReferenceEquals( block, attributes.Managed ) ) lowered.Under = LoweredBlock( block );
 		else if ( lentTransforms.IsValid ) lowered.Set( "g_TransformBuffer", lentTransforms );
 		Lower( attributes.Managed );
 		return lowered;
 	}
 
-	// The block's attributes lowered once and copied under each draw's: lowered again only when the set changes (its version),
+	// The block's attributes lowered once and shown under each draw's: lowered again only when the set changes (its version),
 	// in a new device frame (streamed textures swap their images), when the lent transforms change, or when a backing was
 	// made or let go (backingsVersion)
 	readonly ShaderAttributes loweredBlock = new();
@@ -1885,7 +1902,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 					lowered.SetById( AttributeId( token, name ), context.View( BoundTextureOf( texture ), mip ) );
 					break;
 				case GpuBuffer buffer:
-					LowerBuffer( name, buffer, lowered );
+					LowerBuffer( AttributeId( token, name ), name, buffer, lowered );
 					break;
 				case byte[] data:
 					lowered.SetById( AttributeId( token, name ), data );

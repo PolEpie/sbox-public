@@ -21,6 +21,9 @@ public sealed class ShaderAttributes
 	readonly List<int> set = new();
 	readonly Dictionary<string, int> combos = new( StringComparer.OrdinalIgnoreCase );
 
+	// Values and combos that show through where this set has none of its own (Under)
+	ShaderAttributes under;
+
 	/// <summary>Constants: a number, a vector or a matrix, as floats.</summary>
 	public void Set( string name, params float[] value ) => Put( AttributeIds.Of( name ), value );
 
@@ -56,9 +59,20 @@ public sealed class ShaderAttributes
 
 	bool Owns( int id, float[] array ) => owned[array.Length - 1] is var arrays && id < arrays.Length && ReferenceEquals( arrays[id], array );
 
-	float[] Owned( string name, int components )
+	/// <summary>A single number under an <see cref="AttributeIds"/> id, kept as <see cref="Set(string, float)"/> keeps one.</summary>
+	internal void SetById( int id, float value ) => Owned( id, 1 )[0] = value;
+
+	/// <summary>One to four floats under an <see cref="AttributeIds"/> id, kept as the vector setters keep them.</summary>
+	internal void SetFloatsById( int id, ReadOnlySpan<float> values )
 	{
-		var id = AttributeIds.Of( name );
+		if ( values.Length is < 1 or > 4 ) throw new ArgumentOutOfRangeException( nameof( values ), "One to four floats" );
+		values.CopyTo( Owned( id, values.Length ) );
+	}
+
+	float[] Owned( string name, int components ) => Owned( AttributeIds.Of( name ), components );
+
+	float[] Owned( int id, int components )
+	{
 		ref var arrays = ref owned[components - 1];
 		if ( id >= arrays.Length ) Array.Resize( ref arrays, Math.Max( Math.Max( arrays.Length * 2, 64 ), AttributeIds.Count ) );
 		var array = arrays[id] ??= new float[components];
@@ -110,10 +124,28 @@ public sealed class ShaderAttributes
 	public object Get( string name ) => Get( AttributeIds.Of( name ) );
 
 	/// <summary>The value set under an <see cref="AttributeIds"/> id, or null.</summary>
-	public object Get( int id ) => (uint)id < (uint)stamps.Length && stamps[id] == generation ? slots[id] : null;
+	public object Get( int id ) => (uint)id < (uint)stamps.Length && stamps[id] == generation ? slots[id] : under?.Get( id );
 
 	/// <summary>A combo's value, or null when it wasn't set.</summary>
-	public int? GetCombo( string name ) => combos.TryGetValue( name, out var value ) ? value : null;
+	public int? GetCombo( string name ) => combos.TryGetValue( name, out var value ) ? value : under?.GetCombo( name );
+
+	// Whether a value is set here, not under
+	bool Own( int id ) => (uint)id < (uint)stamps.Length && stamps[id] == generation;
+
+	/// <summary>
+	/// A set whose values and combos show through where this one has none of the same name, until <see cref="Clear"/>: the
+	/// engine's block attributes under each draw's, shared rather than copied. It must not change while this set is used,
+	/// and has none under it itself.
+	/// </summary>
+	internal ShaderAttributes Under
+	{
+		get => under;
+		set
+		{
+			if ( value?.under is not null ) throw new ArgumentException( "A set under another has none under it" );
+			under = value;
+		}
+	}
 
 	/// <summary>Every value set, by name, in the order first set: a foreach over it allocates nothing.</summary>
 	public SetValues Values => new( this );
@@ -126,20 +158,47 @@ public sealed class ShaderAttributes
 		IEnumerator<KeyValuePair<string, object>> IEnumerable<KeyValuePair<string, object>>.GetEnumerator() => GetEnumerator();
 		System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
 
-		/// <summary>Goes through the values in the order first set.</summary>
-		public struct Enumerator( ShaderAttributes attributes ) : IEnumerator<KeyValuePair<string, object>>
+		/// <summary>Goes through the values in the order first set, then those of the set under it that it doesn't replace.</summary>
+		public struct Enumerator : IEnumerator<KeyValuePair<string, object>>
 		{
-			int index = -1;
+			readonly ShaderAttributes attributes;
+			ShaderAttributes current;
+			int index;
+
+			/// <summary>Before the first value of <paramref name="attributes"/>.</summary>
+			public Enumerator( ShaderAttributes attributes )
+			{
+				this.attributes = current = attributes;
+				index = -1;
+			}
 
 			/// <summary>The value and its name.</summary>
-			public readonly KeyValuePair<string, object> Current => new( AttributeIds.NameOf( attributes.set[index] ), attributes.slots[attributes.set[index]] );
+			public readonly KeyValuePair<string, object> Current => new( AttributeIds.NameOf( current.set[index] ), current.slots[current.set[index]] );
 			readonly object System.Collections.IEnumerator.Current => Current;
 
 			/// <summary>On to the next value.</summary>
-			public bool MoveNext() => ++index < attributes.set.Count;
+			public bool MoveNext()
+			{
+				while ( true )
+				{
+					if ( ++index < current.set.Count )
+					{
+						if ( ReferenceEquals( current, attributes ) || !attributes.Own( current.set[index] ) ) return true;
+						continue;
+					}
+
+					if ( !ReferenceEquals( current, attributes ) || attributes.under is null ) return false;
+					current = attributes.under;
+					index = -1;
+				}
+			}
 
 			/// <summary>Back to before the first value.</summary>
-			public void Reset() => index = -1;
+			public void Reset()
+			{
+				index = -1;
+				current = attributes;
+			}
 
 			/// <summary>Nothing to release.</summary>
 			public readonly void Dispose() { }
@@ -170,6 +229,7 @@ public sealed class ShaderAttributes
 		foreach ( var id in set ) slots[id] = null;
 		set.Clear();
 		combos.Clear();
+		under = null;
 		if ( ++generation == int.MaxValue )
 		{
 			Array.Clear( stamps );
@@ -183,6 +243,7 @@ public sealed class ShaderAttributes
 	/// </summary>
 	internal void CopyFrom( ShaderAttributes other )
 	{
+		if ( other.under is not null ) CopyFrom( other.under );
 		foreach ( var id in other.set ) Put( id, other.slots[id] );
 		foreach ( var (name, value) in other.combos ) combos[name] = value;
 	}
@@ -190,6 +251,7 @@ public sealed class ShaderAttributes
 	/// <summary>Add <paramref name="other"/>'s values and combos, replacing any of the same name.</summary>
 	public void Merge( ShaderAttributes other )
 	{
+		if ( other.under is not null ) Merge( other.under );
 		// Arrays the other set reuses for its numbers are copied: setting them there again mustn't change this set
 		foreach ( var id in other.set ) Put( id, other.slots[id] is float[] { Length: >= 1 and <= 4 } floats && other.Owns( id, floats ) ? (float[])floats.Clone() : other.slots[id] );
 		foreach ( var (name, value) in other.combos ) combos[name] = value;
@@ -225,7 +287,7 @@ public sealed class ShaderAttributes
 			foreach ( var combo in shader[type]?.DynamicCombos ?? [] )
 			{
 				if ( shift == 128 ) return false;
-				var value = combos.Count == 0 ? 0 : GetCombo( combo.Name ) ?? 0;
+				var value = combos.Count == 0 && under is null ? 0 : GetCombo( combo.Name ) ?? 0;
 				if ( (uint)value > byte.MaxValue ) return false;
 				if ( shift < 64 ) bits |= (ulong)value << shift;
 				else more |= (ulong)value << (shift - 64);
@@ -496,6 +558,7 @@ public sealed partial class ShaderDrawer : IDisposable
 		pipelines.Clear();
 		foreach ( var pipeline in computePipelines.Values ) gpu.Destroy( pipeline );
 		computePipelines.Clear();
+		computeObjects.Clear();
 		if ( ownsCache ) cache?.Dispose();
 		cache = null;
 	}
@@ -743,7 +806,15 @@ public sealed partial class ShaderDrawer : IDisposable
 	/// </summary>
 	public bool Dispatch( CommandList list, ShaderFile shader, ShaderAttributes attributes, int x, int y, int z, string mode = null )
 	{
-		var variant = Variant( shader, attributes, mode );
+		return Dispatch( list, Variant( shader, attributes, mode ), attributes, x, y, z );
+	}
+
+	/// <summary>
+	/// <see cref="Dispatch(CommandList, ShaderFile, ShaderAttributes, int, int, int, string)"/> with the variant already found
+	/// (<see cref="Variant"/>), for a caller that needed it first.
+	/// </summary>
+	internal bool Dispatch( CommandList list, ShaderVariant variant, ShaderAttributes attributes, int x, int y, int z )
+	{
 		if ( variant?.Compute?.Bytecode is null ) return false;
 
 		BindForDispatch( list, variant, attributes );
@@ -758,11 +829,19 @@ public sealed partial class ShaderDrawer : IDisposable
 	/// <summary>
 	/// Run a compute shader over the thread groups (not threads) that <paramref name="arguments"/> holds at
 	/// <paramref name="offset"/> bytes - three 32-bit counts, written by an earlier pass - as native's indirect dispatch does.
-	/// The rest is as <see cref="Dispatch"/>.
+	/// The rest is as <see cref="Dispatch(CommandList, ShaderFile, ShaderAttributes, int, int, int, string)"/>.
 	/// </summary>
 	public bool DispatchIndirect( CommandList list, ShaderFile shader, ShaderAttributes attributes, BufferHandle arguments, long offset, string mode = null )
 	{
-		var variant = Variant( shader, attributes, mode );
+		return DispatchIndirect( list, Variant( shader, attributes, mode ), attributes, arguments, offset );
+	}
+
+	/// <summary>
+	/// <see cref="DispatchIndirect(CommandList, ShaderFile, ShaderAttributes, BufferHandle, long, string)"/> with the variant
+	/// already found (<see cref="Variant"/>).
+	/// </summary>
+	internal bool DispatchIndirect( CommandList list, ShaderVariant variant, ShaderAttributes attributes, BufferHandle arguments, long offset )
+	{
 		if ( variant?.Compute?.Bytecode is null ) return false;
 
 		BindForDispatch( list, variant, attributes );
@@ -772,18 +851,31 @@ public sealed partial class ShaderDrawer : IDisposable
 
 	void BindForDispatch( CommandList list, ShaderVariant variant, ShaderAttributes attributes )
 	{
-		if ( Objects( variant ) )
+		if ( MaterialObjects )
 		{
-			var key = new MaterialObjectCache.Key( null, variant, null, Format.Unknown, Format.Unknown, 0, false, false );
-			var materialObject = cache.Get( key, immediate: true, (Drawer: this, Variant: variant), static ( s, layout ) => s.Drawer.ComputePipeline( s.Variant, layout.Sets ) );
-			BindObject( list, materialObject, attributes, default );
+			// Found in the cache once a variant: an object with no material is never made again
+			if ( !computeObjects.TryGetValue( variant, out var materialObject ) )
+			{
+				var key = new MaterialObjectCache.Key( null, variant, null, Format.Unknown, Format.Unknown, 0, false, false );
+				computeObjects[variant] = materialObject = Cache.Get( key, immediate: true, (Drawer: this, Variant: variant), static ( s, layout ) => s.Drawer.ComputePipeline( s.Variant, layout.Sets ) );
+			}
+
+			// As Objects: while the frame's pass constants have room for it
+			if ( cache.PassSpace >= materialObject.Layout.ImmediateBytes )
+			{
+				BindObject( list, materialObject, attributes, default );
+				return;
+			}
+
+			Fallbacks++;
 		}
-		else
-		{
-			list.SetPipeline( ComputePipeline( variant, null ) );
-			Bind( list, variant, attributes, default );
-		}
+
+		list.SetPipeline( ComputePipeline( variant, null ) );
+		Bind( list, variant, attributes, default );
 	}
+
+	// Each compute variant's material object (BindForDispatch)
+	readonly Dictionary<ShaderVariant, MaterialObject> computeObjects = new();
 
 	/// <summary>
 	/// The compute pipeline a dispatch of <paramref name="variant"/> binds by reflection with (made once), for a caller that
@@ -1076,7 +1168,7 @@ public sealed partial class ShaderDrawer : IDisposable
 
 		// The draw's attribute, or the material's texture: a texture the material sets (The Festering's dither matrix)
 		var argument = table[variable.SourceIndex];
-		var texture = attributes.Get( string.IsNullOrEmpty( argument.Attribute ) ? argument.Name : argument.Attribute ) as TextureHandle?;
+		var texture = attributes.Get( argument.BindingId ) as TextureHandle?;
 		if ( texture is null && Material?.Textures is { } textures && textures.TryGetValue( argument.Name, out var materialTexture ) ) texture = materialTexture?.Handle;
 		if ( texture is not { IsValid: true } handle ) return null;
 

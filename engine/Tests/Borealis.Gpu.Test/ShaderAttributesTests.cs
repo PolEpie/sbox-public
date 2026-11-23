@@ -65,6 +65,52 @@ public class ShaderAttributesTests
 	}
 
 	/// <summary>
+	/// A set under another (the engine's block attributes under a draw's) shows through where the draw sets nothing of the same
+	/// name: by name, by id, combos, and enumerating, which gives each name once, the draw's value where both set it. Clearing
+	/// drops the set under it, and merging or copying takes both.
+	/// </summary>
+	[TestMethod]
+	public void ASetUnderAnotherShowsThrough()
+	{
+		var block = new ShaderAttributes();
+		block.Set( "TestUnderShared", 1.0f );
+		block.Set( "TestUnderBlockOnly", 2.0f );
+		block.SetCombo( "D_TEST_UNDER", 3 );
+		block.SetCombo( "D_TEST_UNDER_REPLACED", 1 );
+
+		var draw = new ShaderAttributes();
+		draw.Set( "TestUnderShared", 10.0f );
+		draw.Set( "TestUnderDrawOnly", 20.0f );
+		draw.SetCombo( "D_TEST_UNDER_REPLACED", 2 );
+		draw.Under = block;
+
+		CollectionAssert.AreEqual( new[] { 10.0f }, (float[])draw.Get( "TestUnderShared" ), "the draw's own over the block's" );
+		CollectionAssert.AreEqual( new[] { 2.0f }, (float[])draw.Get( AttributeIds.Of( "testunderblockonly" ) ), "the block's, by id" );
+		Assert.AreEqual( 3, draw.GetCombo( "D_TEST_UNDER" ) );
+		Assert.AreEqual( 2, draw.GetCombo( "D_TEST_UNDER_REPLACED" ) );
+
+		var seen = draw.Values.Select( v => (v.Key, ((float[])v.Value)[0]) ).OrderBy( v => v.Key, StringComparer.Ordinal ).ToArray();
+		CollectionAssert.AreEqual( new[] { ("TestUnderBlockOnly", 2.0f), ("TestUnderDrawOnly", 20.0f), ("TestUnderShared", 10.0f) }, seen );
+
+		var merged = new ShaderAttributes();
+		merged.Merge( draw );
+		CollectionAssert.AreEqual( new[] { 2.0f }, (float[])merged.Get( "TestUnderBlockOnly" ), "merging takes what's under" );
+		CollectionAssert.AreEqual( new[] { 10.0f }, (float[])merged.Get( "TestUnderShared" ) );
+		Assert.AreEqual( 2, merged.GetCombo( "D_TEST_UNDER_REPLACED" ) );
+
+		// A matrix set by id is the array given (the engine's lowered attributes share theirs), not copied
+		var matrix = new float[16];
+		draw.SetById( AttributeIds.Of( "TestUnderMatrix" ), matrix );
+		Assert.AreSame( matrix, draw.Get( "TestUnderMatrix" ) );
+
+		draw.Clear();
+		Assert.IsNull( draw.Under );
+		Assert.IsNull( draw.Get( "TestUnderBlockOnly" ) );
+		Assert.IsNull( draw.GetCombo( "D_TEST_UNDER" ) );
+		Assert.AreEqual( 0, draw.Values.Count() );
+	}
+
+	/// <summary>
 	/// Values stored by attribute id read back by any spelling of the name and by id; clearing forgets them and the combos;
 	/// merging takes the other's over its own; enumerating gives each name once, as first spelled.
 	/// </summary>

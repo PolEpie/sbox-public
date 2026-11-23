@@ -45,6 +45,19 @@ public sealed class ShaderVariant
 
 	readonly ShaderResource[] resources;
 
+	/// <summary>
+	/// Whether a stage reads the device's bindless sampled textures (<see cref="ShaderAbi.BindlessTextures"/>), so it can
+	/// sample a texture it doesn't bind by its index: such a texture has to be in <see cref="ImageLayout.ShaderRead"/>, the
+	/// layout its bindless descriptor names.
+	/// </summary>
+	public bool ReadsBindlessTextures { get; }
+
+	/// <summary>
+	/// Whether a stage uses the device's bindless storage textures (<see cref="ShaderAbi.BindlessStorageTextures"/>), so it
+	/// can write a texture it doesn't bind by its index: such a texture has to be in <see cref="ImageLayout.General"/>.
+	/// </summary>
+	public bool UsesBindlessStorageTextures { get; }
+
 	/// <summary>The vertex shader's inputs, by location, with the semantic each reads.</summary>
 	public IReadOnlyList<VertexInput> VertexInputs { get; }
 
@@ -87,6 +100,9 @@ public sealed class ShaderVariant
 
 			foreach ( var binding in stage.Reflection.Bindings )
 			{
+				// The bindless set's arrays a stage reaches: reflection lists only what its code uses
+				if ( binding.Set == ShaderAbi.BindlessSet && binding.Binding == ShaderAbi.BindlessTextures ) ReadsBindlessTextures = true;
+				if ( binding.Set == ShaderAbi.BindlessSet && binding.Binding == ShaderAbi.BindlessStorageTextures ) UsesBindlessStorageTextures = true;
 				if ( binding.Set >= ShaderAbi.BindlessSet ) continue;
 				if ( binding.Dimension is SpirvImageDimension.Buffer or SpirvImageDimension.SubpassData )
 					throw new InvalidDataException( $"{shader.Name}: binding {binding.Set}.{binding.Binding} is a texel buffer or input attachment, which Borealis.Gpu doesn't bind" );
