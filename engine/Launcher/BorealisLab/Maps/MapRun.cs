@@ -61,7 +61,7 @@ internal static class MapRun
 	/// SceneLab's views of Construct (MapScenes.ConstructSkyline and ConstructOverview) as SceneLab draws them: its orbit
 	/// camera keeps each preset's position but looks at (0, 0, 30) unless <c>-camera-lookat</c> moves it.
 	/// </summary>
-	static readonly MapView[] ConstructViews =
+	internal static readonly MapView[] ConstructViews =
 	[
 		new( "skyline", new V3( 864, -608, 67 ), new V3( 0, 0, 30 ) ),
 		new( "overview", new V3( 3000, 2500, 1200 ), new V3( 0, 0, 30 ) ),

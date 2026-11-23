@@ -28,6 +28,7 @@ namespace Sandbox.BorealisLab;
 /// <item><c>-package-shaders folder -package-roots "a;b"</c> - sort package shaders by what the converter makes of them (<see cref="PackageShaders"/>).</item>
 /// <item><c>-crowd</c> - SceneLab's Crowd Near, animated, on a Borealis.Gpu device in a window, timed (<see cref="CrowdRun"/>).</item>
 /// <item><c>-cook-meshlets out</c> - copy a compiled map package with the meshlets the resource compiler cooks added to its meshes (<see cref="Maps.MeshletCook"/>).</item>
+/// <item><c>-error-census ident,...</c> - what of each map doesn't draw as its content says: fallen-back materials, shaders that don't load or compile, error draws (<see cref="Maps.ErrorCensus"/>).</item>
 /// <item><c>-map ident</c>, <c>-construct</c> - read a compiled map with Borealis.Source2 and time drawing it on a Borealis.Gpu device, with no Source 2 device (<see cref="Maps.MapRun"/>).</item>
 /// </list>
 /// Startup and frame times go to the log, and a summary to the console.
@@ -38,6 +39,9 @@ internal static class BorealisLabApp
 	{
 		// A map package copied with its meshes' meshlets cooked in: no device
 		if ( Maps.MeshletCook.Requested ) return Maps.MeshletCook.Run();
+
+		// Maps' materials, shaders and draws that don't draw as their content says, on a device with no window
+		if ( Maps.ErrorCensus.Requested ) return Maps.ErrorCensus.Run();
 
 		// A map on a Borealis.Gpu device of its own: nothing of the engine starts
 		if ( Maps.MapRun.Requested ) return Maps.MapRun.Run();
