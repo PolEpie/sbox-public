@@ -147,7 +147,7 @@ internal sealed class DecalSceneObject : SceneObject
 		coverageAmount = 1.0f;
 		coverageRange = 0.07f;
 
-		MakeWithoutTwin( world, null, Rendering.SceneObjectFlags.IsOpaque, batchable: false );
+		MakeManaged( world, null, Rendering.SceneObjectFlags.IsOpaque, batchable: false );
 		KeepFixedBounds( false );
 	}
 

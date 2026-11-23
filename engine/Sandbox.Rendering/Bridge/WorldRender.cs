@@ -1029,16 +1029,12 @@ internal sealed partial class WorldRender : ISceneWorldRender, IAttributeSource,
 
 		var meshes = World.Objects.ToArray().OfType<MeshObject>().ToArray();
 		text.Append( $"; {meshes.Count( x => x.LightmapAttributes is not null )} of {meshes.Length} meshes lightmapped, {meshes.Count( x => x.Mesh is { HasLightmappedDraws: true } )} with lightmapped draws; sun bake index {lighting.SunBakeIndex}{(lighting.SunBaked is { } baked ? $", packed towards {baked.Row0.x:0.###},{baked.Row1.x:0.###},{baked.Row2.x:0.###} color {baked.Color}" : "")}" );
-		// Compare probe packing within float tolerance, excluding setup-time cubemap indices.
 		var probes = 0;
-		var probesAsNative = 0;
 		foreach ( var sceneObject in source.SceneObjects )
 		{
-			if ( Find( sceneObject ) is not EnvMapObject envMap ) continue;
-			probes++;
-			if ( SceneNative.PacksAsNative( sceneObject, envMap ) ) probesAsNative++;
+			if ( Find( sceneObject ) is EnvMapObject ) probes++;
 		}
-		text.Append( $"; {probesAsNative} of {probes} envmap probes packed as native packs them" );
+		text.Append( $"; {probes} envmap probes" );
 
 		var volumes = World.LightProbeVolumes;
 		text.Append( $"; {volumes.Count} light probe volumes ({volumes.Count( x => x.Attributes is not null )} with constants, light groups {string.Join( " ", volumes.SelectMany( x => x.LightGroups ).Distinct() )}), {meshes.Count( x => x.NeedsLightProbe )} meshes need one, {meshes.Count( x => x.NeedsLightProbe && Borealis.LightProbeVolume.Choose( volumes, World.BoundsCenter[x.Index], World.BoundsCenter[x.Index], World.BoundsExtents[x.Index], x.LightGroup ) >= 0 )} find one" );

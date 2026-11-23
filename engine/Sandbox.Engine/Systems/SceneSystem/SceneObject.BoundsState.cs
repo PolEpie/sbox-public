@@ -37,7 +37,7 @@ public partial class SceneObject
 	}
 
 	/// <summary>
-	/// Keep these bounds here from now on: an object without a twin whose type works its bounds out itself, as native's object
+	/// Keep these bounds here from now on: an object whose type works its bounds out itself, as native's object
 	/// does (a light from its range, a cubemap from its box), set as native's <c>SetBounds</c> keeps them.
 	/// </summary>
 	private protected void KeepBounds( in BBox bounds )
@@ -49,8 +49,8 @@ public partial class SceneObject
 	/// <summary>Keep a rigid model's bounds here from now on, worked out from its mesh instances as native's transform does.</summary>
 	void KeepRigidBounds()
 	{
-		// A scene model without a twin starts as a rigid one, as its twin's bounds would be, until its pose sets them
-		if ( !ResolvesDraws || (this is SceneModel && HasTwin) )
+		// A scene model starts as a rigid one, as native's were, until its pose sets them; one native code made keeps native's
+		if ( !ResolvesDraws || (this is SceneModel && HasNativeObject) )
 		{
 			_boundsKind = BoundsKind.Native;
 			return;
@@ -61,8 +61,7 @@ public partial class SceneObject
 	}
 
 	/// <summary>
-	/// A scene model's bounds worked out from the pose its animation instance published: kept here from now on. The twin is a
-	/// plain object in its model's bind pose and keeps that mesh's bounds, which render-mesh traces of it read.
+	/// A scene model's bounds worked out from the pose its animation instance published: kept here from now on.
 	/// </summary>
 	private protected void SetPoseBounds( in BBox bounds )
 	{

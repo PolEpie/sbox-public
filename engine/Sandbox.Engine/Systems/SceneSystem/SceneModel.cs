@@ -10,12 +10,6 @@ public sealed partial class SceneModel : SceneObject
 {
 	internal SceneModelAnimation animNative;
 
-	/// <summary>
-	/// Made by managed code: its native twin is a plain scene object and it animates on its own instance. A scene model
-	/// native code made (a tool's preview) wraps the <see cref="CSceneAnimatableObject"/> native animates.
-	/// </summary>
-	readonly bool plainTwin;
-
 	internal SceneModel() { }
 	internal SceneModel( HandleCreationData _ ) { }
 
@@ -28,45 +22,29 @@ public sealed partial class SceneModel : SceneObject
 
 		if ( !model.HasRenderMeshes() ) model = Model.Error;
 
-		plainTwin = true;
+		// Made as SceneObject's: it animates on its own instance
+		var flags = Rendering.SceneObjectFlags.CastShadows | Rendering.SceneObjectFlags.IsLoaded;
+		MakeManaged( sceneWorld, model );
+		_keptModel = model;
+		StartResolvingDraws( model );
+		FlagsAtCreation( model, flags );
 
-		using ( var h = NextHandleForTwin() )
-		{
-			var flags = Rendering.SceneObjectFlags.CastShadows | Rendering.SceneObjectFlags.IsLoaded;
-			var typeFlags = ESceneObjectTypeFlags.NONE;
+		CreateAnimationInstance( model, transform );
 
-			// A plain mesh object, as SceneObject's: it animates on its own instance, and native only keeps its draw state,
-			// bounds and render meshes for traces
-			if ( MakesNativeTwin ) MeshSystem.CreateSceneObject( model.native, transform, null, flags, typeFlags, sceneWorld, 0x1 );
-			else MakeWithoutTwin( sceneWorld, model );
-			_keptModel = model;
-			StartResolvingDraws( model );
-			FlagsAtCreation( model, flags );
+		Tags.RemoveAll();
+		Transform = transform;
 
-			if ( MakesNativeTwin && native.IsNull )
-			{
-				Log.Warning( "SceneModel: Didn't get a valid native pointer" );
-				throw new System.ArgumentException( "Error creating AnimSceneObject - possible invalid model?" );
-			}
-
-			CreateAnimationInstance( model, transform );
-
-			Tags.RemoveAll();
-			Transform = transform;
-
-			RegisterLegacyAnimationCallback();
-			animNative.InitAnimation();
-			PoseChanged();
-		}
+		RegisterLegacyAnimationCallback();
+		animNative.InitAnimation();
+		PoseChanged();
 	}
 
 	internal override void OnNativeInit( CSceneObject ptr )
 	{
 		base.OnNativeInit( ptr );
 
-		// Native code made it (a tool's preview): its twin is the CSceneAnimatableObject native animates
-		if ( !plainTwin )
-			animNative = new SceneModelAnimation( (NativeEngine.CSceneAnimatableObject)ptr, default, this );
+		// Native code made it (a tool's preview): the CSceneAnimatableObject native animates
+		animNative = new SceneModelAnimation( (NativeEngine.CSceneAnimatableObject)ptr, default, this );
 	}
 
 	internal override void Destroyed()

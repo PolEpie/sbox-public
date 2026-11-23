@@ -111,7 +111,7 @@ public sealed class LightObject : RenderObject
 	internal bool RendersShadowMap => CastShadows && (!Baked || MixedShadows);
 
 	/// <summary>
-	/// Optional bridge-provided native data (<c>RenderTools.PackSceneLight</c>); otherwise pack managed properties.
+	/// Optional record packed by the bridge (as native's light binner packed it); otherwise pack managed properties.
 	/// </summary>
 	internal Features.LightBinnerFeature.GpuLight? NativePacked { get; set; }
 

@@ -100,24 +100,6 @@ native accessor g_pSceneSystem as NativeEngine.CSceneSystem
 
     bool WaitForRenderingToComplete();
 
-    inline CSceneLightObject CreatePointLight( ISceneWorld pWorld )
-    {
-        LightDesc_t desc;
-		desc.Clear();
-		desc.InitPoint( vec3_origin, Vector( 100, 0, 100 ) );
-        desc.m_Attenuation0 = 0; // if this is 1 then the light has no falloff
-		return g_pSceneSystem->CreateLight( desc, pWorld, false );
-    }
-
-    inline CSceneLightObject CreateSpotLight( ISceneWorld pWorld )
-    {
-        LightDesc_t desc;
-		desc.Clear();
-		desc.InitSpot( vec3_origin, Vector( 100, 0, 100 ), Vector( 10, 0, 0 ), 15, 30 );
-        desc.m_Attenuation0 = 0; // if this is 1 then the light has no falloff
-		return g_pSceneSystem->CreateLight( desc, pWorld, false );
-    }
-
     inline CSceneLightObject CreateOrthoLight( ISceneWorld pWorld )
     {
         LightDesc_t desc;
@@ -126,41 +108,6 @@ native accessor g_pSceneSystem as NativeEngine.CSceneSystem
         desc.RecalculateDerivedValues();
         return g_pSceneSystem->CreateLight( desc, pWorld, false );
     }
-
-    inline CSceneLightObject CreateDirectionalLight( ISceneWorld pWorld, Vector3 direction )
-    {
-        LightDesc_t desc;
-		desc.Clear();
-		desc.InitDirectional( direction, Vector( 100, 0, 100 ) );
-        desc.m_nShadowCascadeCount = 3;
-
-		return g_pSceneSystem->CreateLight( desc, pWorld, false );
-    }
-
-    inline CSceneLightObject CreateEnvMap( ISceneWorld pWorld, int nProjectionMode )
-    {
-        LightDesc_t desc;
-        desc.InitEnvironmentProbe( vec3_origin, 512 );
-        desc.m_nEnvProbeId = 0;
-        desc.RecalculateDerivedValues();
-        CEnvMapSceneObject* pSceneObject = ( CEnvMapSceneObject* )g_pSceneSystem->CreateLight( desc, pWorld, false );
-        pSceneObject->m_nProjectionMode = ( CubemapProjectionMode_t )nProjectionMode;
-        return pSceneObject;
-    }
-
-    CSceneLightProbeVolumeObject CreateLightProbeVolume( ISceneWorld pWorld );
-
-    void MarkEnvironmentMapObjectUpdated( CEnvMapSceneObject pEnvMap );
-
-    inline uint AddCullingBox( ISceneWorld pWorld, bool nCullMode, Vector3 vOrigin, Angles vAngles, Vector3 vExtents )
-    {
-        return g_pSceneSystem->AddCullingBox( pWorld, nCullMode ? SCENESYSTEM_BOX_CULL_INSIDE : SCENESYSTEM_BOX_CULL_OUTSIDE, vOrigin, vAngles, vExtents );
-    }
-
-    void RemoveCullingBox( ISceneWorld pWorld, uint nBoxId );
-
-    uint AddVolumetricFogVolume( ISceneWorld pWorld, SceneVolumetricFogVolume_t volume );
-    void RemoveVolumetricFogVolume( ISceneWorld pWorld, uint nId );
 
 
 	inline void SetNextRenderTime( float flNextTime )
