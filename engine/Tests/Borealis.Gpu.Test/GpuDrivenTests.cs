@@ -2175,6 +2175,38 @@ public class GpuDrivenTests : GpuTest
 	}
 
 	/// <summary>
+	/// The frame buffer copy's mips made a 16x16 tile a group (<see cref="BackendDevice.FrameBufferCopyTiledMips"/>) are
+	/// downsample_cs's, a texel a thread: the glass scene's frames, whose tinted glass reads them blurred, are the same pixels
+	/// either way.
+	/// </summary>
+	[TestMethod]
+	public void GlassFrameCopyMipsMadeInTiles()
+	{
+		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDriven = false, GpuDrivenMeshes = true };
+		var (world, view) = GlassScene( backend );
+
+		var previousHost = RenderHost.Current;
+		RenderHost.Current = new BackendRenderHost( backend );
+		try
+		{
+			using var target = ViewTarget.Create( new Vector2Int( Width, Height ), 1, TextureFormat.RGBA16161616F, TextureFormat.D32FS8, "Glass frame copy mips test" );
+			backend.FrameBufferCopyTiledMips = false;
+			var texels = GlassFrames( backend, world, view, target, false, new DrawCensus() );
+			backend.FrameBufferCopyTiledMips = true;
+			var tiles = GlassFrames( backend, world, view, target, false, new DrawCensus() );
+
+			TestContext.WriteLine( Differences( texels, tiles ) );
+			Assert.AreEqual( 0, Device.ValidationErrors, "no validation errors" );
+			Assert.AreEqual( 0, Different( texels, tiles ), "the same pixels" );
+		}
+		finally
+		{
+			Device.WaitIdle();
+			RenderHost.Current = previousHost;
+		}
+	}
+
+	/// <summary>
 	/// Refractive glass (glass.shader's surface, reading the frame buffer copy) draws GPU-driven in the translucent list's
 	/// order, with the frame copied once, at the first glass: between rows of translucent boxes that don't read it and in
 	/// front of opaque ones, two rows of glass, refracting, blurred and tinted, shade exactly as the classic path shades them,

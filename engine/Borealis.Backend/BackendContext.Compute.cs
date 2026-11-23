@@ -164,6 +164,7 @@ internal sealed partial class BackendContext
 	}
 
 	static readonly StringToken MipLevel0 = new( "MipLevel0" ), MipLevel1 = new( "MipLevel1" ), TextureSize = new( "TextureSize" ), InvTextureSize = new( "InvTextureSize" ), DownsampleMethod = new( "D_DOWNSAMPLE_METHOD" );
+	static readonly StringToken MipRegion = new( "MipRegion" );
 	static readonly StringToken MaskOutput = new( "Output" ), MaskMip = new( "Mip" ), MaskSource = new( "MaskSource" ), MaskRegion = new( "MaskRegion" ), MaskCopies = new( "D_COPY" );
 
 	/// <summary>The frame buffer copy's mask and downsample parameters, kept between frames.</summary>
@@ -206,12 +207,16 @@ internal sealed partial class BackendContext
 
 	/// <summary>
 	/// The frame buffer copy's mips, as native's <c>CSceneSystem::DownsampleTexture</c> makes them after the copy and its
-	/// mask: a gaussian <c>downsample_cs</c> dispatch a mip, each from the one above, over the viewport's part.
+	/// mask: a gaussian dispatch a mip, each from the one above, over the viewport's part. <c>framecopy_mips_cs</c> makes
+	/// <c>downsample_cs</c>'s gaussian mip a 16x16 tile a group, so each texel takes 2.25 taps of the mip above, not 4
+	/// (<see cref="BackendDevice.FrameBufferCopyTiledMips"/>).
 	/// </summary>
 	void GenerateFrameBufferCopyMips( BackendTexture copy, Rect viewport )
 	{
 		if ( copy.Mips <= 1 ) return;
-		if ( device.MaterialFromShader( "shaders/downsample_cs.shader" ) is not BackendMaterial { Shader: not null } downsample ) return;
+		var tiled = device.FrameBufferCopyTiledMips && device.MaterialFromShader( "shaders/framecopy_mips_cs.shader" ) is BackendMaterial { Shader: not null } tiles ? tiles : null;
+		var downsample = tiled ?? device.MaterialFromShader( "shaders/downsample_cs.shader" ) as BackendMaterial;
+		if ( downsample is not { Shader: not null } ) return;
 
 		var parameters = mipParameters;
 		parameters.SetCombo( DownsampleMethod, 1 );
@@ -223,7 +228,11 @@ internal sealed partial class BackendContext
 			parameters.Set( MipLevel1, copy, i + 1 );
 			parameters.Set( TextureSize, new Vector2( width, height ) );
 			parameters.Set( InvTextureSize, new Vector2( 1.0f / width, 1.0f / height ) );
-			Dispatch( downsample, parameters, width, height, 1 );
+			parameters.Set( MipRegion, new Vector4( 0, 0, width, height ) );
+
+			// A thread a texel for downsample_cs; tiled, an 8x8 group a 16x16 tile
+			if ( tiled is not null ) Dispatch( downsample, parameters, (width + 15) / 16 * 8, (height + 15) / 16 * 8, 1 );
+			else Dispatch( downsample, parameters, width, height, 1 );
 			List.Barrier( PipelineStage.ComputeShader, MemoryAccess.ShaderWrite, PipelineStage.ComputeShader, MemoryAccess.ShaderRead | MemoryAccess.ShaderWrite );
 		}
 	}

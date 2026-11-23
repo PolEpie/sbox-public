@@ -480,6 +480,12 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	internal bool FrameBufferCopyMasked { get; set; } = true;
 
 	/// <summary>
+	/// The frame buffer copy's gaussian mips are made a 16x16 tile a group (<c>framecopy_mips_cs</c>), the same texels as
+	/// <c>downsample_cs</c> makes them a texel a thread. Off for comparisons.
+	/// </summary>
+	internal bool FrameBufferCopyTiledMips { get; set; } = true;
+
+	/// <summary>
 	/// A layer's draws split over lists recorded apart keep one rendering scope on the GPU: each list suspends its last scope
 	/// and the next resumes it (<see cref="RenderingFlags"/>), when the plan says the next carries on its draws. Needs
 	/// <see cref="BatchSubmits"/>. Off by default: on Construct it made no measurable GPU difference, and the 1.4.321
