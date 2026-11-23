@@ -62,9 +62,17 @@ internal sealed class MapGeometry
 	}
 
 	MapTrace trace;
+	readonly System.Threading.Lock traceLock = new();
 
-	/// <summary>The map's render meshes for traces, built the first time something traces them.</summary>
-	public MapTrace Trace() => trace ??= new MapTrace( this, readModel );
+	/// <summary>
+	/// The map's render meshes for traces, built the first time something traces them: once, even when several threads trace
+	/// at once (a DDGI bake relocates its probes in parallel), the others waiting for it.
+	/// </summary>
+	public MapTrace Trace()
+	{
+		if ( trace is { } built ) return built;
+		lock ( traceLock ) return trace ??= new MapTrace( this, readModel );
+	}
 
 	// The tags native's world node gives every object (CWorldNode::ApplyTags)
 	static uint[] worldTags;

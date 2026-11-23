@@ -66,16 +66,8 @@ internal class SceneLightProbe : SceneObject
 
 		RenderingEnabled = true;
 
-		if ( lightProbeVolume.IsNull )
-		{
-			// CreateConstants' bounds: its box where it's placed (later moves leave them, as native's do)
-			KeepBounds( TransformBounds( Transform, bounds ) );
-			return;
-		}
-
-		lightProbeVolume.CreateConstants();
-
-		CSceneSystem.MarkLightProbeVolumeObjectUpdated( this );
+		// Its box where it's placed (later moves leave them, as native's PlaceInWorld bounds Hammer's)
+		KeepBounds( TransformBounds( Transform, bounds ) );
 	}
 
 	readonly Texture probeTexture, indicesTexture, scalarsTexture;
