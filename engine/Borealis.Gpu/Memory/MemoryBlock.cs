@@ -34,6 +34,9 @@ internal sealed class MemoryBlock
 	/// <summary>The allocator's frame when it last became empty (<see cref="MemoryAllocator.Trim"/>).</summary>
 	public ulong EmptySince;
 
+	/// <summary>When it was kept as a spare, in <see cref="System.Diagnostics.Stopwatch"/> ticks.</summary>
+	public long EmptySinceTicks;
+
 	/// <summary>Whether it's empty and kept as a spare in the allocator's list of them.</summary>
 	public bool Spare;
 

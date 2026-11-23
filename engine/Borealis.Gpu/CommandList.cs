@@ -1288,14 +1288,22 @@ public sealed unsafe class CommandList
 	}
 
 	/// <summary>
+	/// Whether the biggest upload pages share large blocks (<c>BOREALIS_UPLOAD_PAGES_SHARED=1</c>), 32 to a block, rather than
+	/// each being an allocation of its own: a load takes hundreds, each a driver call. Pages are trimmed from the emptiest
+	/// blocks first, so blocks drain.
+	/// </summary>
+	internal static bool SharedPages { get; set; } = Environment.GetEnvironmentVariable( "BOREALIS_UPLOAD_PAGES_SHARED" ) == "1";
+
+	/// <summary>
 	/// A new upload page of <paramref name="pageSize"/> bytes (of <see cref="PageSizes"/> class <paramref name="pageClass"/>,
 	/// or -1 for one big request), on any thread. The biggest are each their own allocation, so pages freed as fewer are
-	/// needed leave no holes in shared blocks.
+	/// needed leave no holes in shared blocks, or share large blocks (<see cref="SharedPages"/>).
 	/// </summary>
 	internal static UploadPage CreatePage( Device device, long pageSize, int pageClass )
 	{
 		BufferHandle buffer;
-		Memory.MemoryAllocator.OwnAllocation = pageSize >= PageSize;
+		Memory.MemoryAllocator.OwnAllocation = pageSize > PageSize || (pageSize == PageSize && !SharedPages);
+		Memory.MemoryAllocator.InLargeBlocks = pageSize == PageSize && SharedPages;
 		try
 		{
 			buffer = device.CreateBuffer( new BufferInfo
@@ -1309,6 +1317,7 @@ public sealed unsafe class CommandList
 		finally
 		{
 			Memory.MemoryAllocator.OwnAllocation = false;
+			Memory.MemoryAllocator.InLargeBlocks = false;
 		}
 
 		ref var record = ref device.Get( buffer );

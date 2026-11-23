@@ -454,6 +454,7 @@ public sealed unsafe partial class Device
 	}
 	readonly int[] freeListsLow = [int.MaxValue, int.MaxValue];
 	ulong trimFrom;
+	long trimFromTicks;
 
 	/// <summary>
 	/// Free upload pages and spare command lists that stayed unused for <see cref="UploadPageIdleFrames"/> frames, past
@@ -466,7 +467,7 @@ public sealed unsafe partial class Device
 	void TrimSpares()
 	{
 		for ( int c = 0; c < FreePages.Length; c++ ) freePagesLow[c] = Math.Min( freePagesLow[c], FreePages[c].Count );
-		if ( FrameNumber - trimFrom < UploadPageIdleFrames ) return;
+		if ( FrameNumber - trimFrom < UploadPageIdleFrames || !Allocator.KeptLongEnough( trimFromTicks ) ) return;
 
 		for ( int c = 0; c < FreePages.Length; c++ )
 		{
@@ -512,6 +513,7 @@ public sealed unsafe partial class Device
 		}
 
 		trimFrom = FrameNumber;
+		trimFromTicks = System.Diagnostics.Stopwatch.GetTimestamp();
 	}
 
 	readonly CommandList[] keptLists = new CommandList[KeptFreeCommandLists];
@@ -596,7 +598,7 @@ public sealed unsafe partial class Device
 			if ( !swapChain.HasImage ) throw new InvalidOperationException( "The swap chain has no acquired image to submit for" );
 			swapChain.SubmitsForImage++;
 			RememberEvent( "submitting for a swap chain image, list marker slot:", list.MarkerSlot );
-			waitInfos[waitCount++] = new VkSemaphoreSubmitInfo { sType = VkStructureType.SemaphoreSubmitInfo, semaphore = swapChain.AcquireSemaphore, stageMask = Vulkan.Vk.Stage2AllCommands };
+			waitInfos[waitCount++] = new VkSemaphoreSubmitInfo { sType = VkStructureType.SemaphoreSubmitInfo, semaphore = swapChain.AcquireSemaphoreHandle, stageMask = Vulkan.Vk.Stage2AllCommands };
 			signals[signalCount++] = new VkSemaphoreSubmitInfo { sType = VkStructureType.SemaphoreSubmitInfo, semaphore = swapChain.PresentSemaphore, stageMask = Vulkan.Vk.Stage2AllCommands };
 		}
 
@@ -607,6 +609,7 @@ public sealed unsafe partial class Device
 			PairScopes( queue, list );
 
 			var value = queue.Next();
+			swapChain?.AcquireWaited( new SyncPoint( list.Queue, value ) );
 			Remember( queue, value, list, queue.Pending.Count );
 			signals[0] = new VkSemaphoreSubmitInfo { sType = VkStructureType.SemaphoreSubmitInfo, semaphore = queue.Timeline, value = value, stageMask = Vulkan.Vk.Stage2AllCommands };
 

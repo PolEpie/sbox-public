@@ -18,6 +18,8 @@ public class ViewLifetimeTests : GpuTest
 	{
 		var view = new object();
 		var state = backend.VisibilityFor( view, TextureInfo.RenderTarget( 64, 32, Format.D32Float ) );
+		backend.IdsTargetsFor( state );
+		backend.PrepareIdsTargets( state );
 		Assert.IsTrue( state.Mask.IsValid && state.Ids.IsValid );
 	}
 
@@ -52,7 +54,7 @@ public class ViewLifetimeTests : GpuTest
 		var view = new object();
 		var state = backend.VisibilityFor( view, TextureInfo.RenderTarget( 64, 32, Format.D32Float ) );
 		Assert.AreEqual( 1 << 16, state.CompactedCapacity, "a 64x32 view's compacted buffers hold the minimum" );
-		Assert.AreEqual( 1L << 16, Device.SizeOf( state.Compacted[0] ) / 4 );
+		Assert.AreEqual( 1L << 16, Device.SizeOf( state.Compacted ) / 4 );
 		var buffers = Device.Buffers.Count;
 
 		for ( int i = 0; i <= BackendDevice.IdleVisibilityFrames + 60; i++ ) backend.BeginFrame();
@@ -63,6 +65,50 @@ public class ViewLifetimeTests : GpuTest
 		var again = backend.VisibilityFor( view, TextureInfo.RenderTarget( 64, 32, Format.D32Float ) );
 		Assert.AreSame( state, again );
 		Assert.IsTrue( again.Ready && again.Mask.IsValid, "made again when the view draws again" );
+		GC.KeepAlive( view );
+	}
+
+	/// <summary>
+	/// A view's ids targets are made only once a prepass call asks for them, before the view's next frame (so every call of a
+	/// frame decides the same), at the view's size, and freed once no prepass has drawn ids for a while while the rest of its
+	/// set stays: a view whose forward pass compacts but whose prepass draws no ids held 5.9 MB of targets at 1280x800.
+	/// </summary>
+	[TestMethod]
+	public void IdsTargetsAreMadeOnlyForPrepassesThatDrawIds()
+	{
+		using var backend = new BackendDevice( Device );
+		backend.BeginFrame();
+		var view = new object();
+		var textures = Device.Textures.Count;
+		var state = backend.VisibilityFor( view, TextureInfo.RenderTarget( 64, 32, Format.D32Float ) );
+		Assert.AreEqual( textures, Device.Textures.Count, "no targets made with the view" );
+
+		// Nobody asked: none made before the next frame
+		backend.PrepareIdsTargets( state );
+		Assert.IsFalse( state.Ids.IsValid || state.IdsReady );
+
+		// Asked: not there for this frame's calls, there for the next frame's
+		Assert.IsFalse( backend.IdsTargetsFor( state ) );
+		Assert.IsFalse( backend.IdsTargetsFor( state ), "the rest of the frame decides the same" );
+		backend.BeginFrame();
+		backend.PrepareIdsTargets( state );
+		Assert.IsTrue( backend.IdsTargetsFor( state ) && state.Ids.IsValid && state.Scratch.IsValid );
+		Assert.AreEqual( (64, 32), (Device.InfoOf( state.Ids ).Width, Device.InfoOf( state.Ids ).Height) );
+		Assert.AreEqual( textures + 2, Device.Textures.Count );
+
+		// The view kept clearing (its forward pass), no prepass drawing ids: the targets go, the rest stays
+		for ( int i = 0; i <= BackendDevice.IdleVisibilityFrames + 60; i++ )
+		{
+			backend.BeginFrame();
+			state.ClearedFrame = backend.GpuDrivenFrame;
+		}
+
+		Assert.AreEqual( 1, backend.VisibilityIdsIdled );
+		Assert.AreEqual( 0, backend.VisibilityViewsIdled );
+		Assert.IsTrue( state.Ready && state.Mask.IsValid && !state.IdsReady && !state.Ids.IsValid );
+		for ( int i = 0; i <= Device.FramesInFlight; i++ ) backend.BeginFrame();
+		Device.WaitIdle();
+		Assert.AreEqual( textures, Device.Textures.Count, "its targets were freed" );
 		GC.KeepAlive( view );
 	}
 
