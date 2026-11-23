@@ -94,19 +94,7 @@ internal sealed class BorealisGpuFrameThread : IDisposable
 		{
 			JoinsWaited++;
 			using ( timed ? JoinTiming.Scope() : default )
-			{
-				if ( !done.Wait( LongJoin ) )
-				{
-					// Never expected: said once with where each thread is, then the join waits on
-					if ( !warnedLongJoin )
-					{
-						warnedLongJoin = true;
-						Log.Warning( $"The main thread has waited {LongJoin.TotalSeconds:F0} s for the {thread.Name} thread, which is at '{Doing}'; the main thread at {new System.Diagnostics.StackTrace( 1, false )}" );
-					}
-
-					done.Wait();
-				}
-			}
+				WaitWithoutSyncContext( done, LongJoin, thread.Name, ref warnedLongJoin );
 		}
 
 		if ( error is { } e )
@@ -118,6 +106,35 @@ internal sealed class BorealisGpuFrameThread : IDisposable
 
 	static readonly TimeSpan LongJoin = TimeSpan.FromSeconds( 5 );
 	bool warnedLongJoin;
+
+	/// <summary>
+	/// The main thread's wait for one of the frame's threads (<paramref name="name"/>), without its synchronization context:
+	/// the main thread's would run queued game continuations mid-frame (one that uses the device would join or wait again from
+	/// inside this wait), and the runtime allocates a handle array for every blocking wait it forwards to it. A wait longer
+	/// than <paramref name="longWait"/> is said once with where each thread is, then waits on.
+	/// </summary>
+	internal static void WaitWithoutSyncContext( ManualResetEventSlim signal, TimeSpan longWait, string name, ref bool warned )
+	{
+		var syncContext = SynchronizationContext.Current;
+		try
+		{
+			SynchronizationContext.SetSynchronizationContext( null );
+			if ( signal.Wait( longWait ) ) return;
+
+			// Never expected
+			if ( !warned )
+			{
+				warned = true;
+				Log.Warning( $"The main thread has waited {longWait.TotalSeconds:F0} s for the {name} thread, which is at '{Doing}'; the main thread at {new System.Diagnostics.StackTrace( 1, false )}" );
+			}
+
+			signal.Wait();
+		}
+		finally
+		{
+			SynchronizationContext.SetSynchronizationContext( syncContext );
+		}
+	}
 
 	/// <summary>What the thread's work says it's doing (a step's static name), for a join that waits too long.</summary>
 	internal static string Doing { get; set; } = "idle";
@@ -156,17 +173,29 @@ internal sealed class BorealisGpuFrameThread : IDisposable
 		}
 	}
 
-	/// <summary>Stop the thread, waiting at most <see cref="StopTimeout"/> for the work it's doing.</summary>
+	/// <summary>
+	/// Stop the thread, waiting at most <see cref="StopTimeout"/> for the work it's doing, without the caller's synchronization
+	/// context (as <see cref="WaitWithoutSyncContext"/>).
+	/// </summary>
 	public void Dispose()
 	{
 		stopping = true;
-		if ( Pending )
+		var syncContext = SynchronizationContext.Current;
+		try
 		{
-			Pending = false;
-			done.Wait( StopTimeout );
-		}
+			SynchronizationContext.SetSynchronizationContext( null );
+			if ( Pending )
+			{
+				Pending = false;
+				done.Wait( StopTimeout );
+			}
 
-		go.Set();
-		thread.Join( StopTimeout );
+			go.Set();
+			thread.Join( StopTimeout );
+		}
+		finally
+		{
+			SynchronizationContext.SetSynchronizationContext( syncContext );
+		}
 	}
 }

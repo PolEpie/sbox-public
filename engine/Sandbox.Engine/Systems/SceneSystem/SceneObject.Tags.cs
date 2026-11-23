@@ -74,6 +74,30 @@ namespace Sandbox
 				return Tokens.ToFrozenSet();
 			}
 
+			public override void SetFrom( ITagSet set )
+			{
+				// Renderers copy their GameObject's tags every frame and they rarely change, so compare the cached
+				// tokens first instead of walking the tag strings
+				if ( set is GameTags or TagSet or TokenBasedTagSet && SceneObject.IsValid() && Matches( set.GetTokens() ) )
+					return;
+
+				base.SetFrom( set );
+			}
+
+			// The managed tokens are the tags (a twin only mirrors them); they hold no duplicates
+			bool Matches( IReadOnlySet<uint> other )
+			{
+				var own = Tokens;
+				if ( own.Count != other.Count ) return false;
+
+				for ( var i = 0; i < own.Count; i++ )
+				{
+					if ( !other.Contains( own[i] ) ) return false;
+				}
+
+				return true;
+			}
+
 			public override bool Has( string tag )
 			{
 				if ( !SceneObject.IsValid() ) return false;
