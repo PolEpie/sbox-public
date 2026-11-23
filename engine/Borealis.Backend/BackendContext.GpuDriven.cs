@@ -1810,15 +1810,18 @@ internal sealed partial class BackendContext
 
 		visibility.HiZWrote = false;
 
-		// Normals from the ids: cleared once a frame instead of by each call, so they end holding every call's, readable as a
-		// call's mark leaves them; and the table of the calls that draw them
-		if ( device.IdsNormals && visibility.IdsReady && visibility.IdsCalls.IsValid )
+		// Normals from the ids, or a tools view of them (IdsWhole): cleared once a frame instead of by each call, so they end
+		// holding every call's, readable as a call's mark leaves them; and the table of the calls that draw them
+		if ( device.IdsWhole && visibility.IdsReady )
 		{
 			r.List.Barrier( Borealis.Gpu.TextureBarrier.Transition( visibility.Ids, ImageLayout.Undefined, ImageLayout.CopyDestination, PipelineStage.AllCommands, MemoryAccess.None, PipelineStage.Transfer, MemoryAccess.TransferWrite ) );
 			r.List.ClearTexture( visibility.Ids );
 			r.List.Barrier( Borealis.Gpu.TextureBarrier.Transition( visibility.Ids, ImageLayout.CopyDestination, ImageLayout.ShaderRead, PipelineStage.Transfer, MemoryAccess.TransferWrite, PipelineStage.ColorTargetOutput | PipelineStage.ComputeShader, MemoryAccess.ColorTargetRead | MemoryAccess.ColorTargetWrite | MemoryAccess.ShaderRead ) );
-			r.List.FillBuffer( visibility.IdsCalls, 0 );
-			visibility.IdsCallCount = 0;
+			if ( visibility.IdsCalls.IsValid )
+			{
+				r.List.FillBuffer( visibility.IdsCalls, 0 );
+				visibility.IdsCallCount = 0;
+			}
 		}
 
 		// This frame's compacted buffer's cursor, past itself: the forward pass's calls take their triangles' ranges from it
@@ -2002,8 +2005,8 @@ internal sealed partial class BackendContext
 		// After any earlier ids pass of the view this frame (another call's): its writes and the mark's reads come first
 		// (A second phase draws on over the first's ids, which its rendering scope kept in place.) With normals from the ids
 		// every call draws on over the ids the view's clear and earlier calls left, readable after their marks
-		var loadIds = !clearIds || device.IdsNormals;
-		var idsBefore = !clearIds ? ImageLayout.ColorTarget : device.IdsNormals ? ImageLayout.ShaderRead : ImageLayout.Undefined;
+		var loadIds = !clearIds || device.IdsWhole;
+		var idsBefore = !clearIds ? ImageLayout.ColorTarget : device.IdsWhole ? ImageLayout.ShaderRead : ImageLayout.Undefined;
 		r.List.Barrier( Borealis.Gpu.TextureBarrier.Transition( visibility.Ids, idsBefore, ImageLayout.ColorTarget, PipelineStage.ColorTargetOutput | PipelineStage.ComputeShader, MemoryAccess.ColorTargetWrite, PipelineStage.ColorTargetOutput, MemoryAccess.ColorTargetWrite | MemoryAccess.ColorTargetRead ) );
 		r.List.Barrier( Borealis.Gpu.TextureBarrier.Transition( visibility.Scratch, ImageLayout.Undefined, ImageLayout.ColorTarget, PipelineStage.ColorTargetOutput, MemoryAccess.ColorTargetWrite, PipelineStage.ColorTargetOutput, MemoryAccess.ColorTargetWrite ) );
 		r.List.BeginRendering(
@@ -2039,8 +2042,8 @@ internal sealed partial class BackendContext
 					var meshIds = device.MeshletIds;
 					var meshVariant = meshIdsVariant ??= Variant( meshIds, "Default" );
 					var stateFrom = bucket.Variant ?? idsShaderVariant;
-					var key = new MaterialObjectCache.Key( meshIds, meshVariant, IdsLayoutOf( stateFrom ), BackendDevice.IdsColorKey, depth, samples, false, true );
-					var meshObject = cache.Get( key, immediate: false, (device, key, stateFrom), static ( s, l ) => s.device.Pipeline( s.key.Variant, s.device.PulledLayout, BackendDevice.IdsColorKey, s.key.Depth, s.key.Samples, false, l.Sets, ids: true, stateFrom: s.stateFrom ) );
+					var key = new MaterialObjectCache.Key( meshIds, meshVariant, IdsLayoutOf( stateFrom ), device.IdsFormat, depth, samples, false, true );
+					var meshObject = cache.Get( key, immediate: false, (device, key, stateFrom), static ( s, l ) => s.device.Pipeline( s.key.Variant, s.device.PulledLayout, s.key.Color, s.key.Depth, s.key.Samples, false, l.Sets, ids: true, stateFrom: s.stateFrom ) );
 					resolver.LayerEpoch = layerEpoch;
 					meshObject.Bind( r.List, ref r.Pipeline, passEpoch, resolver );
 					if ( bucket.NoColor ) r.List.SetDepthBias( depthBias, slopeScaledDepthBias );
@@ -2088,15 +2091,15 @@ internal sealed partial class BackendContext
 					// borealis_gpu_driven_ids with the bucket's culling, depth and stencil: keyed by a layout object per bucket variant
 					var stateFrom = bucket.Variant ?? idsShaderVariant;
 					var idsLayout = IdsLayoutOf( stateFrom );
-					var key = new MaterialObjectCache.Key( shaders.Ids, idsShaderVariant, idsLayout, BackendDevice.IdsColorKey, depth, samples, false, true );
-					materialObject = cache.Get( key, immediate: false, (device, key, stateFrom), static ( s, l ) => s.device.Pipeline( s.key.Variant, s.device.PulledLayout, BackendDevice.IdsColorKey, s.key.Depth, s.key.Samples, false, l.Sets, ids: true, stateFrom: s.stateFrom ) );
+					var key = new MaterialObjectCache.Key( shaders.Ids, idsShaderVariant, idsLayout, device.IdsFormat, depth, samples, false, true );
+					materialObject = cache.Get( key, immediate: false, (device, key, stateFrom), static ( s, l ) => s.device.Pipeline( s.key.Variant, s.device.PulledLayout, s.key.Color, s.key.Depth, s.key.Samples, false, l.Sets, ids: true, stateFrom: s.stateFrom ) );
 				}
 				else
 				{
 					var perDraw = bucket.PixelMaterial != 0;
 					var layout = perDraw ? device.PulledLayoutMaterialPerDraw : device.PulledLayout;
-					var key = new MaterialObjectCache.Key( bucket.Material, bucket.Variant, layout, BackendDevice.IdsColorKey, depth, samples, false, true );
-					materialObject = cache.Get( key, immediate: false, (device, layout, key, perDraw), static ( s, l ) => s.device.Pipeline( s.key.Variant, s.layout, BackendDevice.IdsColorKey, s.key.Depth, s.key.Samples, false, l.Sets, s.perDraw, ids: true ) );
+					var key = new MaterialObjectCache.Key( bucket.Material, bucket.Variant, layout, device.IdsFormat, depth, samples, false, true );
+					materialObject = cache.Get( key, immediate: false, (device, layout, key, perDraw), static ( s, l ) => s.device.Pipeline( s.key.Variant, s.layout, s.key.Color, s.key.Depth, s.key.Samples, false, l.Sets, s.perDraw, ids: true ) );
 				}
 
 				resolver.LayerEpoch = layerEpoch;
