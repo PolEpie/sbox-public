@@ -173,17 +173,29 @@ internal sealed class BorealisGpuFrameThread : IDisposable
 		}
 	}
 
-	/// <summary>Stop the thread, waiting at most <see cref="StopTimeout"/> for the work it's doing.</summary>
+	/// <summary>
+	/// Stop the thread, waiting at most <see cref="StopTimeout"/> for the work it's doing, without the caller's synchronization
+	/// context (as <see cref="WaitWithoutSyncContext"/>).
+	/// </summary>
 	public void Dispose()
 	{
 		stopping = true;
-		if ( Pending )
+		var syncContext = SynchronizationContext.Current;
+		try
 		{
-			Pending = false;
-			done.Wait( StopTimeout );
-		}
+			SynchronizationContext.SetSynchronizationContext( null );
+			if ( Pending )
+			{
+				Pending = false;
+				done.Wait( StopTimeout );
+			}
 
-		go.Set();
-		thread.Join( StopTimeout );
+			go.Set();
+			thread.Join( StopTimeout );
+		}
+		finally
+		{
+			SynchronizationContext.SetSynchronizationContext( syncContext );
+		}
 	}
 }

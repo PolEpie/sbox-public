@@ -127,7 +127,8 @@ public class FrameThreadTests
 
 	/// <summary>
 	/// A join that waits does so without the caller's synchronization context (the main thread's hears of its waits and runs
-	/// queued game continuations in them): the context hears of no wait, and the caller's context is back after it.
+	/// queued game continuations in them), nor does stopping it: the context hears of no wait, and the caller's context is back
+	/// after each.
 	/// </summary>
 	[TestMethod]
 	public void AJoinThatWaitsDoesntTellTheCallersContext()
@@ -142,6 +143,12 @@ public class FrameThreadTests
 			thread.Join();
 			Assert.AreEqual( 1, thread.JoinsWaited, "the join waited" );
 			Assert.AreEqual( 0, context.Waits, "the caller's context heard of the join's wait" );
+			Assert.AreSame( context, SynchronizationContext.Current );
+
+			// Stopping it with work handed over waits the same way
+			thread.HandOver();
+			thread.Dispose();
+			Assert.AreEqual( 0, context.Waits, "the caller's context heard of the stop's wait" );
 			Assert.AreSame( context, SynchronizationContext.Current );
 		}
 		finally
