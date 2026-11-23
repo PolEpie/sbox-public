@@ -148,14 +148,21 @@ internal static class MapRealRun
 
 		// -passes: GPU time per layer and list from timestamps around each; -pass-stats: and what each assembles and shades
 		// (which closes rendering at every layer, so the times aren't the frame's)
-		using var passTimer = Args.Has( "-passes" ) || Args.Has( "-pass-stats" ) ? new PassTimer( gpu, statistics: Args.Has( "-pass-stats" ) ) : null;
+		// -gpucounters [selection]: hardware counters per scope after each view's timed frames, which needs the pass timer
+		var counters = gpu.Counters;
+		using var passTimer = Args.Has( "-passes" ) || Args.Has( "-pass-stats" ) || counters is not null ? new PassTimer( gpu, statistics: Args.Has( "-pass-stats" ) ) : null;
 		map.Backend.PassTimer = passTimer;
 		map.Backend.BatchSubmits = !Args.Has( "-no-batch" );
+		var counterReport = new StringBuilder();
+		var counterCsv = new StringBuilder();
+		if ( counters is not null ) Console.WriteLine( GpuCounterRun.Describe( counters ) );
+		if ( counters is { ListRequested: true } ) GpuCounterRun.WriteList( counters, Path.Combine( options.Output, "gpucounters-list.csv" ) );
 
 		// -full-barriers: every barrier waits for all GPU work, as before exact stages; -carry-scopes: worker lists splitting
-		// one view's layer keep one rendering scope (BackendDevice.CarryScopes)
+		// one view's layer keep one rendering scope (BackendDevice.CarryScopes; not with GPU counters, whose samples can't
+		// sit between a suspended scope and its resumption)
 		map.Backend.ExactBarriers = !Args.Has( "-full-barriers" );
-		map.Backend.CarryScopes = Args.Has( "-carry-scopes" );
+		map.Backend.CarryScopes = Args.Has( "-carry-scopes" ) && counters is null;
 		map.Backend.LayoutPlans = !Args.Has( "-no-layout-plans" );
 
 		// -no-async-compute: the depth chain and contact shadows stay on the graphics queue
@@ -336,6 +343,17 @@ internal static class MapRealRun
 					Console.WriteLine( table );
 					passTables.AppendLine( table );
 					passes.AppendCsv( passCsv, view.Name, variant.Name );
+				}
+
+				if ( counters is not null )
+				{
+					var report = GpuCounterRun.Run( counters, passes, $"{view.Name} {variant.Name}", () =>
+					{
+						MapRun.Pump( window );
+						RenderFrame( view );
+					}, counterCsv );
+					Console.WriteLine( report );
+					counterReport.AppendLine( report );
 				}
 
 				if ( censusFolder is not null ) censusReport.AppendLine( Census( gpu, map, $"{options.Ident.Split( '.' ).Last()}-{view.Name}-{variant.Name}", censusFolder, () => RenderFrame( view ) ) );
@@ -650,6 +668,12 @@ internal static class MapRealRun
 		{
 			md.AppendLine( passTables.ToString() );
 			File.WriteAllText( Path.Combine( options.Output, "map-passes.csv" ), passCsv.ToString() );
+			if ( counterCsv.Length > 0 )
+			{
+				File.WriteAllText( Path.Combine( options.Output, "map-gpucounters.csv" ), counterCsv.ToString() );
+				File.WriteAllText( Path.Combine( options.Output, "map-gpucounters.txt" ), counterReport.ToString() );
+				Console.WriteLine( $"GPU counters written to {Path.Combine( options.Output, "map-gpucounters.csv" )}" );
+			}
 		}
 
 		md.AppendLine( bindingReport );

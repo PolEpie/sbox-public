@@ -82,9 +82,20 @@ public sealed unsafe partial class Device : IDisposable
 		if ( VkGlobal.vkEnumerateInstanceVersion != null ) VkGlobal.vkEnumerateInstanceVersion( &loaderVersion );
 		if ( loaderVersion < Vulkan.Vk.ApiVersion13 ) throw new GpuException( $"The Vulkan loader is {Vulkan.Vk.ApiMajor( loaderVersion )}.{Vulkan.Vk.ApiMinor( loaderVersion )}; Borealis.Gpu needs 1.3" );
 
+		// Hardware counters: GPUPerfAPI initialises before the instance, and needs its extensions
+		var counterSelection = options.GpuCounters;
+		if ( counterSelection is not null && GpuCounters.Prepare() is { } noCounters )
+		{
+			options.Message?.Invoke( new DeviceMessage( MessageSeverity.Warning, "Borealis.Gpu.Counters", $"GPU counters are off: {noCounters}" ) );
+			counterSelection = null;
+		}
+
+		countersPrepared = counterSelection is not null;
+
 		// Instance
 		var available = InstanceExtensions();
 		var extensions = new List<string>();
+		if ( countersPrepared && available.Contains( Gpa.InstanceExtension ) ) extensions.Add( Gpa.InstanceExtension );
 		var debugUtils = available.Contains( "VK_EXT_debug_utils" );
 		if ( debugUtils ) extensions.Add( "VK_EXT_debug_utils" );
 		if ( options.Presentation )
@@ -281,6 +292,7 @@ public sealed unsafe partial class Device : IDisposable
 			CreateIndirectCounts( driver.driverID, features.drawIndirectCount );
 			LoadPartManifest( options );
 			if ( options.HangWatch ) StartWatch();
+			if ( countersPrepared ) OpenCounters( counterSelection );
 		}
 		catch
 		{
@@ -509,6 +521,7 @@ public sealed unsafe partial class Device : IDisposable
 
 		var extensions = new List<string>();
 		if ( options.Presentation && deviceExtensions.Contains( "VK_KHR_swapchain" ) ) extensions.Add( "VK_KHR_swapchain" );
+		if ( countersPrepared ) AddCounterExtensions( extensions );
 
 		// What a library working on the device asks for (a vendor upscaler), where the device has it
 		foreach ( var name in options.OptionalDeviceExtensions?.Invoke( Instance.Instance, PhysicalDevice ) ?? [] )
@@ -882,6 +895,7 @@ public sealed unsafe partial class Device : IDisposable
 		graphicsQueue.Dispose();
 		if ( computeQueue != graphicsQueue ) computeQueue.Dispose();
 		Allocator.Dispose();
+		Counters?.Close();
 		Vk.vkDestroyDevice( Vk.Device, null );
 		DestroyInstance();
 	}
@@ -890,6 +904,7 @@ public sealed unsafe partial class Device : IDisposable
 	{
 		if ( messenger != 0 ) Instance.vkDestroyDebugUtilsMessengerEXT( Instance.Instance, messenger, null );
 		Instance.vkDestroyInstance( Instance.Instance, null );
+		if ( countersPrepared ) GpuCounters.Release();
 		if ( self.IsAllocated ) self.Free();
 	}
 }

@@ -5,7 +5,7 @@ namespace SceneTests;
 #pragma warning disable CS0618
 
 /// <summary>
-/// A scene model managed code makes animates on its own <c>ModelAnimationInstance</c>; its native twin keeps draw state only.
+/// A scene model managed code makes animates on its own <c>ModelAnimationInstance</c>; it has no native object.
 /// </summary>
 [TestClass]
 public class SceneModelAnimationInstanceTests
@@ -49,20 +49,18 @@ public class SceneModelAnimationInstanceTests
 	}
 
 	/// <summary>
-	/// A scene model managed code makes has a plain native twin, not an animated one, even where scene objects write their
-	/// native twins: the instance animates through updates and a model change, and the bounds are the pose's, kept in managed
-	/// code and given to the twin.
+	/// A scene model managed code makes has no native object: the instance animates through updates and a model change, and
+	/// the bounds are the pose's, kept in managed code.
 	/// </summary>
 	[TestMethod]
-	public void TwinIsAPlainObject()
+	public void AnimatesWithoutANativeObject()
 	{
 		var world = new SceneWorld();
-		SceneObject.WritesNativeOverride = true;
 		try
 		{
 			var model = new SceneModel( world, Model.Load( "models/dev/box.vmdl" ), Placement );
-			Assert.IsTrue( model.native.IsValid );
-			Assert.IsTrue( model.animNative.Twin.IsNull, "no animated twin" );
+			Assert.IsTrue( model.native.IsNull, "no native object" );
+			Assert.IsTrue( model.animNative.Animatable.IsNull, "no animated twin" );
 
 			model.Model = Human;
 			PlaySequence( model );
@@ -72,7 +70,7 @@ public class SceneModelAnimationInstanceTests
 			for ( int frame = 0; frame < 10; frame++ ) model.Update( 1.0f / 30.0f );
 
 			Assert.IsTrue( model.GetBoneWorldTransform( hand ).Position.Distance( start.Position ) > 0.1f, "the instance animates" );
-			Assert.IsTrue( model.animNative.Twin.IsNull, "still no animated twin after a model change" );
+			Assert.IsTrue( model.animNative.Animatable.IsNull, "still no animated twin after a model change" );
 
 			var pose = model.AnimatedWorldBounds;
 			var quantised = new BBox( new Vector3( MathF.Floor( pose.Mins.x ), MathF.Floor( pose.Mins.y ), MathF.Floor( pose.Mins.z ) ),
@@ -83,7 +81,6 @@ public class SceneModelAnimationInstanceTests
 		}
 		finally
 		{
-			SceneObject.WritesNativeOverride = null;
 			world.Delete();
 		}
 	}

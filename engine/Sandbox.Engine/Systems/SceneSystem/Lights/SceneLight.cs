@@ -24,7 +24,6 @@ public partial class SceneLight : SceneObject
 		if ( d.LightModulatorOffset == offset && d.LightModulatorCount == count ) return;
 		d.LightModulatorOffset = offset;
 		d.LightModulatorCount = count;
-		if ( WritesLight ) lightNative.SetLightModulatorRange( offset, count );
 		NotifyChanged( Rendering.SceneObjectChange.Settings );
 	}
 
@@ -37,7 +36,7 @@ public partial class SceneLight : SceneObject
 	public Color LightColor
 	{
 		get { return Description.Color; }
-		set { Change().Color = value; Recalculate(); if ( WritesLight ) lightNative.SetColor( value ); NotifyChanged( Rendering.SceneObjectChange.Settings ); }
+		set { Change().Color = value; Recalculate(); NotifyChanged( Rendering.SceneObjectChange.Settings ); }
 	}
 
 	/// <summary>
@@ -62,7 +61,7 @@ public partial class SceneLight : SceneObject
 	public float ConstantAttenuation
 	{
 		get { return Description.Attenuation0; }
-		set { Change().Attenuation0 = value; Recalculate(); if ( WritesLight ) lightNative.SetConstantAttn( value ); NotifyChanged( Rendering.SceneObjectChange.Settings ); }
+		set { Change().Attenuation0 = value; Recalculate(); NotifyChanged( Rendering.SceneObjectChange.Settings ); }
 	}
 
 	/// <summary>
@@ -71,7 +70,7 @@ public partial class SceneLight : SceneObject
 	public float LinearAttenuation
 	{
 		get { return Description.Attenuation1; }
-		set { Change().Attenuation1 = value; Recalculate(); if ( WritesLight ) lightNative.SetLinearAttn( value ); NotifyChanged( Rendering.SceneObjectChange.Settings ); }
+		set { Change().Attenuation1 = value; Recalculate(); NotifyChanged( Rendering.SceneObjectChange.Settings ); }
 	}
 
 	/// <summary>
@@ -81,7 +80,7 @@ public partial class SceneLight : SceneObject
 	{
 		// Note: to make these numbers sane I'm doing some calculation here
 		get { return Description.Attenuation2 * 10000.0f; }
-		set { Change().Attenuation2 = value / 10000.0f; Recalculate(); if ( WritesLight ) lightNative.SetQuadraticAttn( value / 10000.0f ); NotifyChanged( Rendering.SceneObjectChange.Settings ); }
+		set { Change().Attenuation2 = value / 10000.0f; Recalculate(); NotifyChanged( Rendering.SceneObjectChange.Settings ); }
 	}
 
 	/// <summary>
@@ -99,14 +98,6 @@ public partial class SceneLight : SceneObject
 		d.Flags &= ~(FlagMixedShadows | FlagBaked);
 		if ( index >= 0 ) d.Flags |= FlagBaked | (mixedShadows ? FlagMixedShadows : 0u);
 
-		if ( WritesLight )
-		{
-			lightNative.SetBakeLightIndex( index );
-			lightNative.SetBakeLightIndexScale( 1.0f );
-			lightNative.SetUsesIndexedBakedLighting( index >= 0 );
-			lightNative.SetLightFlags( d.Flags );
-		}
-
 		NotifyChanged( Rendering.SceneObjectChange.Settings );
 	}
 
@@ -116,7 +107,7 @@ public partial class SceneLight : SceneObject
 	public int ShadowTextureResolution
 	{
 		get { return Description.ShadowWidth; }
-		set { ref var d = ref Change(); d.ShadowWidth = value; d.ShadowHeight = value; if ( WritesLight ) lightNative.SetShadowTextureResolution( value ); NotifyChanged( Rendering.SceneObjectChange.Settings ); }
+		set { ref var d = ref Change(); d.ShadowWidth = value; d.ShadowHeight = value; NotifyChanged( Rendering.SceneObjectChange.Settings ); }
 	}
 
 	/// <summary>
@@ -125,7 +116,7 @@ public partial class SceneLight : SceneObject
 	public bool ShadowsEnabled
 	{
 		get { return Description.CastShadows != 0; }
-		set { Change().CastShadows = value ? 1 : 0; if ( WritesLight ) lightNative.SetShadows( value ); NotifyChanged( Rendering.SceneObjectChange.Settings ); }
+		set { Change().CastShadows = value ? 1 : 0; NotifyChanged( Rendering.SceneObjectChange.Settings ); }
 	}
 
 	private Texture _lightCookie;
@@ -139,7 +130,7 @@ public partial class SceneLight : SceneObject
 		set
 		{
 			_lightCookie = value;
-			if ( WritesLight ) lightNative.SetLightCookie( value == null ? default : value.native ); NotifyChanged( Rendering.SceneObjectChange.Settings );
+			NotifyChanged( Rendering.SceneObjectChange.Settings );
 		}
 	}
 
@@ -153,7 +144,7 @@ public partial class SceneLight : SceneObject
 		{
 			_renderDiffuse = value;
 			Change().RenderDiffuse = value ? 1 : 0;
-			if ( WritesLight ) lightNative.SetRenderDiffuse( value ); NotifyChanged( Rendering.SceneObjectChange.Settings );
+			NotifyChanged( Rendering.SceneObjectChange.Settings );
 		}
 	}
 	private bool _renderDiffuse = true;
@@ -168,7 +159,7 @@ public partial class SceneLight : SceneObject
 		{
 			_renderSpecular = value;
 			Change().RenderSpecular = value ? 1 : 0;
-			if ( WritesLight ) lightNative.SetRenderSpecular( value ); NotifyChanged( Rendering.SceneObjectChange.Settings );
+			NotifyChanged( Rendering.SceneObjectChange.Settings );
 		}
 	}
 	private bool _renderSpecular = true;
@@ -183,7 +174,7 @@ public partial class SceneLight : SceneObject
 		{
 			_renderTransmissive = value;
 			Change().RenderTransmissive = value ? 1 : 0;
-			if ( WritesLight ) lightNative.SetRenderTransmissive( value ); NotifyChanged( Rendering.SceneObjectChange.Settings );
+			NotifyChanged( Rendering.SceneObjectChange.Settings );
 		}
 	}
 	private bool _renderTransmissive = true;
@@ -230,13 +221,13 @@ public partial class SceneLight : SceneObject
 	public FogLightingMode FogLighting
 	{
 		get => (FogLightingMode)Description.FogLightingMode;
-		set { Change().FogLightingMode = (int)value; if ( WritesLight ) lightNative.SetFogLightingMode( (int)value ); NotifyChanged( Rendering.SceneObjectChange.Settings ); }
+		set { Change().FogLightingMode = (int)value; NotifyChanged( Rendering.SceneObjectChange.Settings ); }
 	}
 
 	public float FogStrength
 	{
 		get => Description.FogContributionStrength;
-		set { Change().FogContributionStrength = value; if ( WritesLight ) lightNative.SetFogContributionStength( value ); NotifyChanged( Rendering.SceneObjectChange.Settings ); }
+		set { Change().FogContributionStrength = value; NotifyChanged( Rendering.SceneObjectChange.Settings ); }
 	}
 
 	/// <summary>
@@ -292,11 +283,7 @@ public partial class SceneLight : SceneObject
 	{
 		Assert.IsValid( sceneWorld );
 
-		using ( var h = NextHandleForTwin() )
-		{
-			if ( MakesNativeTwin ) CSceneSystem.CreatePointLight( sceneWorld );
-			else MakeLightWithoutTwin( sceneWorld, NewDescription( TypePoint ) );
-		}
+		MakeManagedLight( sceneWorld, NewDescription( TypePoint ) );
 
 		Position = position;
 		Radius = radius;
@@ -323,16 +310,16 @@ public partial class SceneLight : SceneObject
 	}
 
 	/// <summary>
-	/// Made without a native twin (<see cref="SceneObject.MakesNativeTwin"/> off): in its world, its renderer and its world's
-	/// lights as <see cref="OnNativeInit"/> puts one, with the description and flags native's <c>CSceneSystem::CreateLight</c>
-	/// would have given it, and its bounds worked out here from then on (<see cref="DescriptionBounds"/>).
+	/// Made by managed code: in its world, its renderer and its world's lights as <see cref="OnNativeInit"/> puts one native
+	/// code made, with the description and flags native's <c>CSceneSystem::CreateLight</c> gave a new light, and its bounds
+	/// worked out here from then on (<see cref="DescriptionBounds"/>).
 	/// </summary>
-	private protected void MakeLightWithoutTwin( SceneWorld world, in LightDescription description,
+	private protected void MakeManagedLight( SceneWorld world, in LightDescription description,
 		Rendering.SceneObjectFlags flags = Rendering.SceneObjectFlags.IsLight | Rendering.SceneObjectFlags.IsDirectLight )
 	{
 		desc = description;
 		described = true;
-		MakeWithoutTwin( world, null, flags );
+		MakeManaged( world, null, flags );
 
 		// CreateLight: a directional light's bounds infinite, the others' from the description
 		if ( desc.Type == TypeDirectional ) KeepFixedBounds( true );
@@ -344,11 +331,8 @@ public partial class SceneLight : SceneObject
 		}
 	}
 
-	/// <summary>Whether it has its native light: a twin, or the light native code made.</summary>
+	/// <summary>Whether it has a native light: one native code made (a tool's, Hammer's).</summary>
 	private protected bool HasLight => !lightNative.IsNull;
-
-	/// <summary>Whether a setting also goes to the native light: while something reads it, and only if there is one.</summary>
-	bool WritesLight => WritesNative && !lightNative.IsNull;
 
 	internal override void Destroyed()
 	{

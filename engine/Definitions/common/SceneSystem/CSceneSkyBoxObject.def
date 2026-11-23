@@ -6,13 +6,9 @@ native class CSceneSkyBoxObject as NativeEngine.CSceneSkyBoxObject : CSceneObjec
 	IMaterial GetMaterial();
 	void SetMaterial( IMaterial hMaterial );
 
-	void SetSkyTint( Vector3 vTint );
 	Vector3 GetSkyTint();
 
-	void SetFogType( CastTo[ESkyboxFogType_t] int nType );
 	int GetFogType();
-
-	void SetAngularFogParams( float flFogMinStart, float flFogMinEnd, float flFogMaxStart, float flFogMaxEnd );
 
 	float GetFogMinStart();
 	float GetFogMinEnd();

@@ -18,7 +18,7 @@ public sealed partial class SceneModel
 	int _boneBoxesVersion = -1;
 
 	/// <summary>
-	/// Animate on an instance of its own: what managed code makes has no animated twin.
+	/// Animate on an instance of its own: what managed code makes has no native object.
 	/// </summary>
 	void CreateAnimationInstance( Model model, in Transform transform )
 	{
@@ -54,7 +54,7 @@ public sealed partial class SceneModel
 	}
 
 	/// <summary>
-	/// The instance's pose changed: its bounds follow it. The twin is a plain object with no bones.
+	/// The instance's pose changed: its bounds follow it.
 	/// </summary>
 	unsafe void PoseChanged()
 	{

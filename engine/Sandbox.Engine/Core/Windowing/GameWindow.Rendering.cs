@@ -110,7 +110,7 @@ internal sealed partial class GameWindow
 		finally
 		{
 			// What the scene system does at a frame's end besides rendering views: queued deletes, dirty objects, its frame
-			// counter and render time. Managed objects' deletes first: their twins go in native's
+			// counter and render time. Managed objects' deletes first
 			SceneWorld.RunEndOfFrameDeletes();
 			CSceneSystem.FinishFrameWithoutViews();
 		}

@@ -40,7 +40,7 @@ public class DecalTests
 		try
 		{
 			var source = new DecalSceneObject( scene.SceneWorld );
-			Assert.IsFalse( source.HasTwin, "no native object" );
+			Assert.IsTrue( source.native.IsNull, "no native object" );
 			Assert.IsTrue( source.IsValid() );
 			Assert.AreEqual( Color.White, source.Color );
 			Assert.AreEqual( 1.0f, source.AttenuationAngle );

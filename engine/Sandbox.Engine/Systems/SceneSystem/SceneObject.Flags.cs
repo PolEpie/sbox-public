@@ -45,11 +45,11 @@ public partial class SceneObject
 	/// </summary>
 	internal bool CastsShadows => (CurrentFlags & ObjectFlags.CastShadows) == ObjectFlags.CastShadows;
 
-	/// <summary>Change flags in <paramref name="mask"/> to <paramref name="value"/>'s, here and on the native twin (traces read them).</summary>
+	/// <summary>Change flags in <paramref name="mask"/> to <paramref name="value"/>'s, here and on a native object native code made.</summary>
 	internal void ChangeFlags( ObjectFlags value, ObjectFlags mask )
 	{
 		value &= mask;
-		if ( WritesTwin( "ChangeFlags" ) ) native.ChangeFlags( value, mask );
+		if ( WritesNativeObject( "ChangeFlags" ) ) native.ChangeFlags( value, mask );
 		_flags = (CurrentFlags & ~mask) | (value & ~InternalFlags);
 		NotifyChanged( Rendering.SceneObjectChange.Flags );
 	}
@@ -133,8 +133,8 @@ public partial class SceneObject
 
 	/// <summary>
 	/// Without Source 2's device native gave the object the translucency of its meshes' compiled types, where managed code
-	/// works it out from their materials as a device does (<see cref="ModelDraws.Translucency"/>): native's twin gets the
-	/// same flags, as traces read them there.
+	/// works it out from their materials as a device does (<see cref="ModelDraws.Translucency"/>): a native object native code
+	/// made gets the same flags.
 	/// </summary>
 	void TranslucencyToNative()
 	{
@@ -258,15 +258,5 @@ public partial class SceneObject
 		// object translucent
 
 		return flags;
-	}
-
-	/// <summary>
-	/// Where flags native's and this object's differ, ignoring native's internal ones; empty when they're the same. For checks.
-	/// </summary>
-	internal string CompareFlags()
-	{
-		var mine = CurrentFlags;
-		var theirs = native.GetFlags() & ~InternalFlags;
-		return mine == theirs ? "" : $"native {theirs}, managed {mine} (differ {mine ^ theirs})";
 	}
 }

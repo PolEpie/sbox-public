@@ -427,6 +427,13 @@ internal abstract class GpuContext : IDisposable
 	internal virtual bool ResolveIdsNormals( object view, GpuTexture depth, GpuTexture target, in System.Numerics.Matrix4x4 worldToClip, Rect viewport, float minZ, float maxZ ) => false;
 
 	/// <summary>
+	/// A visibility ids view (<see cref="IdsViewLayer"/>): <paramref name="view"/>'s ids this frame as colours, by
+	/// <paramref name="mode"/>, into <paramref name="target"/> (the viewport's size, RGBA8 storage: a colour and 1 where a
+	/// pixel has an id, transparent black where it has none), from its viewport in the ids target. What came of it.
+	/// </summary>
+	internal virtual IdsViewResult ResolveIdsView( object view, GpuTexture target, Rect viewport, IdsView mode ) => IdsViewResult.NoIds;
+
+	/// <summary>
 	/// In setup, after every view has prepared: cull the views' resident lists (<see cref="GpuDrivenCull.Plan"/>) on the GPU
 	/// for the calls that draw them this frame, all at once, where the device can.
 	/// </summary>

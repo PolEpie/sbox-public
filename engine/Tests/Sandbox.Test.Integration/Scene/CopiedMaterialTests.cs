@@ -7,8 +7,6 @@ namespace SceneTests;
 [TestClass]
 public class CopiedMaterialTests
 {
-	static readonly System.Reflection.MethodInfo Compare = System.Type.GetType( "Sandbox.Rendering.Bridge.SceneNative, Sandbox.Rendering", true ).GetMethod( "CompareDraws" );
-
 	[TestMethod]
 	public void PerIndexOverridesReachTheCopysDraws()
 	{
@@ -24,9 +22,9 @@ public class CopiedMaterialTests
 		{
 			renderer.CopyMaterialsTo( copy );
 
-			var differences = (System.Collections.Generic.List<string>)Compare.Invoke( null, [copy] );
-			Assert.AreEqual( 0, differences.Count, string.Join( "\n", differences ) );
-			Assert.AreEqual( "", copy.CompareFlags(), "flags" );
+			// As native drew the copy (RenderTools::GetSceneObjectDraw), and its flags (NativeGolden)
+			NativeGolden.CheckDraws( "copied/draws", copy );
+			NativeGolden.Check( "copied/flags", NativeGolden.Native( copy, "flags", () => ((ulong)copy.CurrentFlags).ToString( "X" ) ), 0 );
 		}
 		finally
 		{

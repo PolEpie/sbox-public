@@ -13,11 +13,7 @@ public sealed class ScenePointLight : SceneLight
 	{
 		Assert.IsValid( sceneWorld );
 
-		using ( var h = NextHandleForTwin() )
-		{
-			if ( MakesNativeTwin ) CSceneSystem.CreatePointLight( sceneWorld );
-			else MakeLightWithoutTwin( sceneWorld, NewDescription( TypePoint ) );
-		}
+		MakeManagedLight( sceneWorld, NewDescription( TypePoint ) );
 
 		Position = position;
 		Radius = radius;
