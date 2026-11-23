@@ -109,7 +109,7 @@ public sealed class GpuCounterResults
 		foreach ( var s in Scopes )
 		{
 			csv.Append( '"' ).Append( s.Name.Replace( "\"", "\"\"" ) ).Append( "\"," ).Append( s.Occurrences );
-			foreach ( var v in s.Values ) csv.Append( ',' ).Append( v.ToString( "G6", CultureInfo.InvariantCulture ) );
+			foreach ( var v in s.Values ) csv.Append( ',' ).Append( v.ToString( "0.######", CultureInfo.InvariantCulture ) );
 			csv.AppendLine();
 		}
 

@@ -64,7 +64,7 @@ public sealed unsafe class GpuCounters
 		["default"] =
 		[
 			"GPUTime", "GPUBusy", "VsGsBusy", "PSBusy", "CSBusy",
-			"VALUBusy", "SALUBusy", "VALUInstsPerWave", "SALUInstsPerWave", "VMemInstsPerWave", "Occupancy", "WavesLaunched", "LDSBankConflictCycles",
+			"VALUBusy", "SALUBusy", "VALUInstsPerWave", "SALUInstsPerWave", "VMemInstsPerWave", "WavesLaunched", "LDSBankConflictCycles",
 			"TexUnitBusy", "MemUnitBusy", "MemUnitStalled", "WriteUnitStalled", "FetchSize", "WriteSize",
 			"L0CacheHit", "L1CacheHit", "L2CacheHit", "ScalarCacheHit", "InstCacheHit",
 			"PrimitivesIn", "CulledPrims", "PrimitiveAssemblyBusy", "PSPixelsOut", "PSExportStalls",
@@ -85,7 +85,7 @@ public sealed unsafe class GpuCounters
 		],
 		["compute"] =
 		[
-			"GPUTime", "CSBusy", "VALUBusy", "SALUBusy", "VALUInstsPerWave", "SALUInstsPerWave", "Occupancy", "CSThreadGroupsLaunched", "CSWavefrontsLaunched", "CSThreadsLaunched",
+			"GPUTime", "CSBusy", "VALUBusy", "SALUBusy", "VALUInstsPerWave", "SALUInstsPerWave", "WavesLaunched", "CSThreadGroupsLaunched", "CSWavefrontsLaunched", "CSThreadsLaunched",
 			"CSALUStalledByLDS", "CSLDSBankConflict", "MemUnitBusy", "MemUnitStalled", "FetchSize", "WriteSize", "L0CacheHit", "L2CacheHit",
 		],
 	};
@@ -129,22 +129,25 @@ public sealed unsafe class GpuCounters
 	/// <summary>The composites: VALU and SALU work, waves and occupancy, LDS bank conflicts.</summary>
 	internal static readonly Composite[] Composites =
 	[
-		// One VALU instruction issued per SIMD per cycle at most: issue cycles over the SIMDs' busy cycles (4 SIMD32s per WGP)
+		// GPUBusyCycles is summed over the shader engines (checked on RDNA3: over one engine's share it gives the 2.1-2.6 GHz
+		// clock at peak), so a SIMD's busy cycles are it over the engines. VALU issue cycles over every SIMD's busy cycles (4
+		// SIMD32s per WGP); scalar instructions at one a cycle
 		new( "VALUBusy", GpuCounterUnit.Percentage, "Share of the busy time the SIMDs spent issuing vector ALU instructions (all WGPs' SQ_PERF_SEL_INST_CYCLES_VALU over busy cycles x SIMDs)",
-			["SQ_PERF_SEL_INST_CYCLES_VALU"], ( e, busy, g ) => 100 * Ratio( e[0], busy * g.Simds ) ),
+			["SQ_PERF_SEL_INST_CYCLES_VALU"], ( e, busy, g ) => 100 * Ratio( e[0], busy / g.ShaderEngines * g.Simds ) ),
 		new( "SALUBusy", GpuCounterUnit.Percentage, "Share of the busy time the SIMDs spent issuing scalar ALU instructions, at one a cycle (SQ_PERF_SEL_INSTS_SALU over busy cycles x SIMDs)",
-			["SQ_PERF_SEL_INSTS_SALU"], ( e, busy, g ) => 100 * Ratio( e[0], busy * g.Simds ) ),
+			["SQ_PERF_SEL_INSTS_SALU"], ( e, busy, g ) => 100 * Ratio( e[0], busy / g.ShaderEngines * g.Simds ) ),
 		new( "VALUInstsPerWave", GpuCounterUnit.Ratio, "Vector ALU instructions per wave", ["SQ_PERF_SEL_INSTS_VALU", "SQ_PERF_SEL_WAVES"], ( e, _, _ ) => Ratio( e[0], e[1] ) ),
 		new( "SALUInstsPerWave", GpuCounterUnit.Ratio, "Scalar ALU instructions per wave", ["SQ_PERF_SEL_INSTS_SALU", "SQ_PERF_SEL_WAVES"], ( e, _, _ ) => Ratio( e[0], e[1] ) ),
 		new( "VMemInstsPerWave", GpuCounterUnit.Ratio, "Texture and buffer load instructions per wave", ["SQ_PERF_SEL_INSTS_TEX_LOAD", "SQ_PERF_SEL_WAVES"], ( e, _, _ ) => Ratio( e[0], e[1] ) ),
 		new( "WavesLaunched", GpuCounterUnit.Items, "Waves launched, every shader stage", ["SQ_PERF_SEL_WAVES"], ( e, _, _ ) => e[0] ),
-		new( "Occupancy", GpuCounterUnit.Percentage, "Waves resident on average over the busy time, as a share of the GPU's wave slots (SQ_PERF_SEL_LEVEL_WAVES over busy cycles x wave slots)",
-			["SQ_PERF_SEL_LEVEL_WAVES"], ( e, busy, g ) => 100 * Ratio( e[0], busy * g.Hardware.WaveSlots ) ),
 		new( "LDSBankConflictCycles", GpuCounterUnit.Cycles, "Cycles LDS accesses stalled on bank conflicts, every stage, summed over the WGPs", ["SQC_PERF_SEL_LDS_BANK_CONFLICT"], ( e, _, _ ) => e[0] ),
 	];
 
 	/// <summary>SIMDs on the GPU: four per workgroup processor.</summary>
 	internal int Simds { get; }
+
+	/// <summary>Shader engines on the GPU, from GPA's per-engine SQG counters.</summary>
+	internal int ShaderEngines { get; }
 	readonly Action<string> note;
 
 	/// <summary>Every counter GPA offers on the device, derived and (with hardware counters on) raw.</summary>
@@ -206,6 +209,7 @@ public sealed unsafe class GpuCounters
 
 			Available = available;
 			Simds = 4 * Math.Max( 1, available.Count( c => c.Name.StartsWith( "SQWGP", StringComparison.Ordinal ) && c.Name.EndsWith( "_SQ_PERF_SEL_WAVES", StringComparison.Ordinal ) ) );
+			ShaderEngines = Math.Max( 1, available.Count( c => System.Text.RegularExpressions.Regex.IsMatch( c.Name, @"^SQG\d+_PERF_SEL_WAVES$" ) ) );
 			var (wanted, list) = Parse( selection );
 			ListRequested = list;
 			var byName = new Dictionary<string, GpuCounterInfo>( StringComparer.OrdinalIgnoreCase );
