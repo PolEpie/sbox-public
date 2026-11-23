@@ -9,7 +9,10 @@ public class SceneCustomObject : SceneObject
 {
 	internal NativeEngine.CManagedSceneObject managedNative;
 
-	internal SceneCustomObject( HandleCreationData _ ) { }
+	internal SceneCustomObject( HandleCreationData _ )
+	{
+		gameType = GetType().Assembly != typeof( SceneCustomObject ).Assembly;
+	}
 
 
 	public SceneCustomObject( SceneWorld sceneWorld )
@@ -30,6 +33,7 @@ public class SceneCustomObject : SceneObject
 			}
 		}
 
+		gameType = GetType().Assembly != typeof( SceneCustomObject ).Assembly;
 		lock ( live ) live.Add( this );
 	}
 
@@ -54,12 +58,33 @@ public class SceneCustomObject : SceneObject
 					continue;
 				}
 
-				if ( custom.RenderOverride is not null || custom.GetType().Assembly != typeof( SceneCustomObject ).Assembly ) return custom;
+				if ( custom.IsGameDrawn ) return custom;
 			}
 		}
 
 		return null;
 	}
+
+	/// <summary>Every live custom object whose drawing runs game code (<see cref="GameDrawn"/>), into <paramref name="into"/>.</summary>
+	internal static void CopyGameDrawn( List<SceneCustomObject> into )
+	{
+		into.Clear();
+		lock ( live )
+		{
+			foreach ( var custom in live )
+			{
+				if ( custom.IsValid() && custom.IsGameDrawn ) into.Add( custom );
+			}
+		}
+	}
+
+	/// <summary>Whether drawing this object runs game code: a game's own type, or a <see cref="RenderOverride"/>.</summary>
+	internal bool IsGameDrawn => RenderOverride is not null || gameType;
+
+	readonly bool gameType;
+
+	/// <summary>Its drawing's recordings in the extract, by camera and layer kind (<see cref="Rendering.GameDrawExtract"/>).</summary>
+	internal Rendering.GameDrawExtract.Slots DrawSlots;
 
 	/// <summary>What native's <c>CManagedSceneObject::Create</c> sets.</summary>
 	internal const Rendering.SceneObjectFlags TwinlessFlags = Rendering.SceneObjectFlags.IsTranslucent;
@@ -82,6 +107,16 @@ public class SceneCustomObject : SceneObject
 		if ( !this.IsValid() )
 			return;
 
+		// A game's drawing replays what the extract recorded where it isn't run here (the render thread)
+		if ( IsGameDrawn && Rendering.GameDrawExtract.Draws( this ) )
+			return;
+
+		RecordInternal();
+	}
+
+	/// <summary>Run the object's drawing: into the frame, or into a recording in the extract.</summary>
+	internal void RecordInternal()
+	{
 		try
 		{
 			RenderSceneObject();

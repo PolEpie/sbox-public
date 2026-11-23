@@ -31,6 +31,7 @@ internal static class BorealisGpuCustomDraw
 		view = null;
 		overlays.Clear();
 		customAttributes = null;
+		Rendering.GameDrawExtract.Shutdown();
 	}
 
 	/// <summary>
@@ -76,6 +77,8 @@ internal static class BorealisGpuCustomDraw
 		// A debug view's tools pass (wireframe, overdraw, shader IDs) over the custom object's draws too
 		var drawer = backend.Context.Drawer;
 		drawer.ToolsPass = depthAlone ? ToolsPass.None : context.ToolsPass;
+		// A game's custom object replays what the extract recorded for this camera (Rendering.GameDrawExtract)
+		using var drawing = Rendering.GameDrawExtract.DrawingFor( cameraAttributes, overlay: false );
 		try
 		{
 			frame.RunInFrame( target, constants, view, first: false, draw, depthAlone, cameraAttributes );
@@ -219,6 +222,7 @@ internal static class BorealisGpuCustomDraw
 		if ( overlays.Count == 0 || RenderBackend.Default is not BorealisGpuRenderBackend backend ) return;
 
 		var withDepth = false;
+		using var drawing = Rendering.GameDrawExtract.DrawingFor( camera.HostView as RenderAttributes, overlay: true );
 		try
 		{
 			foreach ( var overlay in overlays )

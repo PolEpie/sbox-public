@@ -56,6 +56,13 @@ public sealed partial class RenderTarget : IDisposable
 	{
 		if ( !Loaned ) return;
 
+		// Given back by a game's drawing being recorded: the replay draws into it later, so it's kept until then
+		if ( Graphics.Recording is { } recording )
+		{
+			recording.Return( this );
+			return;
+		}
+
 		Return( this );
 	}
 
