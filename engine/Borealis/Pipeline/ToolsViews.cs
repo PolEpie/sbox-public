@@ -22,6 +22,40 @@ internal enum ToolsPass : byte
 	ShaderIds,
 }
 
+/// <summary>What a visibility ids view colours each pixel by (<see cref="ToolsViews.IdsViewOf"/>).</summary>
+internal enum IdsView
+{
+	None,
+
+	/// <summary>The id itself: an owner's vertex, the first corner of the pixel's triangle.</summary>
+	Triangles,
+
+	/// <summary>The instance record the id names (its second word).</summary>
+	Instances,
+
+	/// <summary>The draw record of that instance.</summary>
+	Draws,
+}
+
+/// <summary>What a visibility ids view could draw (<see cref="GpuContext.ResolveIdsView"/>), for the host's text.</summary>
+internal enum IdsViewResult
+{
+	/// <summary>Drawn from the view's ids.</summary>
+	Drawn,
+
+	/// <summary>
+	/// The view has no ids this frame: it isn't drawn GPU-driven with visibility (not Borealis.Gpu, <c>-no-gpudriven</c>,
+	/// <c>-no-gpudriven-visibility</c>), its ids target isn't made yet, or it drew no prepass with ids.
+	/// </summary>
+	NoIds,
+
+	/// <summary>
+	/// The ids carry no instance record yet, which the instances and draws views colour by: the view's ids target is made
+	/// again with two words a frame or two after an ids view starts (<c>BackendDevice.IdsFormat</c>).
+	/// </summary>
+	NoInstances,
+}
+
 /// <summary>
 /// The editor's view modes (<c>SceneCameraDebugMode</c> in <see cref="RenderView.ToolsVisMode"/>, and
 /// <see cref="RenderView.Wireframe"/>) as the frame draws them. One mechanism for every shader kind:
@@ -53,6 +87,27 @@ internal static class ToolsViews
 	/// <summary><c>SceneCameraDebugMode.ReactiveMask</c>.</summary>
 	public const int ReactiveMask = 103;
 
+	/// <summary><c>SceneCameraDebugMode.VisibilityTriangles</c>: each pixel's visibility id, a colour per triangle.</summary>
+	public const int VisibilityTriangles = 110;
+
+	/// <summary><c>SceneCameraDebugMode.VisibilityInstances</c>: a colour per instance record the ids name.</summary>
+	public const int VisibilityInstances = 111;
+
+	/// <summary><c>SceneCameraDebugMode.VisibilityDraws</c>: a colour per draw record the ids' instances draw.</summary>
+	public const int VisibilityDraws = 112;
+
+	/// <summary>
+	/// Which of the visibility ids views <paramref name="view"/> shows (<see cref="IdsView"/>), drawn by
+	/// <see cref="IdsViewLayer"/> from its depth prepass's ids; <see cref="IdsView.None"/> for any other mode.
+	/// </summary>
+	public static IdsView IdsViewOf( RenderView view ) => view?.ToolsVisMode switch
+	{
+		VisibilityTriangles => IdsView.Triangles,
+		VisibilityInstances => IdsView.Instances,
+		VisibilityDraws => IdsView.Draws,
+		_ => IdsView.None,
+	};
+
 	/// <summary>The tools pass a view's colour layers draw with: wireframe over any mode, else its mode's.</summary>
 	public static ToolsPass PassOf( RenderView view ) => view is null ? ToolsPass.None : view.Wireframe ? ToolsPass.Wireframe : view.ToolsVisMode switch
 	{
@@ -66,7 +121,17 @@ internal static class ToolsViews
 	/// The <c>ToolsVisMode</c> shaders are given: the view's, unless the mode is the engine's tools pass or the upscaler's,
 	/// which shaders draw lit under.
 	/// </summary>
-	public static int ShaderMode( RenderView view ) => view.ToolsVisMode is ShaderIds or QuadOverdraw or Overdraw or MotionVectors or ReactiveMask ? 0 : view.ToolsVisMode;
+	public static int ShaderMode( RenderView view ) => view.ToolsVisMode switch
+	{
+		ShaderIds or QuadOverdraw or Overdraw or MotionVectors or ReactiveMask => 0,
+
+		// The ids views draw over the frame unlit, which shows where nothing wrote an id
+		VisibilityTriangles or VisibilityInstances or VisibilityDraws => FullBright,
+		_ => view.ToolsVisMode,
+	};
+
+	/// <summary><c>SceneCameraDebugMode.FullBright</c>.</summary>
+	public const int FullBright = 1;
 
 	/// <summary>Whether a view counts fragments: it starts black, draws no sky, and its draws take every fragment, unculled by depth.</summary>
 	public static bool Counts( RenderView view ) => PassOf( view ) is ToolsPass.Overdraw or ToolsPass.QuadOverdraw;

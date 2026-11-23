@@ -31,20 +31,8 @@ public partial class SceneObject : IHandle
 			if ( !_alive ) return null;
 			if ( _attributes is not null ) return _attributes;
 
-			if ( !WritesNative || !HasTwin )
-			{
-				// Nothing reads native's: the set is managed only (Borealis reads it), and native's is never made
-				_attributes = RenderAttributes.CreateManaged();
-			}
-			else
-			{
-				// FIXME: What really sucks with this is it allocates CSceneObject::m_pExtraData even if we're only reading
-				_attributes = new RenderAttributes( native.GetAttributesPtrForModify() );
-
-				// Borealis reads them from a managed copy: a custom or dynamic object merges them into the set it draws with, and a
-				// model's draws read them as its object attributes
-				_attributes.KeepManagedCopy();
-			}
+			// Managed only: Borealis reads them, and nothing native does
+			_attributes = RenderAttributes.CreateManaged();
 
 			NotifyChanged( Rendering.SceneObjectChange.Attributes );
 			return _attributes;
@@ -82,19 +70,14 @@ public partial class SceneObject : IHandle
 
 		if ( !model.HasRenderMeshes() ) model = Model.Error;
 
-		using ( var h = NextHandleForTwin() )
-		{
-			var flags = Rendering.SceneObjectFlags.CastShadows | Rendering.SceneObjectFlags.IsLoaded;
-			var typeFlags = ESceneObjectTypeFlags.NONE;
-			if ( MakesNativeTwin ) MeshSystem.CreateSceneObject( model.native, transform, null, flags, typeFlags, sceneWorld, 0x1 );
-			else MakeWithoutTwin( sceneWorld, model );
-			_keptModel = model;
-			StartResolvingDraws( model );
-			FlagsAtCreation( model, flags );
-			Tags.RemoveAll();
-			Transform = transform;
-			KeepRigidBounds();
-		}
+		var flags = Rendering.SceneObjectFlags.CastShadows | Rendering.SceneObjectFlags.IsLoaded;
+		MakeManaged( sceneWorld, model );
+		_keptModel = model;
+		StartResolvingDraws( model );
+		FlagsAtCreation( model, flags );
+		Tags.RemoveAll();
+		Transform = transform;
+		KeepRigidBounds();
 	}
 
 	public SceneObject( SceneWorld sceneWorld, string modelName, Transform transform ) : this( sceneWorld, Model.Load( modelName ), transform )
@@ -127,7 +110,7 @@ public partial class SceneObject : IHandle
 			_parent?.RemoveChild( this );
 
 			World?.Render?.Deleted( this );
-			if ( HasTwin ) CSceneSystem.DeleteSceneObjectAtFrameEnd( this );
+			if ( HasNativeObject ) CSceneSystem.DeleteSceneObjectAtFrameEnd( this );
 			native = IntPtr.Zero; // avoid double delete etc
 			_alive = false;
 
@@ -236,7 +219,7 @@ public partial class SceneObject : IHandle
 			_transformSet = true;
 			_transform = value;
 			TransformVersion++;
-			if ( WritesTwin( "SetTransform" ) ) native.SetTransform( value );
+			if ( WritesNativeObject( "SetTransform" ) ) native.SetTransform( value );
 			UpdateRigidBounds();
 			NotifyChanged( Rendering.SceneObjectChange.Transform );
 			OnTransformChanged( value );
@@ -245,7 +228,7 @@ public partial class SceneObject : IHandle
 	}
 
 	/// <summary>
-	/// Children added with <see cref="AddChild"/>, which move with this one. Kept here only: native's twins aren't linked.
+	/// Children added with <see cref="AddChild"/>, which move with this one. Kept here only.
 	/// </summary>
 	List<SceneObject> _children;
 	SceneObject _parent;
@@ -321,7 +304,7 @@ public partial class SceneObject : IHandle
 		get => GetSafeBounds();
 		set
 		{
-			if ( WritesTwin( "SetBounds" ) ) native.SetBounds( value );
+			if ( WritesNativeObject( "SetBounds" ) ) native.SetBounds( value );
 			var kept = _bounds;
 			SetKeptBounds( value );
 
@@ -342,8 +325,8 @@ public partial class SceneObject : IHandle
 		set => Bounds = value.Transform( Transform );
 	}
 
-	// Kept here once read from native (what native code made the object with) or set: native still gets visibility, which
-	// render-mesh traces skip hidden objects by, and the tint only while something reads it (WritesNative)
+	// Kept here once read from native (what native code made the object with) or set; an object native code made still gets
+	// its visibility, which its native code reads
 	bool? _renderingEnabled;
 	Color? _tint;
 
@@ -362,13 +345,13 @@ public partial class SceneObject : IHandle
 	/// </summary>
 	public bool RenderingEnabled
 	{
-		get => _renderingEnabled ??= !HasTwin || native.IsRenderingEnabled();
+		get => _renderingEnabled ??= !HasNativeObject || native.IsRenderingEnabled();
 		set
 		{
-			var twin = WritesTwin( "SetRenderingEnabled" );
+			var writesNative = WritesNativeObject( "SetRenderingEnabled" );
 			// Components set it every frame: an unchanged value would rewrite the render object each time
 			if ( _renderingEnabled == value ) return;
-			if ( twin ) native.SetRenderingEnabled( value );
+			if ( writesNative ) native.SetRenderingEnabled( value );
 			_renderingEnabled = value;
 			NotifyChanged( Rendering.SceneObjectChange.Visibility );
 		}
@@ -379,17 +362,16 @@ public partial class SceneObject : IHandle
 	/// </summary>
 	public Color ColorTint
 	{
-		get => _tint ??= HasTwin ? native.GetTintRGBA() : Color.White;
+		get => _tint ??= HasNativeObject ? native.GetTintRGBA() : Color.White;
 		set
 		{
-			var twin = WritesTwin( "SetTintRGBA" );
+			WritesNativeObject( "SetTintRGBA" );
 			var tint = NativeTint( value );
 
 			// Copies set the tint they already have every frame, and each write goes through the render object
 			if ( _tint is { } held && held == tint ) return;
 
 			_tint = tint;
-			if ( WritesNative && twin ) native.SetTintRGBA( value );
 			NotifyChanged( Rendering.SceneObjectChange.Tint );
 		}
 	}
@@ -464,7 +446,7 @@ public partial class SceneObject : IHandle
 		get
 		{
 			// Native's for an object native code made, which native code may give another model
-			return _keptModel is not null || !HasTwin ? _keptModel : Model.FromNative( native.GetModelHandle() );
+			return _keptModel is not null || !HasNativeObject ? _keptModel : Model.FromNative( native.GetModelHandle() );
 		}
 
 		set
@@ -476,7 +458,7 @@ public partial class SceneObject : IHandle
 
 			if ( !model.HasRenderMeshes() ) model = Model.Error;
 
-			if ( WritesTwin( "ChangeModel" ) ) MeshSystem.ChangeModel( this, model.native );
+			if ( WritesNativeObject( "ChangeModel" ) ) MeshSystem.ChangeModel( this, model.native );
 			_keptModel = model;
 
 			// New mesh instances draw the model's materials; the override list and mesh groups stay
@@ -536,10 +518,10 @@ public partial class SceneObject : IHandle
 	/// </summary>
 	public ulong MeshGroupMask
 	{
-		get => _meshGroupMask ??= HasTwin ? native.GetCurrentMeshGroupMask() : 0;
+		get => _meshGroupMask ??= HasNativeObject ? native.GetCurrentMeshGroupMask() : 0;
 		set
 		{
-			if ( WritesTwin( "ResetMeshGroups" ) ) native.ResetMeshGroups( value );
+			if ( WritesNativeObject( "ResetMeshGroups" ) ) native.ResetMeshGroups( value );
 			_meshGroupMask = value;
 			NotifyChanged( Rendering.SceneObjectChange.Material );
 		}
@@ -549,16 +531,15 @@ public partial class SceneObject : IHandle
 
 	/// <summary>
 	/// Override current LOD level, -1 to disable. Kept here as native keeps it (<c>CSceneObject::SetLOD</c>: anything outside
-	/// 0 to 7 disables it), or read once from native for an object native code made; native gets it while something reads it.
+	/// 0 to 7 disables it), or read once from native for an object native code made.
 	/// </summary>
 	internal int LodOverride
 	{
-		get => _lod ??= HasTwin ? native.GetCurrentLODLevel() : -1;
+		get => _lod ??= HasNativeObject ? native.GetCurrentLODLevel() : -1;
 		set
 		{
-			var twin = WritesTwin( "SetLOD" );
+			WritesNativeObject( "SetLOD" );
 			_lod = value is < 0 or > 7 ? -1 : value;
-			if ( WritesNative && twin ) native.SetLOD( value );
 			NotifyChanged( Rendering.SceneObjectChange.Settings );
 		}
 	}
@@ -578,13 +559,13 @@ public partial class SceneObject : IHandle
 
 		if ( material != null && material.native.IsValid )
 		{
-			if ( WritesTwin( "SetMaterialOverrideForMeshInstances" ) ) native.SetMaterialOverrideForMeshInstances( material.native );
+			if ( WritesNativeObject( "SetMaterialOverrideForMeshInstances" ) ) native.SetMaterialOverrideForMeshInstances( material.native );
 			OverrideMeshInstances( material );
 			FlagsAtMaterialChange();
 			return;
 		}
 
-		if ( WritesTwin( "SetMaterialOverrideForMeshInstances" ) ) native.SetMaterialOverrideForMeshInstances( default );
+		if ( WritesNativeObject( "SetMaterialOverrideForMeshInstances" ) ) native.SetMaterialOverrideForMeshInstances( default );
 		OverrideMeshInstances( null );
 		FlagsAtMaterialChange();
 	}
@@ -603,7 +584,7 @@ public partial class SceneObject : IHandle
 	/// </summary>
 	internal void ClearMaterialOverrideList()
 	{
-		if ( WritesTwin( "ClearMaterialOverrideList" ) ) native.ClearMaterialOverrideList();
+		if ( WritesNativeObject( "ClearMaterialOverrideList" ) ) native.ClearMaterialOverrideList();
 
 		// Native works the material flags out again only if there was something to clear, and not the translucency flags
 		var had = _overrideList is { Count: > 0 };
@@ -618,7 +599,7 @@ public partial class SceneObject : IHandle
 	/// </summary>
 	internal void SetMaterialOverrideByIndex( int index, Material material )
 	{
-		if ( WritesTwin( "SetMaterialOverrideByIndex" ) ) native.SetMaterialOverrideByIndex( index, material?.native ?? default );
+		if ( WritesNativeObject( "SetMaterialOverrideByIndex" ) ) native.SetMaterialOverrideByIndex( index, material?.native ?? default );
 		SetIndexOverride( index, material is { native.IsValid: true } ? material : null );
 		FlagsAtMaterialChange();
 		NotifyChanged( Rendering.SceneObjectChange.Material );
@@ -635,7 +616,7 @@ public partial class SceneObject : IHandle
 	public void SetMaterialOverride( Material material, string attributeName, int attributeValue = 1 )
 	{
 		StringToken attribute = attributeName;
-		if ( WritesTwin( "SetMaterialOverride" ) ) native.SetMaterialOverride( material?.native ?? IntPtr.Zero, attribute, attributeValue );
+		if ( WritesNativeObject( "SetMaterialOverride" ) ) native.SetMaterialOverride( material?.native ?? IntPtr.Zero, attribute, attributeValue );
 		SetOverrideEntry( material is { native.IsValid: true } ? material : null, attribute.Value, attributeValue );
 		FlagsAtMaterialChange();
 		NotifyChanged( Rendering.SceneObjectChange.Material );
@@ -646,7 +627,7 @@ public partial class SceneObject : IHandle
 	/// </summary>
 	public void SetMaterialGroup( string name )
 	{
-		if ( WritesTwin( "SetMaterialGroup" ) ) native.SetMaterialGroup( name );
+		if ( WritesNativeObject( "SetMaterialGroup" ) ) native.SetMaterialGroup( name );
 		if ( ApplyMaterialGroup( name ) ) FlagsAtMaterialChange();
 		NotifyChanged( Rendering.SceneObjectChange.Material );
 	}
@@ -662,8 +643,8 @@ public partial class SceneObject : IHandle
 	/// </summary>
 	public bool Batchable
 	{
-		get => HasTwin ? !native.IsNotBatchable() : _batchable;
-		set { if ( WritesTwin( "SetBatchable" ) ) native.SetBatchable( value ); _batchable = value; }
+		get => HasNativeObject ? !native.IsNotBatchable() : _batchable;
+		set { if ( WritesNativeObject( "SetBatchable" ) ) native.SetBatchable( value ); _batchable = value; }
 	}
 
 	Component _component;
@@ -701,7 +682,7 @@ public partial class SceneObject : IHandle
 	/// </summary>
 	internal void UpdateFlagsBasedOnMaterial()
 	{
-		if ( WritesTwin( "UpdateFlagsBasedOnMaterial" ) ) native.UpdateFlagsBasedOnMaterial();
+		if ( WritesNativeObject( "UpdateFlagsBasedOnMaterial" ) ) native.UpdateFlagsBasedOnMaterial();
 		FlagsAtMaterialChange();
 		NotifyChanged( Rendering.SceneObjectChange.Flags );
 	}

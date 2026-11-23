@@ -327,6 +327,7 @@ public sealed partial class SceneCamera : IDisposable, IManagedCamera
 			if ( !_frustum.IsValid )
 			{
 				_frustum = CFrustum.Create();
+				FrustumDirty = true;
 			}
 
 			if ( FrustumDirty )
@@ -405,6 +406,7 @@ public sealed partial class SceneCamera : IDisposable, IManagedCamera
 		get => _transform.Position;
 		set
 		{
+			if ( _transform.Position.Equals( value ) ) return;
 			_transform.Position = value;
 			FrustumDirty = true;
 		}
@@ -418,6 +420,7 @@ public sealed partial class SceneCamera : IDisposable, IManagedCamera
 		get => _transform.Rotation;
 		set
 		{
+			if ( _transform.Rotation.Equals( value ) ) return;
 			_transform.Rotation = value;
 			FrustumDirty = true;
 		}
@@ -432,8 +435,7 @@ public sealed partial class SceneCamera : IDisposable, IManagedCamera
 
 		set
 		{
-			_transform.Rotation = value;
-			FrustumDirty = true;
+			Rotation = value;
 		}
 	}
 
@@ -447,6 +449,7 @@ public sealed partial class SceneCamera : IDisposable, IManagedCamera
 		get => _fov;
 		set
 		{
+			if ( _fov == value ) return;
 			_fov = value;
 			FrustumDirty = true;
 		}
@@ -465,6 +468,7 @@ public sealed partial class SceneCamera : IDisposable, IManagedCamera
 		get => _zfar;
 		set
 		{
+			if ( _zfar == value ) return;
 			_zfar = value;
 			FrustumDirty = true;
 		}
@@ -482,6 +486,7 @@ public sealed partial class SceneCamera : IDisposable, IManagedCamera
 		get => _znear;
 		set
 		{
+			if ( _znear == value ) return;
 			_znear = value;
 			FrustumDirty = true;
 		}
@@ -497,6 +502,7 @@ public sealed partial class SceneCamera : IDisposable, IManagedCamera
 		get => _ortho;
 		set
 		{
+			if ( _ortho == value ) return;
 			_ortho = value;
 			FrustumDirty = true;
 		}
@@ -510,6 +516,7 @@ public sealed partial class SceneCamera : IDisposable, IManagedCamera
 		get => Attributes.GetFloat( "cam.orthoHeight" );
 		set
 		{
+			if ( OrthoHeight == value ) return;
 			Attributes.Set( "cam.orthoHeight", value );
 			FrustumDirty = true;
 		}
@@ -714,6 +721,10 @@ public sealed partial class SceneCamera : IDisposable, IManagedCamera
 
 		if ( renderStage == Rendering.Stage.AfterPostProcess )
 			OnAfterPostProcess?.Invoke();
+
+		// A visibility ids view with no ids to show says so, over the frame
+		if ( renderStage == Rendering.Stage.AfterUI )
+			DebugOverlay.ToolsVisualization.DrawIdsViewNotice();
 
 		if ( renderStage == Rendering.Stage.AfterUI && IsRecordingCamera && Application.IsEditor && !Game.IsPlaying )
 		{
@@ -1005,4 +1016,10 @@ public enum SceneCameraDebugMode
 	MotionVectors = 102,
 	[Title( "Reactive Mask" ), Icon( "shield" )]
 	ReactiveMask = 103,
+	[Title( "Visibility Triangles" ), Icon( "change_history" )]
+	VisibilityTriangles = 110,
+	[Title( "Visibility Instances" ), Icon( "category" )]
+	VisibilityInstances = 111,
+	[Title( "Visibility Draws" ), Icon( "view_in_ar" )]
+	VisibilityDraws = 112,
 }

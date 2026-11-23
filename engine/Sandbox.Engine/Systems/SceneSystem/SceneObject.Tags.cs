@@ -17,8 +17,8 @@ namespace Sandbox
 	{
 		/// <summary>
 		/// A scene object's tags, kept in managed code. The first time anything asks they're read from the native object, which
-		/// has those native code gave it by then (a map's world geometry); from then on managed code owns them. A native twin, if
-		/// there is one, still gets every change.
+		/// has those native code gave it by then (a map's world geometry); from then on managed code owns them. A native object,
+		/// if native code made it, still gets every change.
 		/// </summary>
 		internal class SceneObjectTags : ITagSet
 		{
@@ -36,7 +36,7 @@ namespace Sandbox
 			{
 				get
 				{
-					if ( !read && SceneObject.HasTwin )
+					if ( !read && SceneObject.HasNativeObject )
 					{
 						read = true;
 						var count = SceneObject.native.GetTagCount();
@@ -53,7 +53,7 @@ namespace Sandbox
 				var token = StringToken.FindOrCreate( tag );
 				if ( Tokens.Contains( token ) ) return;
 				tokens.Add( token );
-				if ( SceneObject.HasTwin ) SceneObject.native.AddTag( token );
+				if ( SceneObject.HasNativeObject ) SceneObject.native.AddTag( token );
 				SceneObject.TagsChanged();
 			}
 
@@ -84,7 +84,7 @@ namespace Sandbox
 				base.SetFrom( set );
 			}
 
-			// The managed tokens are the tags (a twin only mirrors them); they hold no duplicates
+			// The managed tokens are the tags (a native object only mirrors them); they hold no duplicates
 			bool Matches( IReadOnlySet<uint> other )
 			{
 				var own = Tokens;
@@ -109,7 +109,7 @@ namespace Sandbox
 				if ( !SceneObject.IsValid() ) return;
 				var token = StringToken.FindOrCreate( tag );
 				if ( !Tokens.Remove( token ) ) return;
-				if ( SceneObject.HasTwin ) SceneObject.native.RemoveTag( token );
+				if ( SceneObject.HasNativeObject ) SceneObject.native.RemoveTag( token );
 				SceneObject.TagsChanged();
 			}
 
@@ -118,7 +118,7 @@ namespace Sandbox
 				if ( !SceneObject.IsValid() ) return;
 				read = true;
 				tokens.Clear();
-				if ( SceneObject.HasTwin ) SceneObject.native.RemoveAllTags();
+				if ( SceneObject.HasNativeObject ) SceneObject.native.RemoveAllTags();
 				SceneObject.TagsChanged();
 			}
 		}

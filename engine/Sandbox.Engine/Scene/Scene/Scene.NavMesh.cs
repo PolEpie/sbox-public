@@ -35,7 +35,7 @@ public partial class Scene : GameObject
 
 		if ( NavMesh.IsGenerating ) return;
 
-		if ( IsEditor ) BakeMissingNavMeshInEditor();
+		if ( IsEditor ) BakeMissingInEditor();
 
 		if ( NavMesh.IsDirty || (NavMesh.AutoUpdates && IsEditor) )
 		{
@@ -47,10 +47,11 @@ public partial class Scene : GameObject
 		NavMesh.Simulation.Update( Time.Delta );
 	}
 
-	// Its own method: the lambda's closure would otherwise be allocated on every game fixed update
-	void BakeMissingNavMeshInEditor()
+	/// <summary>
+	/// An editor scene that loaded without its bake has just generated, and bakes that.
+	/// </summary>
+	void BakeMissingInEditor()
 	{
-		// An editor scene that loaded without its bake has just generated, and bakes that
 		if ( NavMesh.TakeMissingBake() && Editor is { HasUnsavedChanges: false } editor && editor.GetSceneFolder() is { } folder )
 		{
 			_ = NavMesh.BakeInEditor( PhysicsWorld, folder, () => !editor.HasUnsavedChanges, regenerate: false );

@@ -55,6 +55,13 @@ public sealed unsafe class CommandList
 	/// <summary>Its progress marker slot (<see cref="DeviceOptions.ProgressMarkers"/>), -1 without.</summary>
 	internal int MarkerSlot = -1;
 
+	// Its part of a GPU counter sample (Device.Counters), while one records: GPA's list, the sample's pass and session, and
+	// whether a scope is open in it
+	internal nint CounterList;
+	internal int CounterPass;
+	internal object CounterSession;
+	internal bool CounterSampleOpen;
+
 	// The labels open, for naming the markers that end them
 	readonly Stack<string> openLabels = new();
 
@@ -224,6 +231,7 @@ public sealed unsafe class CommandList
 		Marker( "begin" );
 		labelled = name is not null && device.Instance.vkCmdBeginDebugUtilsLabelEXT != null;
 		if ( labelled ) BeginLabel( name );
+		device.Counters?.ListBegan( this );
 	}
 
 	internal void End()
@@ -232,6 +240,7 @@ public sealed unsafe class CommandList
 		if ( rendering ) throw new InvalidOperationException( "Rendering wasn't ended" );
 
 		FlushBarriers( work: false );
+		device.Counters?.ListEnded( this );
 		if ( labelled ) EndLabel();
 		Marker( "end" );
 		EndsSuspended = suspended;
@@ -267,6 +276,7 @@ public sealed unsafe class CommandList
 		if ( recording )
 		{
 			// Recorded but never submitted
+			device.Counters?.ListEnded( this );
 			vk.vkEndCommandBuffer( Handle );
 			recording = false;
 			rendering = false;

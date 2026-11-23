@@ -1,4 +1,4 @@
-﻿namespace Sandbox;
+namespace Sandbox;
 
 /// <summary>
 /// One draw of a scene object's model as the object draws it (<c>RenderTools::GetSceneObjectDraw</c>): its mesh and draw
@@ -21,6 +21,9 @@ public partial class SceneObject
 	// Per draw, whether its mesh instance has draw data of its own (CMeshInstance_Imp::SetAndOwnDrawDataOverride: an override
 	// or a material group set on it), whose flags native works out from its materials. Others share the model's mesh's
 	bool[] _ownDrawData;
+
+	/// <summary>Which draws have draw data of their own (their flags worked out from their material), for checks.</summary>
+	internal bool[] OwnDrawData => _ownDrawData;
 
 	// Whether the override list had entries when native last worked the draws' flags out from their materials
 	// (UpdateTranslucencyFlagsOnMaterialChange, UpdateDrawCallFlags' bMaterialOverride)
@@ -46,8 +49,8 @@ public partial class SceneObject
 	/// <summary>Start working out draws in managed code, for an object managed code just made from <paramref name="model"/>.</summary>
 	internal void StartResolvingDraws( Model model )
 	{
-		// A map's model on a twin keeps the twin's draws; without a twin there are none to read
-		ResolvesDraws = model is not null && (!HasTwin || !(model.ResourcePath?.StartsWith( "maps/", StringComparison.OrdinalIgnoreCase ) ?? false));
+		// A map's model on an object native code made keeps native's draws
+		ResolvesDraws = model is not null && (!HasNativeObject || !(model.ResourcePath?.StartsWith( "maps/", StringComparison.OrdinalIgnoreCase ) ?? false));
 		_drawMaterials = null;
 		_ownDrawData = null;
 		_flagsWithOverrides = false;

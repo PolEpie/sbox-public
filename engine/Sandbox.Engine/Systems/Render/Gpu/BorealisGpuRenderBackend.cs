@@ -378,8 +378,24 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	/// <summary>Which device frame <see cref="GpuBusyMs"/> was (the engine frame it followed).</summary>
 	public ulong GpuBusyFrame { get; private set; }
 
-	/// <summary>Frames between reads of <see cref="GpuBusyMs"/>.</summary>
-	const int BusyReadFrames = 8;
+	/// <summary>
+	/// Frames between reads of <see cref="GpuBusyMs"/> while nothing shows the passes; while the dev tools do
+	/// (<see cref="Sandbox.Diagnostics.GpuProfilerStats.Enabled"/>), every frame.
+	/// </summary>
+	internal const int BusyReadFrames = 8;
+
+	/// <summary>The first device frame the next read of <see cref="GpuBusyMs"/> may take (<see cref="NextBusyRead"/>).</summary>
+	long busyReadFrom;
+
+	/// <summary>
+	/// The first frame a read after one of <paramref name="read"/> may take: the next while someone shows every frame's passes,
+	/// else <see cref="BusyReadFrames"/> on. A read that finds its frame unfinished or its slot reused leaves this as it was,
+	/// so the next frame tries again with a later frame rather than waiting out another interval.
+	/// </summary>
+	internal static long NextBusyRead( long read, bool everyFrame ) => read + (everyFrame ? 1 : BusyReadFrames);
+
+	/// <summary>Held while <see cref="GpuBusyTimings"/> is swapped for a later frame's, and by whoever reads it.</summary>
+	internal readonly System.Threading.Lock GpuBusyLock = new();
 
 	void TimeFrame()
 	{
@@ -393,10 +409,10 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 		services.PassTimer ??= busyTimer;
 		if ( services.PassTimer != busyTimer ) return;
 
-		// The frame before last is done (starting this frame waited for it); older ones are read once. Every
-		// BusyReadFrames frames: reading the queries back costs ~60 us, and the stats don't need every frame
+		// The frame before last is done (starting this frame waited for it); older ones are read once. Reading the queries
+		// back costs ~60 us: every frame while the dev tools show the passes, every BusyReadFrames frames otherwise
 		var done = (long)frame - (Borealis.Backend.PassTimer.Slots - 1);
-		if ( done > 0 && done % BusyReadFrames == 0 && busyTimer.TryRead( done, busyTimings ) )
+		if ( done > 0 && done >= busyReadFrom && busyTimer.TryRead( done, busyTimings ) )
 		{
 			var busy = 0.0;
 			foreach ( var timing in busyTimings )
@@ -404,9 +420,16 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 				if ( timing.Kind == Borealis.Backend.PassTimer.ScopeKind.List ) busy += timing.Ms;
 			}
 
-			GpuBusyMs = busy;
-			GpuBusyFrame = (ulong)done;
-			(busyTimings, publishedTimings) = (publishedTimings, busyTimings);
+			lock ( GpuBusyLock )
+			{
+				GpuBusyMs = busy;
+				GpuBusyFrame = (ulong)done;
+				if ( counterTimeline is not null ) AddCounterTimeline( busyTimings );
+				(busyTimings, publishedTimings) = (publishedTimings, busyTimings);
+			}
+
+			// Every frame while the dev tools' GPU view or a GPU counter capture (r_gpucounters) reads them
+			busyReadFrom = NextBusyRead( done, Sandbox.Diagnostics.GpuProfilerStats.Enabled || counterTimeline is not null );
 		}
 
 		busyTimer.BeginFrame( (long)frame );

@@ -10,10 +10,10 @@ public class SceneSkyTests
 {
 	/// <summary>
 	/// A sky's settings are kept in managed code: one native code made starts with its material and native's defaults, and
-	/// changes reach the native twin only while something in the process reads it (<see cref="SceneObject.WritesNative"/>).
+	/// changes stay managed (nothing native draws it).
 	/// </summary>
 	[TestMethod]
-	public void SettingsAreManagedAndReachTheNativeTwinOnlyWhenRead()
+	public void SettingsAreManaged()
 	{
 		var world = new SceneWorld();
 		try
@@ -28,25 +28,20 @@ public class SceneSkyTests
 			var replacement = material.CreateCopy();
 			var fog = new SceneSkyBox.FogParamInfo { FogType = SceneSkyBox.FogType.Angular, FogMinStart = 1, FogMinEnd = 2, FogMaxStart = 3, FogMaxEnd = 4 };
 
-			SceneObject.WritesNativeOverride = true;
 			sky.SkyMaterial = replacement;
 			sky.SkyTint = Color.Red;
 			sky.FogParams = fog;
 			Assert.AreSame( replacement, sky.Material );
-			Assert.AreSame( replacement, Material.FromNative( nativeSky.GetMaterial() ), "written through while read" );
-			Assert.AreEqual( new Vector3( 1, 0, 0 ), nativeSky.GetSkyTint() );
-			Assert.AreEqual( (int)SceneSkyBox.FogType.Angular, nativeSky.GetFogType() );
-			Assert.AreEqual( 3.0f, nativeSky.GetFogMaxStart() );
+			Assert.AreEqual( Color.Red, sky.SkyTint );
+			Assert.AreEqual( fog, sky.FogParams );
+			Assert.AreSame( material, Material.FromNative( nativeSky.GetMaterial() ), "native's sky isn't written" );
 
-			SceneObject.WritesNativeOverride = false;
 			sky.SkyMaterial = material;
 			sky.SkyTint = Color.Blue;
 			sky.FogParams = default;
 			Assert.AreSame( material, sky.Material );
 			Assert.AreEqual( Color.Blue, sky.SkyTint );
 			Assert.AreEqual( default, sky.FogParams );
-			Assert.AreSame( replacement, Material.FromNative( nativeSky.GetMaterial() ), "not written while nothing reads it" );
-			Assert.AreEqual( new Vector3( 1, 0, 0 ), nativeSky.GetSkyTint() );
 
 			sky.SkyMaterial = null;
 			Assert.IsNull( sky.Material );
@@ -56,7 +51,6 @@ public class SceneSkyTests
 		}
 		finally
 		{
-			SceneObject.WritesNativeOverride = null;
 			world.Delete();
 		}
 	}

@@ -147,9 +147,9 @@ public sealed partial class SceneWorld : IHandle
 
 		RunQueuedDeletes();
 
-		// Objects without a native twin go with the world here; native destroys the rest with its world
+		// Objects managed code made go with the world here; native destroys the ones native code made with its world
 		SceneObject[] remaining;
-		lock ( InternalSceneObjects ) remaining = InternalSceneObjects.Where( x => !x.HasTwin ).ToArray();
+		lock ( InternalSceneObjects ) remaining = InternalSceneObjects.Where( x => !x.HasNativeObject ).ToArray();
 		foreach ( var sceneObject in remaining ) sceneObject.Destroyed();
 
 		Rendering.SceneRenderer.Forget( this );
@@ -200,8 +200,8 @@ public sealed partial class SceneWorld : IHandle
 	}
 
 	/// <summary>
-	/// Take the objects deleted since the last run out of this world and its renderer. A native twin goes with native's next
-	/// end-of-frame deletes.
+	/// Take the objects deleted since the last run out of this world and its renderer. A native object goes with native's
+	/// next end-of-frame deletes.
 	/// </summary>
 	void RunQueuedDeletes()
 	{

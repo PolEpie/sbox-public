@@ -54,60 +54,6 @@ internal static class SceneNative
 	static bool Blends( bool native, GpuMaterial material ) => native || material is { IsTranslucent: true };
 
 	/// <summary>
-	/// Where an object's managed draws (<see cref="SceneObject.GetDraws"/>) differ from native's (<c>RenderTools.GetSceneObjectDraw</c>),
-	/// one line each; empty when they're the same. For checks.
-	/// </summary>
-	public static unsafe List<string> CompareDraws( SceneObject sceneObject )
-	{
-		var differences = new List<string>();
-		var managed = new List<SceneObjectDraw>();
-		sceneObject.GetDraws( managed );
-
-		const int Visible = 1, AlphaBlended = 2, ShadowFastPath = 4, Lightmap = 8;
-		var count = 0;
-		for ( int i = 0; ; i++ )
-		{
-			int mesh = -1, drawCall = 0, flags = 0;
-			var material = Material.FromNative( RenderTools.GetSceneObjectDraw( sceneObject, i, (IntPtr)(&mesh), (IntPtr)(&drawCall), (IntPtr)(&flags) ) );
-			if ( mesh < 0 ) break;
-			count++;
-
-			var native = new SceneObjectDraw( mesh, drawCall, material, (flags & Visible) != 0, (flags & AlphaBlended) != 0, (flags & ShadowFastPath) != 0, (flags & Lightmap) != 0 );
-			if ( i >= managed.Count )
-			{
-				differences.Add( $"draw {i}: native {Describe( native )}, managed none" );
-				continue;
-			}
-
-			var mine = managed[i];
-			if ( mine.Mesh != native.Mesh || mine.DrawCall != native.DrawCall || mine.Visible != native.Visible || mine.Translucent != native.Translucent
-				|| mine.ShadowFastPath != native.ShadowFastPath || mine.Lightmapped != native.Lightmapped || !string.Equals( mine.Material?.Name, native.Material?.Name, StringComparison.OrdinalIgnoreCase ) )
-				differences.Add( $"draw {i}: native {Describe( native )}, managed {Describe( mine )}" );
-		}
-
-		if ( managed.Count > count ) differences.Add( $"managed has {managed.Count} draws, native {count}" );
-		return differences;
-
-		static string Describe( SceneObjectDraw d ) => $"mesh {d.Mesh} draw {d.DrawCall} {d.Material?.Name ?? "null"}{(d.Visible ? "" : " hidden")}{(d.Translucent ? " translucent" : "")}{(d.ShadowFastPath ? " fast-path" : "")}{(d.Lightmapped ? " lightmapped" : "")}";
-	}
-
-	/// <summary>
-	/// Pack native light data, flags and bake index (-1 if absent), excluding shadows (<c>RenderTools.PackSceneLight</c>).
-	/// Returns false without a native light. Only the tests use it now, as the reference <see cref="LightPacking"/> matches.
-	/// </summary>
-	public static unsafe bool PackSceneLight( SceneLight light, out LightBinnerFeature.GpuLight packed, out uint flags, out int bakeIndex )
-	{
-		LightBinnerFeature.GpuLight d = default;
-		int index = -1;
-		var result = light.IsValid() ? RenderTools.PackSceneLight( light, (IntPtr)(&d), (IntPtr)(&index) ) : -1;
-
-		packed = d;
-		flags = result < 0 ? 0 : (uint)result;
-		bakeIndex = index;
-		return result >= 0;
-	}
-
-	/// <summary>
 	/// Read wind strength, frequencies and direction from the <c>r_world_wind_*</c> settings (<c>RenderTools.GetWorldWind</c>).
 	/// </summary>
 	public static unsafe void ReadWorldWind( out Vector4 strengthFreq, out Vector4 direction )
@@ -116,20 +62,5 @@ internal static class SceneNative
 		RenderTools.GetWorldWind( (IntPtr)(&strength), (IntPtr)(&dir) );
 		strengthFreq = strength;
 		direction = dir;
-	}
-
-
-	/// <summary>
-	/// Compare probe packing within float tolerance, excluding the cubemap index (<c>RenderTools.PackSceneEnvMap</c>).
-	/// </summary>
-	public static unsafe bool PacksAsNative( SceneObject sceneObject, EnvMapObject envMap )
-	{
-		LightBinnerFeature.GpuEnvMap native;
-		if ( !RenderTools.PackSceneEnvMap( sceneObject, (IntPtr)(&native) ) ) return false;
-
-		var mine = LightBinnerFeature.Pack( envMap );
-		static bool Near( Vector4 a, Vector4 b ) => a.Distance( b ) <= 1e-3f * MathF.Max( 1, a.Length );
-		return Near( mine.Row0, native.Row0 ) && Near( mine.Row1, native.Row1 ) && Near( mine.Row2, native.Row2 ) && Near( mine.BoxMins, native.BoxMins )
-			&& Near( mine.BoxMaxs, native.BoxMaxs ) && Near( mine.Color, native.Color ) && mine.Priority == native.Priority;
 	}
 }

@@ -16,8 +16,8 @@ public sealed class SceneCubemap : SceneLight
 
 	private CEnvMapSceneObject envMap;
 
-	// The settings, once managed code owns them: a cubemap it made, or one native code made (a map's) that it has changed
-	// since. The native twin gets them only while something reads it (SceneObject.WritesNative)
+	// The settings, once managed code owns them: a cubemap it made, or one native code made (a tool's) that it has changed
+	// since
 	bool managed;
 	int priority;
 	ProjectionMode projection;
@@ -42,26 +42,15 @@ public sealed class SceneCubemap : SceneLight
 	{
 		Assert.IsValid( sceneWorld );
 
-		using ( var h = NextHandleForTwin() )
-		{
-			if ( MakesNativeTwin ) CSceneSystem.CreateEnvMap( sceneWorld, projectionMode );
-			else MakeLightWithoutTwin( sceneWorld, NewDescription( TypeEnvironmentProbe ), Rendering.SceneObjectFlags.IsEnvMap | Rendering.SceneObjectFlags.IsLight | Rendering.SceneObjectFlags.IsIndirectLight );
-		}
+		MakeManagedLight( sceneWorld, NewDescription( TypeEnvironmentProbe ), Rendering.SceneObjectFlags.IsEnvMap | Rendering.SceneObjectFlags.IsLight | Rendering.SceneObjectFlags.IsIndirectLight );
 
-		if ( envMap.IsNull )
-		{
-			// What CreateEnvMap gives a new one: the projection asked for, a box as far as its range, no texture
-			managed = true;
-			projection = (ProjectionMode)projectionMode;
-			projectionBounds = new BBox( new Vector3( -512 ), new Vector3( 512 ) );
-		}
-
-		TakeOver();
+		// What native's CreateEnvMap gave a new one: the projection asked for, no texture
+		managed = true;
+		projection = (ProjectionMode)projectionMode;
 		this.tint = tint;
 		this.feathering = feathering;
 		projectionBounds = bounds;
 		if ( texture != null && texture.native.IsValid ) this.texture = texture;
-		WriteNative();
 
 		Transform = transform;
 		Calculate();
@@ -195,7 +184,7 @@ public sealed class SceneCubemap : SceneLight
 	}
 
 	/// <summary>
-	/// Managed code owns the settings from here: take what the native twin has (native's defaults, or what a map set) once.
+	/// Managed code owns the settings from here: take what the native cubemap has (what native code set) once.
 	/// </summary>
 	void TakeOver()
 	{
@@ -210,26 +199,19 @@ public sealed class SceneCubemap : SceneLight
 	}
 
 	/// <summary>
-	/// The settings, written to the native twin while something reads it. Its projection box always is: the twin's bounds
-	/// come from it (<see cref="Calculate"/>), and bounds are still the native object's.
+	/// A native cubemap's projection box, which its bounds come from (<see cref="Calculate"/>): bounds are still the native
+	/// object's.
 	/// </summary>
 	void WriteNative()
 	{
 		if ( !managed || envMap.IsNull ) return;
 		envMap.m_vBoxProjectMins = projectionBounds.Mins;
 		envMap.m_vBoxProjectMaxs = projectionBounds.Maxs;
-		if ( !WritesNative ) return;
-		envMap.m_nRenderPriority = priority;
-		envMap.m_nProjectionMode = projection;
-		envMap.m_vColor = tint;
-		envMap.m_flFeathering = feathering;
-		envMap.m_hEnvMapTexture = texture?.native ?? default;
 	}
 
 	/// <summary>
-	/// The native twin's bounds from its projection box, and, while something reads it, the irradiance it works out from the
-	/// cube (Borealis doesn't use it) and its note to native's light binner. Without a twin the bounds are worked out here,
-	/// as <c>CEnvMapSceneObject::CalculateBounds</c> does.
+	/// The bounds from the projection box, as <c>CEnvMapSceneObject::CalculateBounds</c> works them out: here, or by a native
+	/// cubemap.
 	/// </summary>
 	void Calculate()
 	{
@@ -240,10 +222,6 @@ public sealed class SceneCubemap : SceneLight
 		}
 
 		envMap.CalculateBounds();
-		if ( !WritesNative ) return;
-		envMap.CalculateRadianceSH();
-		envMap.CalculateNormalizationSH();
-		CSceneSystem.MarkEnvironmentMapObjectUpdated( this );
 	}
 
 	internal override void OnNativeInit( CSceneObject ptr )
