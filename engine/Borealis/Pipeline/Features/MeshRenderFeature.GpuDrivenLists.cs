@@ -3,12 +3,12 @@ using System.Buffers;
 namespace Borealis.Features;
 
 /// <summary>
-/// The faded and translucent lists' draws GPU-driven (<see cref="GpuDevice.DrawsFadedGpuDriven"/>,
-/// <see cref="GpuDevice.DrawsTranslucentGpuDriven"/>). Neither is in the depth prepass, so neither can join the opaque list's
-/// call (whose forward pass draws what the prepass's ids kept): each list range a layer draws goes to the device as calls of
+/// The faded, translucent and refraction lists' draws GPU-driven (<see cref="GpuDevice.DrawsFadedGpuDriven"/>,
+/// <see cref="GpuDevice.DrawsTranslucentGpuDriven"/>, which the refraction list follows). None is in the depth prepass, so none
+/// can join the opaque list's call (whose forward pass draws what the prepass's ids kept): each list range a layer draws goes to the device as calls of
 /// mesh-draw batches, culled on the CPU as before, with no ids or visibility lists, as the static overlays' do. The runs taken
 /// are the opaque list's (skinned ones with <see cref="GpuDevice.DrawsSkinnedGpuDriven"/>); frame-buffer readers only in the
-/// translucent list's colour layers, which copy the frame for them.
+/// translucent list's colour layers, which copy the frame for them, and in the refraction list, which is all readers.
 /// <list type="bullet">
 /// <item>The faded list is dithered opaque under <c>D_OPAQUE_FADE</c>, each instance's fade in its tint, so its order doesn't
 /// matter: one call, then what it didn't take or the device left, the classic way.</item>
@@ -18,6 +18,8 @@ namespace Borealis.Features;
 /// frame-buffer readers are in the stretches: the frame is copied once, at the first reader (<see cref="GpuContext.CopyFrameBuffer"/>),
 /// so a stretch ends before it and what's drawn before it is in the copy, and every reader after it reads that one copy, as
 /// the classic way draws them. In shadows (depth only) as the faded list.</item>
+/// <item>The refraction list (<see cref="RefractionStencilLayer"/>: the readers' depth, all with depth_only) as the faded
+/// list: one call, depth only, so its order doesn't matter.</item>
 /// </list>
 /// </summary>
 internal sealed partial class MeshRenderFeature
@@ -25,14 +27,14 @@ internal sealed partial class MeshRenderFeature
 	/// <summary>Whether this context draws <paramref name="list"/> GPU-driven: not while occlusion culls, which takes its runs' arguments.</summary>
 	bool ListGpuDriven( GpuContext context, MeshRuns list )
 	{
-		if ( list is not (MeshRuns.Faded or MeshRuns.Translucent) || !context.GpuDriven || Occlusion is not null || overlayTransforms is null ) return false;
+		if ( list is not (MeshRuns.Faded or MeshRuns.Translucent or MeshRuns.Refraction) || !context.GpuDriven || Occlusion is not null || overlayTransforms is null ) return false;
 		var device = RenderHost.Current?.Device;
 		return list == MeshRuns.Faded ? device is { DrawsFadedGpuDriven: true } : device is { DrawsTranslucentGpuDriven: true };
 	}
 
 	/// <summary>
 	/// Whether a run of the faded or translucent list can be drawn GPU-driven: as the opaque list's are taken, frame-buffer
-	/// readers only with <paramref name="readers"/> (the translucent list's colour layers, in order).
+	/// readers only with <paramref name="readers"/> (the translucent list's colour layers, in order, and the refraction list).
 	/// </summary>
 	static bool ListTakes( in Run run, bool skinned, bool readers ) => TakesGpuDriven( run, skinned ) && (readers || !run.ReadsFrameBuffer);
 
@@ -51,7 +53,7 @@ internal sealed partial class MeshRenderFeature
 		{
 			if ( !inOrder )
 			{
-				DrawCall( context, view, runs, items, layer, ref stats, list, skinned, false, false, batches, taken, drawn, left );
+				DrawCall( context, view, runs, items, layer, ref stats, list, skinned, false, list == MeshRuns.Refraction && !NoGpuDrivenReaders, batches, taken, drawn, left );
 				return;
 			}
 

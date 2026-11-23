@@ -2073,8 +2073,9 @@ public class GpuDrivenTests : GpuTest
 	/// Refractive glass (glass.shader's surface, reading the frame buffer copy) draws GPU-driven in the translucent list's
 	/// order, with the frame copied once, at the first glass: between rows of translucent boxes that don't read it and in
 	/// front of opaque ones, two rows of glass, refracting, blurred and tinted, shade exactly as the classic path shades them,
-	/// and none of them draws the classic way. The copy's depth-aware mask takes the last frame's blurred copy where the glass
-	/// is, so each path draws its frames in a renderer of its own from a new (cleared) copy, the same frames each time.
+	/// and none of them draws the classic way, nor their depth in the refraction stencil, which the copy's depth-aware mask
+	/// reads. The mask takes the last frame's blurred copy where the glass is, so each path draws its frames in a renderer of
+	/// its own from a new (cleared) copy, the same frames each time.
 	/// </summary>
 	[TestMethod]
 	public void GlassDrawsGpuDrivenInOrder()
@@ -2165,10 +2166,14 @@ public class GpuDrivenTests : GpuTest
 
 			bool Glass( DrawCensus.Draw d ) => d.Material is "Glass clear" or "Glass tinted";
 			bool Forward( DrawCensus.Draw d ) => d.Pass.EndsWith( "Translucent Forward", StringComparison.Ordinal );
+			bool Stencil( DrawCensus.Draw d ) => d.Pass.EndsWith( "Refraction Stencil Layer", StringComparison.Ordinal );
 			Assert.IsTrue( before.Draws.Any( d => d.Path == DrawCensus.Path.Classic && Glass( d ) && Forward( d ) ), "the classic path draws the glass the classic way" );
+			Assert.IsTrue( before.Draws.Any( d => d.Path == DrawCensus.Path.Classic && Stencil( d ) ), "and its refraction stencil" );
 			Assert.AreEqual( 0, Device.ValidationErrors, "no validation errors" );
 			Assert.AreEqual( 0, Different( classic, driven ), "the classic pixels" );
 			Assert.IsFalse( census.Draws.Any( d => d.Path == DrawCensus.Path.Classic && Glass( d ) && Forward( d ) ), $"no glass draws the classic way: {Translucent( census )}" );
+			Assert.IsFalse( census.Draws.Any( d => d.Path == DrawCensus.Path.Classic && Stencil( d ) ), $"nor in the refraction stencil: {Translucent( census )}" );
+			Assert.IsTrue( census.Draws.Any( d => d.Path == DrawCensus.Path.Bucket && Stencil( d ) ), $"which draws it GPU-driven: {Translucent( census )}" );
 		}
 		finally
 		{
