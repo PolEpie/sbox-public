@@ -637,9 +637,11 @@ public sealed unsafe class GpuCounters
 	/// <summary>Open a context on a device made with GPA's extensions; null and a note if it can't.</summary>
 	internal static GpuCounters Open( Device device, string selection, nint instance, nint physicalDevice, nint vkDevice, Action<string> note )
 	{
-		// Clocks as they are, so times match the timeline's; BOREALIS_GPU_COUNTERS_CLOCKS=stable or peak to pin them
+		// Peak clocks: left alone, the GPU drops its clocks in the idle moments around each sample and sampled work runs two
+		// to three times slower than the timeline's; pinned at peak, sampled times match it. BOREALIS_GPU_COUNTERS_CLOCKS=none
+		// leaves clocks alone, =stable uses GPA's sustainable clocks
 		var clocks = Environment.GetEnvironmentVariable( "BOREALIS_GPU_COUNTERS_CLOCKS" );
-		var flags = Gpa.OpenEnableHardwareCounters | (clocks?.ToLowerInvariant() switch { "stable" => 0u, "peak" => Gpa.OpenClockModePeak, _ => Gpa.OpenClockModeNone });
+		var flags = Gpa.OpenEnableHardwareCounters | (clocks?.ToLowerInvariant() switch { "stable" => 0u, "none" => Gpa.OpenClockModeNone, _ => Gpa.OpenClockModePeak });
 		var info = new Gpa.VkContextOpenInfo { Instance = instance, PhysicalDevice = physicalDevice, Device = vkDevice };
 		nint context;
 		var status = Gpa.OpenContext( &info, flags, &context );
