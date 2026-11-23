@@ -25,6 +25,12 @@ public sealed partial class Device
 
 	static readonly nint ZonePipeline = Marshal.StringToCoTaskMemUTF8( "Borealis.Gpu Create Pipeline" );
 	static readonly nint ZoneShaderModule = Marshal.StringToCoTaskMemUTF8( "Borealis.Gpu Create Shader Module" );
+	/// <summary>The name of the zone around a pipeline's creation, for a profiler that times them.</summary>
+	public static nint PipelineZoneName => ZonePipeline;
+
+	/// <summary>The name of the zone around a shader module's creation, for a profiler that times them.</summary>
+	public static nint ShaderModuleZoneName => ZoneShaderModule;
+
 	static readonly nint ZoneAllocateMemory = Marshal.StringToCoTaskMemUTF8( "Borealis.Gpu Allocate Memory" );
 	static readonly nint ZoneApplyLayouts = Marshal.StringToCoTaskMemUTF8( "Borealis.Gpu Apply Layouts" );
 

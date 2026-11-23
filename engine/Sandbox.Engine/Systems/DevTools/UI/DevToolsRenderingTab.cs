@@ -388,7 +388,7 @@ internal sealed class DevToolsRenderingTab : DevToolsTab
 	/// </summary>
 	static (PostProcessLayer Layer, string Stage)? Effect( string name )
 	{
-		var layers = Application.GetActiveScene()?.Camera?.PostProcess.Layers;
+		var layers = Application.GetActiveScene()?.Camera?.DrawnPostProcess.Layers;
 		if ( layers is null ) return null;
 
 		foreach ( var (stage, list) in layers )

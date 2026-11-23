@@ -9,7 +9,7 @@ namespace Sandbox;
 /// <see cref="Graphics"/> in a block of its own on the device, as a texture painter's is, so nothing of it runs on
 /// Source 2's device.
 /// </summary>
-internal sealed class BorealisGpuWindow : IDisposable
+internal sealed partial class BorealisGpuWindow : IDisposable
 {
 	readonly BorealisGpuRenderBackend backend;
 	readonly SwapChain swapChain;
@@ -269,6 +269,18 @@ internal sealed class BorealisGpuWindow : IDisposable
 
 	/// <summary>Forget an image acquired ahead: the device was lost meanwhile.</summary>
 	internal void ForgetAhead() => acquiredAhead = false;
+
+	/// <summary>
+	/// At shutdown, once the frame thread has stopped: an image it acquired ahead is presented empty (a black frame), as a
+	/// minimised window's is, so the swap chain goes with no image acquired. Destroying it with one acquired crashed the
+	/// process at exit now and then.
+	/// </summary>
+	internal void PresentAhead()
+	{
+		if ( !acquiredAhead ) return;
+		acquiredAhead = false;
+		if ( target is not null ) Draw( backend, target, Color.Black, true, static () => { }, swapChain );
+	}
 
 	static readonly Sandbox.Diagnostics.PerformanceStats.Timings AcquireAheadTiming = Sandbox.Diagnostics.PerformanceStats.Timings.Get( "Borealis.Gpu window acquire ahead" );
 

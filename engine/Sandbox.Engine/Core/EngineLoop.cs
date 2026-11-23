@@ -44,6 +44,7 @@ internal static class EngineLoop
 
 		double time = RealTime.NowDouble;
 		FastTimer frameTimer = FastTimer.StartNew();
+		var cpuAtStart = ThreadCpuTime.NowMs();
 
 		using ( _runFrame.Start() )
 		{
@@ -103,12 +104,21 @@ internal static class EngineLoop
 			}
 		}
 
+		// The main thread's CPU time this frame, besides the wall time the timings add up to
+		MainThreadCpuTiming.AddMilliseconds( ThreadCpuTime.NowMs() - cpuAtStart );
+
 		var idleMs = framePacer.Wait( FrameRateLimit.FramesPerSecond );
+
+		// The deadline latency mode: when the render thread draws, the next frame's input waits until just in time for the GPU.
+		// Not idle time: it takes the place of the wait for the render thread later in the frame, which isn't either
+		if ( GameWindow.Current?.HandedOverFrame == Application.FrameCount ) BorealisGpuFrameLatency.SleepBeforeInput( Application.FrameCount );
 		PerformanceStats.Timings.Idle.AddMilliseconds( idleMs );
 		DevTools.SampleFrame( frameTimer.ElapsedMilliSeconds, idleMs );
 
 		previousTime = time;
 	}
+
+	static readonly PerformanceStats.Timings MainThreadCpuTiming = PerformanceStats.Timings.Get( "Borealis main thread CPU" );
 
 	internal static FrameRateLimit FrameRateLimit
 	{
@@ -147,6 +157,7 @@ internal static class EngineLoop
 		//
 		UpdatePerformance();
 		DebugOverlay.Draw();
+		BorealisGpuFrameLatency.InputSampled( Application.FrameCount );
 		UpdateInput();
 
 		//
@@ -326,6 +337,9 @@ internal static class EngineLoop
 	/// </summary>
 	internal static void RenderThreadFrameDone()
 	{
+		// Cameras and worlds that went while it drew
+		Rendering.SceneRenderer.ForgetAfterDrawing();
+
 		if ( handedOverDisposals.Count > 0 )
 		{
 			foreach ( var disposable in handedOverDisposals ) disposable.Dispose();

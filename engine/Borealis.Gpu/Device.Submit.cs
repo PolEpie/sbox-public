@@ -454,6 +454,7 @@ public sealed unsafe partial class Device
 	}
 	readonly int[] freeListsLow = [int.MaxValue, int.MaxValue];
 	ulong trimFrom;
+	long trimFromTicks;
 
 	/// <summary>
 	/// Free upload pages and spare command lists that stayed unused for <see cref="UploadPageIdleFrames"/> frames, past
@@ -466,7 +467,7 @@ public sealed unsafe partial class Device
 	void TrimSpares()
 	{
 		for ( int c = 0; c < FreePages.Length; c++ ) freePagesLow[c] = Math.Min( freePagesLow[c], FreePages[c].Count );
-		if ( FrameNumber - trimFrom < UploadPageIdleFrames ) return;
+		if ( FrameNumber - trimFrom < UploadPageIdleFrames || !Allocator.KeptLongEnough( trimFromTicks ) ) return;
 
 		for ( int c = 0; c < FreePages.Length; c++ )
 		{
@@ -512,6 +513,7 @@ public sealed unsafe partial class Device
 		}
 
 		trimFrom = FrameNumber;
+		trimFromTicks = System.Diagnostics.Stopwatch.GetTimestamp();
 	}
 
 	readonly CommandList[] keptLists = new CommandList[KeptFreeCommandLists];
@@ -596,7 +598,7 @@ public sealed unsafe partial class Device
 			if ( !swapChain.HasImage ) throw new InvalidOperationException( "The swap chain has no acquired image to submit for" );
 			swapChain.SubmitsForImage++;
 			RememberEvent( "submitting for a swap chain image, list marker slot:", list.MarkerSlot );
-			waitInfos[waitCount++] = new VkSemaphoreSubmitInfo { sType = VkStructureType.SemaphoreSubmitInfo, semaphore = swapChain.AcquireSemaphore, stageMask = Vulkan.Vk.Stage2AllCommands };
+			waitInfos[waitCount++] = new VkSemaphoreSubmitInfo { sType = VkStructureType.SemaphoreSubmitInfo, semaphore = swapChain.AcquireSemaphoreHandle, stageMask = Vulkan.Vk.Stage2AllCommands };
 			signals[signalCount++] = new VkSemaphoreSubmitInfo { sType = VkStructureType.SemaphoreSubmitInfo, semaphore = swapChain.PresentSemaphore, stageMask = Vulkan.Vk.Stage2AllCommands };
 		}
 
@@ -607,6 +609,7 @@ public sealed unsafe partial class Device
 			PairScopes( queue, list );
 
 			var value = queue.Next();
+			swapChain?.AcquireWaited( new SyncPoint( list.Queue, value ) );
 			Remember( queue, value, list, queue.Pending.Count );
 			signals[0] = new VkSemaphoreSubmitInfo { sType = VkStructureType.SemaphoreSubmitInfo, semaphore = queue.Timeline, value = value, stageMask = Vulkan.Vk.Stage2AllCommands };
 
@@ -980,6 +983,29 @@ public sealed unsafe partial class Device
 
 	/// <summary>Whether the GPU has reached <paramref name="point"/>.</summary>
 	public bool IsComplete( SyncPoint point ) => QueueFor( point.Queue ).Completed >= point.Value;
+
+	/// <summary>The last point sent to the GPU on a queue: lists waiting to go with the next submission aren't in it.</summary>
+	public SyncPoint LastFlushed( QueueType queue ) => new( queue, Volatile.Read( ref QueueFor( queue ).Flushed ) );
+
+	/// <summary>
+	/// Wait on the CPU until the GPU reaches <paramref name="point"/>, which must have been sent to it (<see cref="LastFlushed"/>),
+	/// or until <paramref name="timeout"/> passes: true once it has (or the device is lost), false on the timeout. Unlike
+	/// <see cref="Wait(SyncPoint)"/> it never takes the device as lost: for watching the GPU, not for work that needs it.
+	/// </summary>
+	public bool TryWait( SyncPoint point, TimeSpan timeout )
+	{
+		var queue = QueueFor( point.Queue );
+		if ( IsLost || queue.Completed >= point.Value ) return true;
+		if ( point.Value > Volatile.Read( ref queue.Flushed ) ) throw new InvalidOperationException( $"{queue.Type} {point.Value} hasn't been sent to the GPU" );
+
+		var semaphore = queue.Timeline;
+		var value = point.Value;
+		var info = new VkSemaphoreWaitInfo { sType = VkStructureType.SemaphoreWaitInfo, semaphoreCount = 1, pSemaphores = &semaphore, pValues = &value };
+		var result = Vk.vkWaitSemaphores( Vk.Device, &info, (ulong)Math.Max( 0, timeout.Ticks ) * 100 );
+		if ( result == VkResult.Timeout ) return false;
+		Check( result, "vkWaitSemaphores" );
+		return true;
+	}
 
 	/// <summary>The last point submitted to a queue.</summary>
 	public SyncPoint LastSubmitted( QueueType queue ) => new( queue, QueueFor( queue ).Submitted );
