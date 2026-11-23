@@ -133,4 +133,60 @@ public class TextureSizeTests
 			Assert.AreEqual( 1, asked.Count, "an answer is taken once" );
 		}
 	}
+
+	/// <summary>
+	/// A view's resident aggregates, which ask streaming for no size of their own, are sized on the worker every few of its
+	/// frames whatever frame generations its system gets: those come from one counter every system shares, and with another
+	/// system rendering each frame (another camera, a 3D skybox) a system's can all be odd.
+	/// </summary>
+	[TestMethod]
+	public void ResidentAggregatesAreSizedWhateverTheFrameGenerations()
+	{
+		var device = HeadlessRenderHost.Headless;
+		device.ResidentAggregates = true;
+		device.StreamTextures = true;
+		try
+		{
+			using var material = new HeadlessMaterial( "ground", "complex" );
+			var mesh = new RenderMesh( new HeadlessMesh( "ground" ), UnitBox, [[new RenderMesh.Draw( 0, 0, 0, 36, 24, 0, material )]] );
+			var world = new RenderWorld();
+			var aggregate = new AggregateObject( mesh, [AggregateTests.Fragment( 0, new Vector3( 20, 0, 0 ) ) with { UvDensity = 4 }] ) { IsStatic = true };
+			world.Add( aggregate );
+
+			// No depth prepass, so no occlusion culling, which keeps views preparing their own
+			using var system = new RenderSystem { DepthPrepass = false };
+			using var other = new RenderSystem { DepthPrepass = false };
+			var empty = new RenderWorld();
+			Borealis.Shadows.ShadowMapper.ResetCache();
+			var feature = system.GetFeature<AggregateRenderFeature>();
+
+			var startedFirst = 0;
+			for ( int frame = 0; frame < 4 * AggregateRenderFeature.SizeEveryFrames; frame++ )
+			{
+				CollectAndPrepare( system, world, LookingDownX() );
+				Assert.IsTrue( frame == 0 || system.Transforms.Generation % 2 == 1, "the system's generations are odd" );
+				if ( frame == 0 ) startedFirst = feature.Sizes?.Started ?? 0;
+
+				// A sizing done before the next frame, as a fast worker's is, whatever the pool is busy with
+				for ( int i = 0; i < 3000 && feature.Sizes is { Running: true }; i++ ) System.Threading.Thread.Sleep( 10 );
+
+				// The other system takes the next generation each frame, and one more the first time if that was odd
+				CollectAndPrepare( other, empty, LookingDownX() );
+				if ( frame == 0 && other.Transforms.Generation % 2 == 1 ) CollectAndPrepare( other, empty, LookingDownX() );
+			}
+
+			Assert.IsTrue( feature.ResidentFor( system.MainPass ) is { Batches.Count: 1 }, "the aggregate is resident" );
+			Assert.IsTrue( feature.Sizes is not null && feature.Sizes.Started - startedFirst >= 3, "the worker is started every few frames" );
+
+			var asked = new System.Collections.Generic.List<(GpuMaterial Material, int Size)>();
+			feature.Sizes.Take( ( m, s ) => asked.Add( (m, s) ) );
+			Assert.AreSame( material, asked.Single().Material, "the resident aggregate's material is asked for" );
+			Assert.IsTrue( asked.Single().Size > 0 );
+		}
+		finally
+		{
+			device.ResidentAggregates = false;
+			device.StreamTextures = false;
+		}
+	}
 }

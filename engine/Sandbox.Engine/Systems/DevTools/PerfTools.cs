@@ -279,7 +279,7 @@ internal static class PerfTools
 		issues.Sort( static ( a, b ) => b.Severity.CompareTo( a.Severity ) );
 
 		var camera = Application.GetActiveScene()?.Camera;
-		var layers = camera?.PostProcess.Layers;
+		var layers = camera?.DrawnPostProcess.Layers;
 
 		return new
 		{

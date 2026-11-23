@@ -22,15 +22,16 @@ internal sealed class BorealisGpuFrameThread : IDisposable
 
 	/// <summary>
 	/// Whether the thread also draws the game window's frames (the render thread, docs/reference/borealis-render-thread.md):
-	/// with <c>-renderthread</c> or <c>BOREALIS_RENDERTHREAD=draw</c>, and the frame thread on. Off by default: it loses the
-	/// device in the game window (the report of the card that made it says what's known).
+	/// on with the frame thread, unless <c>-framethread</c> or <c>BOREALIS_RENDERTHREAD=frame</c> keeps the drawing on the main
+	/// thread with only the device frame's start on this one. <c>-renderthread</c> is accepted as before.
 	/// </summary>
-	internal static readonly bool Draws = Enabled && (CommandLine.HasSwitch( "-renderthread" ) || System.Environment.GetEnvironmentVariable( "BOREALIS_RENDERTHREAD" ) == "draw");
+	internal static readonly bool Draws = Enabled && !CommandLine.HasSwitch( "-framethread" ) && System.Environment.GetEnvironmentVariable( "BOREALIS_RENDERTHREAD" ) != "frame";
 
 	/// <summary>The longest <see cref="Dispose"/> waits for the thread; one still busy is left to the process's exit.</summary>
 	internal static readonly TimeSpan StopTimeout = TimeSpan.FromSeconds( 2 );
 
 	readonly Action work;
+	readonly Func<TimeSpan> idle;
 	readonly Thread thread;
 	readonly bool timed, markRenderThread;
 
@@ -57,11 +58,14 @@ internal sealed class BorealisGpuFrameThread : IDisposable
 
 	/// <summary>
 	/// A thread that runs <paramref name="work"/> each time it's handed a frame; <paramref name="timed"/> times it and the
-	/// joins that wait in the engine's timings (which need the engine's native side).
+	/// joins that wait in the engine's timings (which need the engine's native side). Once the work is done and until the
+	/// next hand-over the thread calls <paramref name="idle"/>, if given, again after each time it returns, until it returns a
+	/// negative time (the window presenting its last frame again while the main thread is away).
 	/// </summary>
-	public BorealisGpuFrameThread( Action work, string name = "Borealis.Gpu frame", bool timed = true, bool renderThread = false )
+	public BorealisGpuFrameThread( Action work, string name = "Borealis.Gpu frame", bool timed = true, bool renderThread = false, Func<TimeSpan> idle = null )
 	{
 		this.work = work;
+		this.idle = idle;
 		this.timed = timed;
 		markRenderThread = renderThread;
 		thread = new Thread( Loop ) { IsBackground = true, Name = name, Priority = ThreadPriority.AboveNormal };
@@ -141,6 +145,13 @@ internal sealed class BorealisGpuFrameThread : IDisposable
 			finally
 			{
 				done.Set();
+			}
+
+			// Until the next hand-over, which ends the wait at once
+			if ( idle is not null )
+			{
+				var wait = idle();
+				while ( wait >= TimeSpan.Zero && !stopping && !go.Wait( wait ) ) wait = idle();
 			}
 		}
 	}

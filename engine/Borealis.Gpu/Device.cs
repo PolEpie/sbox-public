@@ -236,7 +236,7 @@ public sealed unsafe partial class Device : IDisposable
 			// VK_DRIVER_ID_AMD_PROPRIETARY and _AMD_OPEN_SOURCE: fast links draw what a pixel shader discards
 			LinksDiscardsOptimised = pipelineLibraries && driver.driverID is 1 or 2 && Environment.GetEnvironmentVariable( "BOREALIS_DISCARD_FAST_LINKS" ) != "1";
 
-			Allocator = new MemoryAllocator( Vk, memory, Adapter.Integrated ) { Owner = this, BudgetLimit = options.MemoryBudgetBytes };
+			Allocator = new MemoryAllocator( Vk, memory, Adapter.Integrated ) { Owner = this, BudgetLimit = options.MemoryBudgetBytes, SpareSeconds = MemoryAllocator.DeviceSpareSeconds };
 			Allocator.Warn = text => message?.Invoke( new DeviceMessage( MessageSeverity.Warning, "Borealis.Gpu.MemoryBudget", text ) );
 			RefreshMemoryBudget();
 			if ( options.MemoryBudgetBytes > 0 ) message?.Invoke( new DeviceMessage( MessageSeverity.Warning, "Borealis.Gpu.MemoryBudget", $"video memory budget capped at {options.MemoryBudgetBytes >> 20} MiB" ) );

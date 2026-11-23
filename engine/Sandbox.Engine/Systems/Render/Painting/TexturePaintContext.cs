@@ -47,6 +47,7 @@ internal sealed class TexturePaintContext : Painter.Context
 
 	protected override void OnEnd()
 	{
+		var deferred = false;
 		try
 		{
 			if ( !_texture.IsValid )
@@ -55,14 +56,20 @@ internal sealed class TexturePaintContext : Painter.Context
 			base.OnEnd();
 			if ( CommandList.GetCheckpoint() == 0 ) return;
 
+			// While a render thread draws a frame on the device, the painting runs once it's drawn, in order with the rest of
+			// the main thread's writes to the device (docs/reference/borealis-render-thread.md)
+			if ( _backend.DefersUpdateWork )
+			{
+				deferred = true;
+				_backend.DeferUpdateWork( RunDeferred );
+				return;
+			}
+
 			Submit();
 		}
 		finally
 		{
-			CommandList.Reset();
-			Batcher.Dispose();
-			_texture = null;
-			State = default;
+			if ( !deferred ) Finish();
 
 			if ( _recordingSet )
 			{
@@ -70,6 +77,29 @@ internal sealed class TexturePaintContext : Painter.Context
 				_recordingSet = false;
 			}
 		}
+	}
+
+	void RunDeferred()
+	{
+		var other = _backend != RenderBackend.Default;
+		var recording = other ? Graphics.SetRecordingBackend( _backend ) : null;
+		try
+		{
+			if ( _texture.IsValid ) Submit();
+		}
+		finally
+		{
+			if ( other ) Graphics.SetRecordingBackend( recording );
+			Finish();
+		}
+	}
+
+	void Finish()
+	{
+		CommandList.Reset();
+		Batcher.Dispose();
+		_texture = null;
+		State = default;
 	}
 
 	void Submit()
