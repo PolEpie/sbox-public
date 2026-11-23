@@ -388,8 +388,10 @@ public sealed class GraphicsContext
 	{
 		mode = null;
 		if ( Mode is null ) return true;
-		foreach ( var candidate in shader.Modes )
+		var modes = shader.Modes;
+		for ( int i = 0; i < modes.Count; i++ )
 		{
+			var candidate = modes[i];
 			if ( !string.Equals( candidate.Name, Mode, StringComparison.OrdinalIgnoreCase ) ) continue;
 			mode = candidate.Name;
 			return true;

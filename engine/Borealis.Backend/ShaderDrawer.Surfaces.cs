@@ -138,13 +138,20 @@ public sealed partial class ShaderDrawer
 		return made;
 	}
 
+	// Constant sets already made per stage, reused instead of allocated per draw
+	readonly ConditionalWeakTable<CompiledStage, List<SpecializationConstant[]>> internedConstants = new();
+
+	[ThreadStatic] static SpecializationConstant[] constantsScratch;
+
 	SpecializationConstant[] MakeSurfaceStageConstants( CompiledStage stage, ShaderAttributes attributes, bool perPixel, out ulong key )
 	{
 		var fade = attributes.GetCombo( OpaqueFadeId ) is > 0;
 		var skybox = attributes.GetCombo( SkyboxComboId ) is > 0;
 		key = (perPixel ? 1u : 2u) + (fade ? 4u : 0u) + (skybox ? 8u : 0u);
 
-		var constants = new SpecializationConstant[stage.Specializations.Count + 3];
+		var length = stage.Specializations.Count + 3;
+		if ( constantsScratch is null || constantsScratch.Length < length ) constantsScratch = new SpecializationConstant[Math.Max( length, 16 )];
+		var constants = constantsScratch.AsSpan( 0, length );
 		for ( int i = 0; i < stage.Specializations.Count; i++ )
 		{
 			var slot = stage.Specializations[i];
@@ -157,7 +164,19 @@ public sealed partial class ShaderDrawer
 		constants[^3] = new SpecializationConstant( BackendContext.SkyboxId, skybox ? 1u : 0u );
 		constants[^2] = new SpecializationConstant( BackendContext.MaterialOffsetPerPixelId, perPixel ? 1u : 0u );
 		constants[^1] = new SpecializationConstant( BackendContext.OpaqueFadeId, fade ? 1u : 0u );
-		return constants;
+
+		var known = internedConstants.GetValue( stage, static _ => new() );
+		lock ( known )
+		{
+			foreach ( var kept in known )
+			{
+				if ( constants.SequenceEqual( kept ) ) return kept;
+			}
+
+			var made = constants.ToArray();
+			known.Add( made );
+			return made;
+		}
 	}
 
 	/// <summary>
