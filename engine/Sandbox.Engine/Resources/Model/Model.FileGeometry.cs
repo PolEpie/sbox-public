@@ -146,6 +146,51 @@ internal static class ModelFileGeometry
 		}
 	}
 
+	/// <summary>One draw call of a compiled mesh as native's <c>ReadDrawCall</c> reads it, with indices rebased to the vertices they reach. False for a draw that isn't an indexed triangle list.</summary>
+	public static bool TryReadDrawCall( ModelFile file, int mesh, int drawCall, out Vertex[] vertices, out uint[] indices, out VertexStreams streams )
+	{
+		vertices = null;
+		indices = null;
+		streams = 0;
+
+		if ( (uint)mesh >= (uint)file.Meshes.Count ) return false;
+		var source = file.Meshes[mesh];
+		if ( (uint)drawCall >= (uint)source.DrawCalls.Count ) return false;
+
+		var draw = source.DrawCalls[drawCall];
+		if ( draw.IndexCount < 3 || draw.Primitive != PrimitiveKind.Triangles || draw.VertexBuffers.Count == 0 ) return false;
+
+		var (indexBuffer, indexBind) = draw.IndexBuffer;
+		var (vertexBuffer, vertexBind) = draw.VertexBuffers[0];
+		if ( (uint)indexBuffer >= (uint)source.IndexBuffers.Count || (uint)vertexBuffer >= (uint)source.VertexBuffers.Count ) return false;
+
+		var ib = source.IndexBuffers[indexBuffer];
+		var vb = source.VertexBuffers[vertexBuffer];
+		var first = draw.StartIndex + indexBind / ib.Size;
+		var baseVertex = draw.BaseVertex + vertexBind / vb.Stride;
+		if ( first < 0 || (long)first + draw.IndexCount > ib.Count ) return false;
+
+		var read = new uint[draw.IndexCount];
+		for ( int i = 0; i < read.Length; i++ ) read[i] = ib[first + i];
+
+		var used = (uint[])read.Clone();
+		Array.Sort( used );
+		var usedCount = 0;
+		for ( int i = 0; i < used.Length; i++ )
+		{
+			if ( usedCount == 0 || used[usedCount - 1] != used[i] ) used[usedCount++] = used[i];
+		}
+
+		if ( baseVertex < 0 || (long)baseVertex + used[usedCount - 1] >= vb.Count ) return false;
+		for ( int i = 0; i < read.Length; i++ ) read[i] = (uint)Array.BinarySearch( used, 0, usedCount, read[i] );
+
+		vertices = new Vertex[usedCount];
+		Read( vb, vertices, baseVertex, used.AsSpan( 0, usedCount ) );
+		indices = read;
+		streams = Streams( vb );
+		return true;
+	}
+
 	/// <summary>Which of a vertex's attributes a buffer carries, as native's <c>GetDrawCallStreams</c> tells them.</summary>
 	public static VertexStreams Streams( MeshVertexBuffer buffer )
 	{

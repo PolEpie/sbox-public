@@ -346,7 +346,15 @@ public partial class SceneObject : IHandle
 	public bool RenderingEnabled
 	{
 		get => _renderingEnabled ??= !HasNativeObject || native.IsRenderingEnabled();
-		set { if ( WritesNativeObject( "SetRenderingEnabled" ) ) native.SetRenderingEnabled( value ); _renderingEnabled = value; NotifyChanged( Rendering.SceneObjectChange.Visibility ); }
+		set
+		{
+			var writesNative = WritesNativeObject( "SetRenderingEnabled" );
+			// Components set it every frame: an unchanged value would rewrite the render object each time
+			if ( _renderingEnabled == value ) return;
+			if ( writesNative ) native.SetRenderingEnabled( value );
+			_renderingEnabled = value;
+			NotifyChanged( Rendering.SceneObjectChange.Visibility );
+		}
 	}
 
 	/// <summary>

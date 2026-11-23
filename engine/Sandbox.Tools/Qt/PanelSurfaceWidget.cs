@@ -118,12 +118,19 @@ internal class PanelSurfaceWidget : Frame
 			widget.ReleaseSwapChain();
 	}
 
+	[ThreadStatic] static List<PanelSurfaceWidget> renderScratch;
+
 	/// <summary>
 	/// Draw every visible widget. Called in the render phase, with the scene rendering widgets.
 	/// </summary>
 	internal static void RenderAll()
 	{
-		foreach ( var widget in All.ToArray() )
+		// A snapshot, as a widget may close while drawing; taken out while in use so a nested call makes its own
+		var widgets = renderScratch ?? new List<PanelSurfaceWidget>();
+		renderScratch = null;
+		widgets.AddRange( All );
+
+		foreach ( var widget in widgets )
 		{
 			if ( !widget.IsValid() || !widget.Visible ) continue;
 
@@ -138,6 +145,9 @@ internal class PanelSurfaceWidget : Frame
 				Log.Error( e, $"Exception rendering a panel surface" );
 			}
 		}
+
+		widgets.Clear();
+		renderScratch = widgets;
 	}
 
 	void Render()

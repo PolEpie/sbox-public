@@ -37,11 +37,11 @@ internal sealed class SboxRenderHost : RenderHost
 
 	public override int OcclusionFreezes => OcclusionDebug.Freezes;
 
-	public override unsafe bool ProfilesZones => PerformanceTrace.__N.PerformanceTrace_BeginEvent != null;
+	public override bool ProfilesZones => Sandbox.Utility.ProfilerZones.Enabled;
 
-	public override void BeginZone( IntPtr name, uint color ) => PerformanceTrace.BeginEvent( name, null, color, null, 0, null );
+	public override void BeginZone( IntPtr name, uint color ) => Sandbox.Utility.ProfilerZones.Begin( name, color );
 
-	public override void EndZone() => PerformanceTrace.EndEvent();
+	public override void EndZone() => Sandbox.Utility.ProfilerZones.End();
 
 	public override Borealis.DebugViews DebugViews => ManagedDebugViews.Views;
 

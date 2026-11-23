@@ -98,7 +98,8 @@ internal sealed partial class AggregateRenderFeature
 
 		if ( combined.Batches.Length < total )
 		{
-			combined.Batches = new GpuContext.GpuDrivenBatch[Math.Max( total, combined.Batches.Length * 2 )];
+			if ( combined.Batches.Length > 0 ) BatchPool.Return( combined.Batches, true );
+			combined.Batches = BatchPool.Rent( total );
 			combined.Stamp = -1;
 		}
 
@@ -112,6 +113,26 @@ internal sealed partial class AggregateRenderFeature
 		}
 
 		return combined;
+	}
+
+	// Dropped lists' batch arrays, reused by the lists made after them
+	static readonly System.Buffers.ArrayPool<GpuContext.GpuDrivenBatch> BatchPool = System.Buffers.ArrayPool<GpuContext.GpuDrivenBatch>.Shared;
+
+	static void ReleaseList( ResidentList list )
+	{
+		lock ( list )
+		{
+			for ( int kind = 0; kind < 4; kind++ )
+			{
+				if ( list.Device[kind] is { } device ) BatchPool.Return( device, true );
+				list.Device[kind] = null;
+				while ( list.Spare[kind].TryPop( out var combined ) )
+				{
+					if ( combined.Batches.Length > 0 ) BatchPool.Return( combined.Batches, true );
+					combined.Batches = [];
+				}
+			}
+		}
 	}
 
 	/// <summary>Times <see cref="TakeCombined"/> copied a resident list's batches, for tests.</summary>
@@ -789,20 +810,25 @@ internal sealed partial class AggregateRenderFeature
 		return settled;
 	}
 
+	readonly List<(ResidentCasters, uint)> staleListKeys = new();
+
 	/// <summary>
 	/// Drop the lists whose casters' settling decides, to be made again, keeping the rest. Their groups the new lists don't
 	/// keep are let go when every list is next dropped.
 	/// </summary>
 	void DropSettledLists()
 	{
-		List<(ResidentCasters, uint)> stale = null;
+		staleListKeys.Clear();
 		foreach ( var key in residentLists.Keys )
 		{
-			if ( Settles( key.Casters ) ) (stale ??= new()).Add( key );
+			if ( Settles( key.Casters ) ) staleListKeys.Add( key );
 		}
 
-		if ( stale is null ) return;
-		foreach ( var key in stale ) residentLists.Remove( key );
+		foreach ( var key in staleListKeys )
+		{
+			ReleaseList( residentLists[key] );
+			residentLists.Remove( key );
+		}
 	}
 
 	/// <summary>
@@ -1048,6 +1074,8 @@ internal sealed partial class AggregateRenderFeature
 		return residentClasses.Count - 1;
 	}
 
+	readonly List<MeshGroupKey> staleOwnerKeys = new();
+
 	/// <summary>
 	/// Drop every list, to be made again. Owners no list of the last version that made any drew are let go, so the device
 	/// frees their records; the rest may be kept by the next version's lists. A version dropped before any list was made
@@ -1056,21 +1084,19 @@ internal sealed partial class AggregateRenderFeature
 	/// </summary>
 	void DropResidentLists()
 	{
+		foreach ( var list in residentLists.Values ) ReleaseList( list );
 		residentLists.Clear();
-		List<MeshGroupKey> stale = null;
+		staleOwnerKeys.Clear();
 		var before = meshMemberCount == 0 ? int.MaxValue : listedVersion;
 		foreach ( var (key, owner) in meshOwners )
 		{
-			if ( owner.Version < before ) (stale ??= new()).Add( key );
+			if ( owner.Version < before ) staleOwnerKeys.Add( key );
 		}
 
-		if ( stale is not null )
+		foreach ( var key in staleOwnerKeys )
 		{
-			foreach ( var key in stale )
-			{
-				ReleaseOwner( meshOwners[key].Owner );
-				meshOwners.Remove( key );
-			}
+			ReleaseOwner( meshOwners[key].Owner );
+			meshOwners.Remove( key );
 		}
 
 		residentVersion++;
@@ -1534,7 +1560,11 @@ internal sealed partial class AggregateRenderFeature
 			if ( list.DeviceGeneration[kind] == argGeneration && made is not null ) return made.AsSpan( 0, list.DeviceCount );
 
 			var changed = made is null || made.Length < list.DeviceCount;
-			if ( changed ) list.Device[kind] = made = new GpuContext.GpuDrivenBatch[list.DeviceCount];
+			if ( changed )
+			{
+				list.Device[kind] = made = BatchPool.Rent( list.DeviceCount );
+				made.AsSpan().Clear();
+			}
 			var batches = CollectionsMarshal.AsSpan( list.Batches );
 			var moved = list.Moved;
 			for ( int i = 0; i < batches.Length; i++ )

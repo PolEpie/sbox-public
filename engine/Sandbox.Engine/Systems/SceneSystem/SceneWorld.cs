@@ -216,18 +216,29 @@ public sealed partial class SceneWorld : IHandle
 		foreach ( var sceneObject in deleted ) sceneObject.Destroyed();
 	}
 
+	[ThreadStatic] static List<SceneWorld> deleteScratch;
+
 	/// <summary>
 	/// The frame's end: every world's deleted objects leave it, whether or not anything called <see cref="DeletePendingObjects"/>
 	/// (a native view once ran each drawn world's; nothing draws natively now, so a world nobody flushed kept them).
 	/// </summary>
 	internal static void RunEndOfFrameDeletes()
 	{
-		foreach ( var world in All.ToArray() )
+		// Taken out while in use so a nested flush makes its own; a snapshot, as deleting may change All
+		var worlds = deleteScratch ?? new List<SceneWorld>();
+		deleteScratch = null;
+
+		foreach ( var world in All )
 		{
 			bool any;
 			lock ( world.queuedDeletes ) any = world.queuedDeletes.Count > 0;
-			if ( any ) world.DeletePendingObjects();
+			if ( any ) worlds.Add( world );
 		}
+
+		foreach ( var world in worlds ) world.DeletePendingObjects();
+
+		worlds.Clear();
+		deleteScratch = worlds;
 	}
 
 	/// <summary>

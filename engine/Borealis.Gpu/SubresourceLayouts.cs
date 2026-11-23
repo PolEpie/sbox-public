@@ -62,9 +62,10 @@ internal struct SubresourceLayouts
 			return;
 		}
 
+		var total = mips * layers;
 		if ( !Mixed )
 		{
-			for ( int i = 0; i < mips * layers; i++ ) Set( i, Whole );
+			p0 = p1 = p2 = p3 = Alike * (ulong)Whole;
 			Mixed = true;
 		}
 
@@ -73,14 +74,21 @@ internal struct SubresourceLayouts
 			for ( int layer = baseLayer; layer < layerEnd; layer++ ) Set( mip * layers + layer, layout );
 		}
 
-		// All alike again: one layout
+		// All alike again: one layout. The packed words say so without reading each subresource
 		var first = Of( 0, 0, layers );
-		for ( int i = 1; i < mips * layers; i++ )
+		var pattern = Alike * (ulong)first;
+		for ( int w = 0; w * 16 < total; w++ )
 		{
-			if ( Of( i / layers, i % layers, layers ) != first ) return;
+			var left = total - w * 16;
+			var mask = left >= 16 ? ulong.MaxValue : (1UL << (left * 4)) - 1;
+			var word = w switch { 0 => p0, 1 => p1, 2 => p2, _ => p3 };
+			if ( ((word ^ pattern) & mask) != 0 ) return;
 		}
 
 		Whole = first;
 		Mixed = false;
 	}
+
+	// A layout in every nibble of a word, per unit of layout
+	const ulong Alike = 0x1111111111111111UL;
 }

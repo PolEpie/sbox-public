@@ -245,6 +245,8 @@ internal sealed class ManagedRenderAttributes
 	public void Set( StringToken k, params ReadOnlySpan<float> value )
 	{
 		var store = Writing();
+		// The same numbers again change nothing, so a reader that keeps what it made from the set at a version finds it still good
+		if ( store.Values.TryGetValue( k.Value, out var held ) && held.Value is float[] same && same.AsSpan().SequenceEqual( value ) ) return;
 		var array = store.Array<float>( k.Value, value.Length );
 		value.CopyTo( array );
 		store.Put( k.Value, array, ++store.Version );
@@ -282,10 +284,8 @@ internal sealed class ManagedRenderAttributes
 
 		var store = Writing();
 		var value = new TextureValue( texture, mip );
-		object boxed;
-		if ( store.Values.TryGetValue( k.Value, out var current ) && current.Value is TextureValue now && now == value ) boxed = current.Value;
-		else if ( mip < 0 ) boxed = WholeTextures.GetValue( texture, static t => new TextureValue( t, -1 ) );
-		else boxed = MipValue( texture, mip );
+		if ( store.Values.TryGetValue( k.Value, out var current ) && current.Value is TextureValue now && now == value ) return;
+		var boxed = mip < 0 ? WholeTextures.GetValue( texture, static t => new TextureValue( t, -1 ) ) : MipValue( texture, mip );
 
 		store.Put( k.Value, boxed, ++store.Version );
 		store.Own( k.Value );
@@ -309,6 +309,8 @@ internal sealed class ManagedRenderAttributes
 	public void SetObject( StringToken k, object value )
 	{
 		var store = Writing();
+		// The same object again (not an array or bytes, which their owner may have changed in place) changes nothing
+		if ( value is not null and not Array && store.Values.TryGetValue( k.Value, out var held ) && ReferenceEquals( held.Value, value ) ) return;
 		if ( value is null )
 		{
 			if ( store.Values.Remove( k.Value, out var old ) ) store.Keep( k.Value, old.Value );
@@ -372,6 +374,7 @@ internal sealed class ManagedRenderAttributes
 	public void SetCombo( StringToken k, int value )
 	{
 		var store = Writing();
+		if ( store.Combos.TryGetValue( k.Value, out var held ) && held.Value == value ) return;
 		store.Combos[k.Value] = new Entry<int> { Value = value, Stamp = ++store.Version };
 	}
 
@@ -383,6 +386,7 @@ internal sealed class ManagedRenderAttributes
 	public void Clear()
 	{
 		var store = Writing();
+		if ( store.Values.Count == 0 && store.Combos.Count == 0 ) return;
 		foreach ( var (k, entry) in store.Values ) store.Keep( k, entry.Value );
 		store.Values.Clear();
 		store.Combos.Clear();

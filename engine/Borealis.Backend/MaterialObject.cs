@@ -16,6 +16,12 @@ internal abstract class PassBindings
 	/// <summary>This context's place in every object's per-context state, given by the cache.</summary>
 	public int Slot = -1;
 
+	/// <summary>The pass state this context's attributes last changed in, or -1: a layout resolved in it needs only the material's bindings (<see cref="MaterialLayout.Pass"/>).</summary>
+	public long AttributesEpoch = -1;
+
+	/// <summary>Id of the handles this context's attributes bind, stable while they are, or -1: lets an immediate object rebind its sets writing only constants.</summary>
+	public long Structure = -1;
+
 	/// <summary>The pass state per layout signature, for this context.</summary>
 	public MaterialLayout.PassState[] States = [];
 
@@ -24,6 +30,9 @@ internal abstract class PassBindings
 	/// <paramref name="dynamicOffset"/>.
 	/// </summary>
 	public abstract Binding Resolve( in ShaderResource resource, ShaderStage stage, bool dynamic, out uint dynamicOffset );
+
+	/// <summary>As <see cref="Resolve(in ShaderResource, ShaderStage, bool, out uint)"/> for a pass slot, taking the layout's placeholder instead of making one (<see cref="MaterialLayout.Placeholder"/>).</summary>
+	public virtual Binding Resolve( MaterialLayout layout, int set, int slot, in ShaderResource resource, ShaderStage stage, bool dynamic, out uint dynamicOffset ) => Resolve( resource, stage, dynamic, out dynamicOffset );
 
 	/// <summary>An attribute as floats, for the material constants read from attributes; null when it isn't set.</summary>
 	public abstract float[] Floats( string attribute );
@@ -83,8 +92,19 @@ internal sealed class MaterialLayout
 	/// <summary>Per set, the bindings the pass fills (constant buffers, buffers and textures named by attributes).</summary>
 	public readonly int[][] PassSlots = new int[ShaderAbi.BindlessSet][];
 
+	/// <summary>Per set, the <see cref="PassSlots"/> an immediate draw binds from its material.</summary>
+	public readonly bool[][] MaterialSlots = new bool[ShaderAbi.BindlessSet][];
+
+	public readonly int[][] MaterialIndices = new int[ShaderAbi.BindlessSet][];
+
 	/// <summary>Bytes of dynamic constants a draw of an immediate layout writes, at most.</summary>
 	public readonly int ImmediateBytes;
+
+	/// <summary>Per set, the dynamic pass slots: slot, resource, dynamic offset index, and whether the material decides it.</summary>
+	public readonly (int Slot, int Resource, int Dynamic, bool Material)[][] DynamicSlots = new (int, int, int, bool)[ShaderAbi.BindlessSet][];
+
+	/// <summary>True when an immediate draw's constants are all dynamic, so its sets can be reused across values (<see cref="RefreshDynamic"/>).</summary>
+	public readonly bool Refreshable;
 
 	/// <summary>
 	/// What the pass bound for this layout in one pass state, resolved once per context and shared by every object of
@@ -93,10 +113,19 @@ internal sealed class MaterialLayout
 	public sealed class PassState
 	{
 		public long Epoch = -1;
+
+		/// <summary>The <see cref="PassBindings.AttributesEpoch"/> these bindings were resolved from.</summary>
+		public long Attributes = -1;
 		public readonly ulong[] Identity = new ulong[ShaderAbi.BindlessSet];
+
+		/// <summary>Per set, identity of the attribute-decided bindings; the material's are mixed in to make <see cref="Identity"/>.</summary>
+		public readonly ulong[] AttributeIdentity = new ulong[ShaderAbi.BindlessSet];
 		public readonly Binding[][] Bindings = new Binding[ShaderAbi.BindlessSet][];
 		public readonly uint[][] Offsets = new uint[ShaderAbi.BindlessSet][];
 		public ulong Constants;
+
+		/// <summary>Per set and dynamic offset, what the attributes alone decide, with the <see cref="PassBindings.AttributesEpoch"/> it was written for.</summary>
+		public readonly (long Values, uint Offset)[][] Dynamic = new (long, uint)[ShaderAbi.BindlessSet][];
 
 		/// <summary>With an object's attributes over the pass: which (<see cref="PassBindings.LayerEpoch"/>), and its own
 		/// copies of the sets they change.</summary>
@@ -230,7 +259,9 @@ internal sealed class MaterialLayout
 		if ( signature >= states.Length ) resolver.States = states = [.. states, .. new PassState[Math.Max( signature + 1 - states.Length, 16 )]];
 		var pass = states[signature] ??= new PassState();
 		if ( pass.Epoch == epoch ) return pass;
-		pass.Epoch = epoch;
+
+		// Resolved from these attributes already: only the material is new
+		var partial = resolver.AttributesEpoch >= 0 && pass.Attributes == resolver.AttributesEpoch;
 
 		for ( int set = 0; set < Sets.Length; set++ )
 		{
@@ -239,18 +270,43 @@ internal sealed class MaterialLayout
 
 			var bindings = pass.Bindings[set] ??= new Binding[slots.Length];
 			var offsets = pass.Offsets[set] ??= new uint[DynamicCount[set]];
+			var stage = StageOf( set );
+			var dynamicIndex = DynamicIndex[set];
+			var resources = Resources[set];
 			var identity = 14695981039346656037UL;
-			for ( int k = 0; k < slots.Length; k++ )
+			if ( partial ) identity = pass.AttributeIdentity[set];
+			else
+			{
+				var material = MaterialSlots[set];
+				for ( int k = 0; k < slots.Length; k++ )
+				{
+					if ( material[k] ) continue;
+					var i = slots[k];
+					var dynamic = dynamicIndex[i];
+					bindings[k] = resolver.Resolve( this, set, k, resources[i], stage, dynamic >= 0, out var dynamicOffset );
+					if ( dynamic >= 0 ) offsets[dynamic] = dynamicOffset;
+					identity = MaterialObject.Mix( identity, bindings[k] );
+				}
+
+				pass.AttributeIdentity[set] = identity;
+			}
+
+			foreach ( var k in MaterialIndices[set] )
 			{
 				var i = slots[k];
-				var dynamic = DynamicIndex[set][i];
-				bindings[k] = resolver.Resolve( Resources[set][i], StageOf( set ), dynamic >= 0, out var dynamicOffset );
+				var dynamic = dynamicIndex[i];
+				bindings[k] = resolver.Resolve( this, set, k, resources[i], stage, dynamic >= 0, out var dynamicOffset );
 				if ( dynamic >= 0 ) offsets[dynamic] = dynamicOffset;
 				identity = MaterialObject.Mix( identity, bindings[k] );
 			}
 
 			pass.Identity[set] = identity;
 		}
+
+		// Set last so a throw (pass constants full) resolves again
+		pass.Epoch = epoch;
+		pass.Attributes = resolver.AttributesEpoch;
+		if ( partial ) return pass;
 
 		// The values of the material constants read from attributes, which pick the object's constant buffer
 		var constants = 14695981039346656037UL;
@@ -266,6 +322,57 @@ internal sealed class MaterialLayout
 
 		pass.Constants = constants;
 		return pass;
+	}
+
+	/// <summary>Rewrites an immediate draw's dynamic constants (the material's and the attribute-decided) into <paramref name="offsets"/>, leaving its other bindings.</summary>
+	public void RefreshDynamic( PassBindings resolver, uint[][] offsets )
+	{
+		var states = resolver.States;
+		if ( signature >= states.Length ) resolver.States = states = [.. states, .. new PassState[Math.Max( signature + 1 - states.Length, 16 )]];
+		var pass = states[signature] ??= new PassState();
+		var values = resolver.AttributesEpoch;
+
+		for ( int set = 0; set < Sets.Length; set++ )
+		{
+			var dynamic = DynamicSlots[set];
+			if ( dynamic is null || dynamic.Length == 0 ) continue;
+
+			var stage = StageOf( set );
+			var resources = Resources[set];
+			var target = offsets[set];
+			foreach ( var (slot, resource, index, material) in dynamic )
+			{
+				if ( material )
+				{
+					resolver.Resolve( this, set, slot, resources[resource], stage, true, out var offset );
+					target[index] = offset;
+					continue;
+				}
+
+				var held = pass.Dynamic[set] ??= [.. Enumerable.Repeat( (-1L, 0u), DynamicCount[set] )];
+				if ( held[index].Values != values || values < 0 )
+				{
+					resolver.Resolve( this, set, slot, resources[resource], stage, true, out var offset );
+					held[index] = (values, offset);
+				}
+
+				target[index] = held[index].Offset;
+			}
+		}
+	}
+
+	// Boxed so a thread reads one whole
+	readonly object[][] placeholders = new object[ShaderAbi.BindlessSet][];
+
+	/// <summary>The placeholder binding for a pass slot nothing sets, made once.</summary>
+	public Binding Placeholder( int set, int slot )
+	{
+		var held = placeholders[set] ??= new object[PassSlots[set].Length];
+		if ( held[slot] is Binding found ) return found;
+
+		var made = cache.Defaults.For( Resources[set][PassSlots[set][slot]] );
+		held[slot] = made;
+		return made;
 	}
 
 	public MaterialLayout( MaterialObjectCache cache, ShaderVariant variant, bool immediate )
@@ -290,6 +397,7 @@ internal sealed class MaterialLayout
 		}
 
 		var immediateBytes = 0;
+		var refreshable = immediate;
 		for ( int set = 0; set < Sets.Length; set++ )
 		{
 			if ( !variant.Sets[set].IsValid ) continue;
@@ -311,12 +419,26 @@ internal sealed class MaterialLayout
 			Resources[set] = [.. resources];
 			DynamicIndex[set] = [.. dynamicIndex];
 			PassSlots[set] = [.. Enumerable.Range( 0, resources.Count ).Where( i => IsPassBinding( resources[i], immediate ) )];
+			MaterialSlots[set] = [.. PassSlots[set].Select( i => FromMaterial( resources[i] ) )];
+			MaterialIndices[set] = [.. Enumerable.Range( 0, PassSlots[set].Length ).Where( k => MaterialSlots[set][k] )];
+
+			// Non-dynamic constants (past the device limit) are kept by content, so values change their set
+			var dynamicSlots = new List<(int, int, int, bool)>();
+			for ( int k = 0; k < PassSlots[set].Length; k++ )
+			{
+				var i = PassSlots[set][k];
+				if ( DynamicIndex[set][i] >= 0 ) dynamicSlots.Add( (k, i, DynamicIndex[set][i], MaterialSlots[set][k]) );
+				else if ( resources[i].Kind is ShaderResourceKind.MaterialConstants or ShaderResourceKind.ConstantBuffer ) refreshable = false;
+			}
+
+			DynamicSlots[set] = [.. dynamicSlots];
 			passNames[set] = [.. PassSlots[set].Select( i => resources[i].Name is { } name ? BackendContext.Token( name ).Value : 0u )];
 			Sets[set] = cache.Layout( slots );
 			if ( immediate && StageOf( set ) is { } stage ) immediateBytes += stage.MaterialBuffer.Size + 256;
 		}
 
 		ImmediateBytes = immediateBytes;
+		Refreshable = refreshable;
 
 		var attributeConstants = new List<(ShaderStage, ShaderVariable[])>();
 		foreach ( var stage in immediate ? [] : new[] { variant.Vertex, variant.Pixel, variant.Compute, variant.Task, variant.Mesh } )
@@ -375,6 +497,9 @@ internal sealed class MaterialLayout
 		ShaderResourceKind.MaterialConstants or ShaderResourceKind.StorageTexture => immediate,
 		_ => false,
 	};
+
+	// What an immediate draw binds for these comes from its material rather than the attributes
+	static bool FromMaterial( in ShaderResource resource ) => resource.Kind == ShaderResourceKind.MaterialConstants || resource.Kind == ShaderResourceKind.Texture && resource.Variable?.Source == VariableSource.Material;
 
 	/// <summary>The stage whose material constants a set holds, as <see cref="BackendContext"/> binds them (a mesh stage's in set 0 where there's no vertex stage).</summary>
 	public ShaderStage StageOf( int set ) => set == ShaderAbi.FragmentSet ? Variant.Pixel : Variant.Compute ?? Variant.Vertex ?? Variant.Mesh;
@@ -453,6 +578,46 @@ internal sealed class MaterialObject
 		public ulong LastConstantsKey;
 		public int ValuesVersion;
 		public ConstantVariant LastConstants;
+
+		/// <summary>Per material state of an immediate object: the structure, material version and values its last resolve was for.</summary>
+		public long Structure = -1, Values = -1;
+		public int MaterialVersion = -1;
+		ConditionalWeakTable<BackendMaterial, Resolved> materials;
+		BackendMaterial lastMaterial;
+		Resolved lastState;
+
+		public Resolved ForMaterial( BackendMaterial material )
+		{
+			if ( ReferenceEquals( lastMaterial, material ) ) return lastState;
+
+			materials ??= new();
+			var found = materials.GetValue( material, static _ => new Resolved() );
+			(lastMaterial, lastState) = (material, found);
+			return found;
+		}
+
+		/// <summary>The structures an object's draws of one material come back to: a pass binds the same few frame after frame.</summary>
+		const int Leaves = 8;
+
+		long key = -1;
+		Resolved[] leaves;
+		int nextLeaf;
+
+		/// <summary>This material's state under <paramref name="structure"/>, else a new one.</summary>
+		public Resolved ForStructure( long structure )
+		{
+			var held = leaves ??= new Resolved[Leaves];
+			foreach ( var leaf in held )
+			{
+				if ( leaf is not null && leaf.key == structure ) return leaf;
+			}
+
+			var made = held[nextLeaf] ??= new Resolved();
+			nextLeaf = (nextLeaf + 1) % Leaves;
+			made.key = structure;
+			made.Structure = -1;
+			return made;
+		}
 	}
 
 	const int Remembered = 4;
@@ -558,11 +723,49 @@ internal sealed class MaterialObject
 		}
 
 		var state = ContextState( pass.Slot );
-		if ( passEpoch != state.Epoch || pass.LayerEpoch != state.Layer || state.ValuesVersion != ValuesVersion || AnyDead( state ) ) Resolve( state, passEpoch, pass );
+		if ( passEpoch != state.Epoch || pass.LayerEpoch != state.Layer || state.ValuesVersion != ValuesVersion || AnyDead( state ) )
+		{
+			Resolve( state, passEpoch, pass );
+		}
 
 		for ( int set = 0; set < state.Bound.Length; set++ )
 		{
 			if ( state.Bound[set] is not { } entry ) continue;
+			list.SetBindingSet( set, entry.Handle, state.Offsets[set] );
+		}
+	}
+
+	/// <summary>Binds an immediate draw; sets are reused per attribute structure and only constants rewritten, so pass bindings resolve whole only when structure, material or a bound set changed.</summary>
+	public void BindImmediate( CommandList list, ref PipelineHandle bound, BackendMaterial material, int materialVersion, PassBindings pass )
+	{
+		if ( bound != Pipeline )
+		{
+			list.SetPipeline( Pipeline );
+			bound = Pipeline;
+		}
+
+		var context = ContextState( pass.Slot );
+		var node = material is null ? context : context.ForMaterial( material );
+		var structure = pass.Structure;
+		var state = structure >= 0 ? node.ForStructure( structure ) : node;
+		var values = pass.AttributesEpoch;
+		var current = structure >= 0 && state.Structure == structure && state.MaterialVersion == materialVersion && !AnyDead( state );
+		if ( !current || (state.Values != values && !Layout.Refreshable) )
+		{
+			Resolve( state, cache.NextEpoch(), pass );
+			(state.Structure, state.MaterialVersion, state.Values) = (structure, materialVersion, values);
+		}
+		else if ( state.Values != values )
+		{
+			Layout.RefreshDynamic( pass, state.Offsets );
+			state.Values = values;
+		}
+
+		var frame = cache.Frame;
+		for ( int set = 0; set < state.Bound.Length; set++ )
+		{
+			if ( state.Bound[set] is not { } entry ) continue;
+			entry.LastUsed = frame;
 			list.SetBindingSet( set, entry.Handle, state.Offsets[set] );
 		}
 	}
@@ -597,7 +800,15 @@ internal sealed class MaterialObject
 			// Identity: what the pass bound, as handles, and which constant buffer variant; dynamic offsets are given at bind time
 			var identity = pass.Identity[set];
 			if ( materialSlot[set] >= 0 && constants is not null ) identity = (identity ^ (ulong)constants.Offsets[set]) * 1099511628211UL;
-			state.Offsets[set] = pass.Offsets[set] ?? noOffsets;
+			var passOffsets = pass.Offsets[set];
+			if ( passOffsets is null || passOffsets.Length == 0 ) state.Offsets[set] = noOffsets;
+			else
+			{
+				// Its own copy: the layout's resolves of other pass states change theirs in place
+				var own = state.Offsets[set];
+				if ( own.Length != passOffsets.Length ) state.Offsets[set] = own = new uint[passOffsets.Length];
+				passOffsets.CopyTo( own, 0 );
+			}
 
 			// A set this context bound lately, if the pass bound the same: the usual case from frame to frame
 			if ( RememberedSet( state, set, identity ) is { } last )
