@@ -423,10 +423,12 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 			{
 				GpuBusyMs = busy;
 				GpuBusyFrame = (ulong)done;
+				if ( counterTimeline is not null ) AddCounterTimeline( busyTimings );
 				(busyTimings, publishedTimings) = (publishedTimings, busyTimings);
 			}
 
-			busyReadFrom = NextBusyRead( done, Sandbox.Diagnostics.GpuProfilerStats.Enabled );
+			// Every frame while the dev tools' GPU view or a GPU counter capture (r_gpucounters) reads them
+			busyReadFrom = NextBusyRead( done, Sandbox.Diagnostics.GpuProfilerStats.Enabled || counterTimeline is not null );
 		}
 
 		busyTimer.BeginFrame( (long)frame );
