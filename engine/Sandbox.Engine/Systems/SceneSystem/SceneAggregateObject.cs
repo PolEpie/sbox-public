@@ -111,7 +111,7 @@ internal sealed class SceneAggregateObject : SceneObject
 
 		// Its native twin holds only what every scene object has (world, transform, flags, tags); Borealis draws the fragments.
 		// Where nothing reads the twin it's made without one, as a custom object is
-		using ( var h = IHandle.MakeNextHandle( this ) )
+		using ( var h = NextHandleForTwin() )
 		{
 			if ( MakesNativeTwin ) CManagedSceneObject.Create( sceneWorld );
 			else

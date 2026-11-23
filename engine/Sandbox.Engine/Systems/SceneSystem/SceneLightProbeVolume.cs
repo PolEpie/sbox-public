@@ -27,7 +27,7 @@ internal class SceneLightProbe : SceneObject
 	{
 		Assert.IsValid( sceneWorld );
 
-		using ( var h = IHandle.MakeNextHandle( this ) )
+		using ( var h = NextHandleForTwin() )
 		{
 			if ( MakesNativeTwin ) CSceneSystem.CreateLightProbeVolume( sceneWorld );
 			else

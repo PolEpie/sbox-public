@@ -82,7 +82,7 @@ public partial class SceneObject : IHandle
 
 		if ( !model.HasRenderMeshes() ) model = Model.Error;
 
-		using ( var h = IHandle.MakeNextHandle( this ) )
+		using ( var h = NextHandleForTwin() )
 		{
 			var flags = Rendering.SceneObjectFlags.CastShadows | Rendering.SceneObjectFlags.IsLoaded;
 			var typeFlags = ESceneObjectTypeFlags.NONE;

@@ -26,7 +26,7 @@ public class SceneDynamicObject : SceneObject
 
 		ManagedVertices = new List<Vertex>();
 
-		using ( var h = IHandle.MakeNextHandle( this ) )
+		using ( var h = NextHandleForTwin() )
 		{
 			if ( MakesNativeTwin ) CDynamicSceneObject.Create( sceneWorld );
 			else MakeWithoutTwin( sceneWorld, null, SceneCustomObject.TwinlessFlags, batchable: false ); // as CDynamicSceneObject::Create
