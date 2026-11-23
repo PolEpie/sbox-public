@@ -761,9 +761,10 @@ public sealed partial class RenderSystem : IDisposable
 
 	/// <summary>
 	/// Persistent mipmapped RGBA16F copy (<c>FindOrCreateFrameBufferScratchTexture</c>).
-	/// Created on the main thread; the depth-aware mask reads the previous frame's second mip. The last two sizes are kept:
-	/// a view whose renderer also draws views of another size (a camera's and its 128 px cube faces) made a new 10 MiB copy,
-	/// the driver's allocation, at every turn, 190 in Construct's load and the seconds after it.
+	/// Created on the main thread, cleared: the depth-aware mask reads the previous frame's second mip, so a new copy's first
+	/// frames read black rather than what its memory held, and a view's frames from a new copy are the same each time. The
+	/// last two sizes are kept: a view whose renderer also draws views of another size (a camera's and its 128 px cube faces)
+	/// made a new 10 MiB copy, the driver's allocation, at every turn, 190 in Construct's load and the seconds after it.
 	/// </summary>
 	internal GpuTexture FrameBufferCopy( Rect viewport )
 	{
@@ -779,7 +780,9 @@ public sealed partial class RenderSystem : IDisposable
 
 		// Keep the general layout for compute mip writes and sampling.
 		var desc = TextureDesc.Target( width, height, TextureFormat.RGBA16161616F, mips: mips ) with { Storage = true, GenerateMips = true };
-		frameBufferCopy = RenderHost.Current.Device.CreateTexture( desc, "Borealis frame buffer copy" );
+		var device = RenderHost.Current.Device;
+		frameBufferCopy = device.CreateTexture( desc, "Borealis frame buffer copy" );
+		device.Clear( frameBufferCopy, Color.Transparent );
 		return frameBufferCopy;
 	}
 
