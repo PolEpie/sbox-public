@@ -499,11 +499,15 @@ public sealed unsafe partial class Device
 
 			freeListsLow[q] = int.MaxValue;
 			if ( freed == 0 ) continue;
-
-			// The demand dropped: the spares kept still hold what the busy frames grew their pools to
 			commandListsFreed += freed;
+
+			// The demand dropped by as many lists as are kept or more (a load's or a busy stretch's end): the spares kept still
+			// hold what those frames grew their pools to. A smaller drop (a view that comes and goes) leaves their memory: steady
+			// frames take them next, and each would grow its pool again while it records (a whole frame's recording 3-4x slower)
+			if ( freed < KeptFreeCommandLists ) continue;
 			int kept = 0;
 			while ( kept < keptLists.Length && freeLists[q].TryTake( out var list ) ) keptLists[kept++] = list;
+			commandMemoryReleases += kept;
 			for ( int i = 0; i < kept; i++ )
 			{
 				keptLists[i].ReleaseCommandMemory();
@@ -522,6 +526,11 @@ public sealed unsafe partial class Device
 
 	/// <summary>Spare command lists freed for going unused, for tests and reports.</summary>
 	public int CommandListsFreed => commandListsFreed;
+
+	int commandMemoryReleases;
+
+	/// <summary>Spare command lists whose pools gave their command memory back (<see cref="TrimSpares"/>), for tests.</summary>
+	internal int CommandMemoryReleases => commandMemoryReleases;
 
 	/// <summary>Spare command lists of a queue, for tests.</summary>
 	internal int FreeCommandLists( QueueType queue ) => freeLists[(int)queue].Count;
