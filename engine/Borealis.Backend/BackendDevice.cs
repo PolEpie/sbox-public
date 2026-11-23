@@ -1921,10 +1921,33 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 
 	BackendMaterial Material( string path, Dictionary<string, float[]> values, string name = null )
 	{
-		var file = readMaterials.TryRemove( path, out var read ) ? read : Content.TryRead( path ) is { } data ? ReadMaterial( data ) : MissingMaterial( path );
+		MaterialFile file;
+		if ( readMaterials.TryRemove( path, out var read ) ) file = read;
+		else if ( Content.TryRead( path ) is { } data )
+		{
+			file = ReadMaterial( data );
+			if ( file is null ) FellBack( path, "can't be read here, so it draws nothing" );
+		}
+		else
+		{
+			file = MissingMaterial( path );
+			if ( file is not null ) FellBack( path, "isn't built, so it draws as the error material" );
+		}
+
 		if ( file is null ) return Track( new BackendMaterial( name ?? path, null, null, null, values ) );
 		file = WithShader( path, file, out var shader );
 		return Track( new BackendMaterial( name ?? path, shader, file, Textures( file ), values ) );
+	}
+
+	/// <summary>
+	/// Materials that don't draw as their file says, by path, with why: not built (the error material), a shader that won't
+	/// load (the error shader), or a file that can't be read (nothing). Written as they load, for draw censuses.
+	/// </summary>
+	internal System.Collections.Concurrent.ConcurrentDictionary<string, string> MaterialFallbacks { get; } = new( StringComparer.OrdinalIgnoreCase );
+
+	void FellBack( string path, string why )
+	{
+		if ( !string.IsNullOrEmpty( path ) ) MaterialFallbacks[path] = why;
 	}
 
 	/// <summary>
@@ -1939,6 +1962,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 		shader = Shaders.Load( file.Shader );
 		if ( shader is not null || string.IsNullOrEmpty( file.Shader ) || SurfaceShaders.IsCoreSurface( file.Shader ) || MissingMaterial( path ) is not { } error ) return file;
 		if ( Shaders.Load( error.Shader ) is not { } errorShader ) return file;
+		FellBack( path, $"its shader {file.Shader} won't load, so it draws the error shader" );
 		shader = errorShader;
 		return error;
 	}

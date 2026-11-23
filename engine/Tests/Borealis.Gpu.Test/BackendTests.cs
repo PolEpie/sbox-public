@@ -163,6 +163,7 @@ public class BackendTests : GpuTest
 		Assert.IsNotNull( missing.Shader.Mode( "Forward" ), "the error shader draws in every layer, with its one mode" );
 		Assert.IsNotNull( missing.Shader.Mode( "Depth" ) );
 		Assert.AreEqual( "materials/not_installed/missing_for_test.vmat", missing.Name );
+		StringAssert.Contains( backend.MaterialFallbacks.GetValueOrDefault( "materials/not_installed/missing_for_test.vmat" ) ?? "", "isn't built", "said for censuses" );
 
 		Assert.IsNull( ((Borealis.Backend.BackendMaterial)backend.LoadMaterial( "" )).Shader );
 	}
@@ -197,9 +198,11 @@ public class BackendTests : GpuTest
 		StringAssert.Contains( water.File.Shader, "error.shader" );
 		Assert.IsNotNull( water.Shader.Mode( "Forward" ), "the error shader draws in every layer" );
 		Assert.AreEqual( "materials/test/missing_shader_for_test.vmat", water.Name );
+		StringAssert.Contains( backend.MaterialFallbacks.GetValueOrDefault( "materials/test/missing_shader_for_test.vmat" ) ?? "", "shaders/not_shipped_for_test.shader won't load", "said for censuses" );
 
 		var unlit = Load( "materials/test/unlit_for_test.vmat", "shaders/unlit.shader" );
 		StringAssert.Contains( unlit.Shader?.Name ?? "", "unlit", "a shader that loads is kept" );
+		Assert.IsFalse( backend.MaterialFallbacks.ContainsKey( "materials/test/unlit_for_test.vmat" ), "nor said to fall back" );
 	}
 
 	/// <summary>
