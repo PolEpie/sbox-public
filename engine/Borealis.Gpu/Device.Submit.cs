@@ -462,11 +462,14 @@ public sealed unsafe partial class Device
 	/// (Construct's held 1.4 GB of mapped memory from then on), and a map's frames take over a hundred lists, whose command
 	/// pools keep the driver's command memory (Construct's held ~370 MB of video memory in the menu after it); steady
 	/// frames take a few. The pages freed are those in the emptiest memory blocks, so blocks drain rather than each keeping
-	/// a page or two (Construct had 100 MiB of 4 MiB holes in upload blocks).
+	/// a page or two (Construct had 100 MiB of 4 MiB holes in upload blocks). Lists go by a longer window of their own
+	/// (<see cref="CommandListSpareSeconds"/>).
 	/// </summary>
 	void TrimSpares()
 	{
+		for ( int i = 0; i < ListsFreedPerFrame && listsToFree.TryDequeue( out var spare ); i++ ) spare.Destroy();
 		for ( int c = 0; c < FreePages.Length; c++ ) freePagesLow[c] = Math.Min( freePagesLow[c], FreePages[c].Count );
+		if ( FrameNumber - listTrimFrom >= UploadPageIdleFrames && ListsKeptLongEnough() ) TrimSpareLists();
 		if ( FrameNumber - trimFrom < UploadPageIdleFrames || !Allocator.KeptLongEnough( trimFromTicks ) ) return;
 
 		for ( int c = 0; c < FreePages.Length; c++ )
@@ -487,23 +490,55 @@ public sealed unsafe partial class Device
 			trimPages.Clear();
 		}
 
+		trimFrom = FrameNumber;
+		trimFromTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+	}
+
+	/// <summary>
+	/// Seconds spare command lists have to go unused, as well as <see cref="UploadPageIdleFrames"/> frames, before they're
+	/// freed (when the allocator goes by time, <see cref="Memory.MemoryAllocator.SpareSeconds"/>): a view that comes and goes
+	/// every few seconds (a water body's refraction) takes a few dozen lists more while it draws, and lists freed between had
+	/// to be made and their pools grown again each time it came back.
+	/// </summary>
+	internal double CommandListSpareSeconds { get; set; } = 30;
+
+	ulong listTrimFrom;
+	long listTrimFromTicks;
+
+	// Spare lists taken out to be freed, a few each frame: a load's sixty-odd lists destroyed at once took 33 ms of one
+	// frame while the window was captured (0.3-0.5 ms each)
+	readonly Queue<CommandList> listsToFree = new();
+	internal const int ListsFreedPerFrame = 2;
+
+	/// <summary>Spare lists taken out to be freed and not yet destroyed, for tests.</summary>
+	internal int ListsWaitingToBeFreed => listsToFree.Count;
+
+	bool ListsKeptLongEnough() => Allocator.SpareSeconds <= 0 || System.Diagnostics.Stopwatch.GetElapsedTime( listTrimFromTicks ).TotalSeconds >= CommandListSpareSeconds;
+
+	/// <summary>Free the spare command lists every frame in the window left unused, past <see cref="KeptFreeCommandLists"/> (<see cref="TrimSpares"/>).</summary>
+	void TrimSpareLists()
+	{
 		// A spare list's frame has finished: its command pool and descriptor pool can go at once
 		for ( int q = 0; q < freeLists.Length; q++ )
 		{
 			int freed = 0;
 			for ( int i = KeptFreeCommandLists; i < freeListsLow[q] && freeLists[q].TryTake( out var list ); i++ )
 			{
-				list.Destroy();
+				listsToFree.Enqueue( list );
 				freed++;
 			}
 
 			freeListsLow[q] = int.MaxValue;
 			if ( freed == 0 ) continue;
-
-			// The demand dropped: the spares kept still hold what the busy frames grew their pools to
 			commandListsFreed += freed;
+
+			// The demand dropped by as many lists as are kept or more (a load's or a busy stretch's end): the spares kept still
+			// hold what those frames grew their pools to. A smaller drop (a view that comes and goes) leaves their memory: steady
+			// frames take them next, and each would grow its pool again while it records (a whole frame's recording 3-4x slower)
+			if ( freed < KeptFreeCommandLists ) continue;
 			int kept = 0;
 			while ( kept < keptLists.Length && freeLists[q].TryTake( out var list ) ) keptLists[kept++] = list;
+			commandMemoryReleases += kept;
 			for ( int i = 0; i < kept; i++ )
 			{
 				keptLists[i].ReleaseCommandMemory();
@@ -512,8 +547,8 @@ public sealed unsafe partial class Device
 			}
 		}
 
-		trimFrom = FrameNumber;
-		trimFromTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+		listTrimFrom = FrameNumber;
+		listTrimFromTicks = System.Diagnostics.Stopwatch.GetTimestamp();
 	}
 
 	readonly CommandList[] keptLists = new CommandList[KeptFreeCommandLists];
@@ -522,6 +557,11 @@ public sealed unsafe partial class Device
 
 	/// <summary>Spare command lists freed for going unused, for tests and reports.</summary>
 	public int CommandListsFreed => commandListsFreed;
+
+	int commandMemoryReleases;
+
+	/// <summary>Spare command lists whose pools gave their command memory back (<see cref="TrimSpares"/>), for tests.</summary>
+	internal int CommandMemoryReleases => commandMemoryReleases;
 
 	/// <summary>Spare command lists of a queue, for tests.</summary>
 	internal int FreeCommandLists( QueueType queue ) => freeLists[(int)queue].Count;
@@ -1237,6 +1277,8 @@ public sealed unsafe partial class Device
 		{
 			while ( bag.TryTake( out var list ) ) list.Destroy();
 		}
+
+		while ( listsToFree.TryDequeue( out var spare ) ) spare.Destroy();
 
 		foreach ( var pages in FreePages )
 		{

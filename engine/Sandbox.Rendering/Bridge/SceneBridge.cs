@@ -57,8 +57,9 @@ internal sealed partial class SceneBridge : ISceneRenderer
 		/// </summary>
 		public bool Rendering;
 
-		/// <summary>The engine frame this view last rendered in (<see cref="ViewIdleFrames"/>).</summary>
+		/// <summary>The engine frame this view last rendered in, and when (<see cref="IdleLongEnough"/>).</summary>
 		public ulong LastFrame;
+		public long LastTicks;
 
 		/// <summary>
 		/// Whether the camera this is for was disposed or collected without saying so.
@@ -207,18 +208,30 @@ internal sealed partial class SceneBridge : ISceneRenderer
 	}
 
 	/// <summary>
-	/// Frames a view keeps its renderer and targets without rendering: an editor widget that isn't shown (the game view
-	/// behind the scene view) or a camera that stopped drawing gives them back, and starts again from nothing (no history,
-	/// shadows drawn again) if it renders later.
+	/// Frames a view keeps its renderer and targets without rendering, as well as <see cref="ViewIdleSeconds"/>: an editor
+	/// widget that isn't shown (the game view behind the scene view) or a camera that stopped drawing gives them back, and
+	/// starts again from nothing (no history, shadows drawn again, its targets and buffers the driver's allocations) if it
+	/// renders later.
 	/// </summary>
 	internal const ulong ViewIdleFrames = 600;
+
+	/// <summary>
+	/// Seconds a view keeps its renderer and targets without rendering, as well as <see cref="ViewIdleFrames"/>: at a few
+	/// hundred frames a second, 600 frames are two seconds, and a water body's refraction view that went off screen and came
+	/// back was made again from nothing each time (a frame of 10-15 ms).
+	/// </summary>
+	internal const double ViewIdleSeconds = 5;
+
+	/// <summary>Whether a view (or the capture faces) last rendered in <paramref name="last"/>, at <paramref name="lastTicks"/>, has been idle long enough to free.</summary>
+	internal static bool IdleLongEnough( ulong frame, ulong last, long lastTicks )
+		=> frame - last > ViewIdleFrames && System.Diagnostics.Stopwatch.GetElapsedTime( lastTicks ).TotalSeconds >= ViewIdleSeconds;
 
 	// The frame FreeInvalid last ran in, and how often BeginFrame runs it while no view is prepared
 	ulong freedFrame;
 	const ulong FreeIdleEveryFrames = 60;
 
 	/// <summary>
-	/// Release views whose camera went away or that haven't rendered for <see cref="ViewIdleFrames"/>, and worlds deleted,
+	/// Release views whose camera went away or that haven't rendered for a while (<see cref="IdleLongEnough"/>), and worlds deleted,
 	/// without being reported.
 	/// </summary>
 	void FreeInvalid()
@@ -227,7 +240,7 @@ internal sealed partial class SceneBridge : ISceneRenderer
 		freedFrame = frame;
 		foreach ( var (key, state) in views )
 		{
-			if ( state.IsOrphaned || (!state.Rendering && frame - state.LastFrame > ViewIdleFrames) ) invalidViews.Add( key );
+			if ( state.IsOrphaned || (!state.Rendering && IdleLongEnough( frame, state.LastFrame, state.LastTicks )) ) invalidViews.Add( key );
 		}
 
 		FreeIdleCaptures( frame );
@@ -540,6 +553,7 @@ internal sealed partial class SceneBridge : ISceneRenderer
 
 		var state = given ?? StateFor( camera, setup.ViewHash );
 		state.LastFrame = Application.FrameCount;
+		state.LastTicks = System.Diagnostics.Stopwatch.GetTimestamp();
 		state.Drawer.Render = render;
 		state.View.SubWorlds = PrepareExtraWorlds( render, camera, setup, state.Drawer.ExtraWorlds );
 		state.SyncMs = System.Diagnostics.Stopwatch.GetElapsedTime( prepareStart ).TotalMilliseconds;

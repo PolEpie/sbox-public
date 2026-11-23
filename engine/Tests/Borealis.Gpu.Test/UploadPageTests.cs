@@ -112,6 +112,7 @@ public class UploadPageTests : GpuTest
 	public void IdleCommandListsAreFreed()
 	{
 		var freedBefore = Device.CommandListsFreed;
+		var releasedBefore = Device.CommandMemoryReleases;
 		var lists = new CommandList[48];
 		for ( int i = 0; i < lists.Length; i++ ) lists[i] = Device.BeginCommandList( QueueType.Graphics, "Burst" );
 		SyncPoint done = default;
@@ -124,10 +125,38 @@ public class UploadPageTests : GpuTest
 		for ( ulong i = 0; i <= 2 * Device.UploadPageIdleFrames; i++ ) Device.BeginFrame();
 		Assert.AreEqual( Device.KeptFreeCommandLists, Device.FreeCommandLists( QueueType.Graphics ) );
 		Assert.IsTrue( Device.CommandListsFreed - freedBefore >= lists.Length - Device.KeptFreeCommandLists );
+		Assert.AreEqual( Device.KeptFreeCommandLists, Device.CommandMemoryReleases - releasedBefore, "the lists kept gave back what the burst grew them to" );
 
 		// The lists kept still record
 		var again = Device.BeginCommandList( QueueType.Graphics, "Again" );
 		Device.Wait( Device.Submit( again ) );
+	}
+
+	/// <summary>
+	/// Spare lists a window frees are destroyed a few a frame, not all in the frame the window ends: a load's sixty-odd took
+	/// 33 ms of one frame.
+	/// </summary>
+	[TestMethod]
+	public void SpareListsAreFreedAFewAFrame()
+	{
+		for ( ulong i = 0; i <= 2 * Device.UploadPageIdleFrames; i++ ) Device.BeginFrame();
+		var lists = new CommandList[48];
+		for ( int i = 0; i < lists.Length; i++ ) lists[i] = Device.BeginCommandList( QueueType.Graphics, "Burst" );
+		SyncPoint done = default;
+		foreach ( var list in lists ) done = Device.Submit( list );
+		Device.Wait( done );
+
+		// Up to the frame whose window frees the burst's lists
+		var freedBefore = Device.CommandListsFreed;
+		for ( ulong i = 0; i <= 3 * Device.UploadPageIdleFrames && Device.CommandListsFreed == freedBefore; i++ ) Device.BeginFrame();
+		var freed = Device.CommandListsFreed - freedBefore;
+		Assert.IsTrue( freed > Device.ListsFreedPerFrame, $"{freed} lists freed" );
+		Assert.AreEqual( freed, Device.ListsWaitingToBeFreed, "none destroyed in the frame the window ended" );
+
+		Device.BeginFrame();
+		Assert.AreEqual( freed - Device.ListsFreedPerFrame, Device.ListsWaitingToBeFreed );
+		for ( int i = 0; i < freed; i++ ) Device.BeginFrame();
+		Assert.AreEqual( 0, Device.ListsWaitingToBeFreed );
 	}
 
 	/// <summary>Frames that each take many lists keep them: none are freed and made again every window.</summary>
@@ -147,6 +176,82 @@ public class UploadPageTests : GpuTest
 		var freedBefore = Device.CommandListsFreed;
 		for ( ulong i = 0; i <= 2 * Device.UploadPageIdleFrames; i++ ) Frame();
 		Assert.AreEqual( freedBefore, Device.CommandListsFreed, "lists the frames use aren't freed and made again" );
+	}
+
+	/// <summary>
+	/// Going by time, spare command lists wait <see cref="Device.CommandListSpareSeconds"/> before they're freed, longer than
+	/// upload pages: a view that comes back every few seconds finds its lists still there.
+	/// </summary>
+	[TestMethod]
+	public void SpareListsWaitTheirOwnSeconds()
+	{
+		var spareSeconds = Device.Allocator.SpareSeconds;
+		var listSeconds = Device.CommandListSpareSeconds;
+		try
+		{
+			// Two windows by frames first, so spares other tests left are trimmed already
+			for ( ulong i = 0; i <= 2 * Device.UploadPageIdleFrames; i++ ) Device.BeginFrame();
+			Device.Allocator.SpareSeconds = 0.01;
+			Device.CommandListSpareSeconds = 600;
+
+			var lists = new CommandList[48];
+			for ( int i = 0; i < lists.Length; i++ ) lists[i] = Device.BeginCommandList( QueueType.Graphics, "Burst" );
+			SyncPoint done = default;
+			foreach ( var list in lists ) done = Device.Submit( list );
+			Device.Wait( done );
+
+			// Three windows of frames and of the allocator's seconds (two whole ones after the burst), in well under the lists'
+			// seconds: kept
+			for ( int window = 0; window < 3; window++ )
+			{
+				System.Threading.Thread.Sleep( 20 );
+				for ( ulong i = 0; i <= Device.UploadPageIdleFrames; i++ ) Device.BeginFrame();
+			}
+
+			Assert.IsTrue( Device.FreeCommandLists( QueueType.Graphics ) >= lists.Length, $"the burst's lists are kept ({Device.FreeCommandLists( QueueType.Graphics )})" );
+
+			// Past the lists' seconds, for three windows: freed down to those kept
+			Device.CommandListSpareSeconds = 0.01;
+			for ( int window = 0; window < 3; window++ )
+			{
+				System.Threading.Thread.Sleep( 20 );
+				for ( ulong i = 0; i <= Device.UploadPageIdleFrames; i++ ) Device.BeginFrame();
+			}
+
+			Assert.AreEqual( Device.KeptFreeCommandLists, Device.FreeCommandLists( QueueType.Graphics ) );
+		}
+		finally
+		{
+			Device.Allocator.SpareSeconds = spareSeconds;
+			Device.CommandListSpareSeconds = listSeconds;
+		}
+	}
+
+	/// <summary>
+	/// Frames that take a few lists fewer than before (a child view that comes and goes) free the lists they no longer use, but
+	/// the spares kept keep their command memory: the next frames record into them, and each would grow its pool again.
+	/// </summary>
+	[TestMethod]
+	public void SmallDropKeepsTheSparesCommandMemory()
+	{
+		var lists = new CommandList[40];
+		void Frame( int count )
+		{
+			for ( int i = 0; i < count; i++ ) lists[i] = Device.BeginCommandList( QueueType.Graphics, "Steady" );
+			for ( int i = 0; i < count; i++ ) Device.Submit( lists[i] );
+			Device.BeginFrame();
+		}
+
+		// Two windows first, so spares other tests left are trimmed already
+		for ( ulong i = 0; i <= 2 * Device.UploadPageIdleFrames; i++ ) Frame( 40 );
+		var freedBefore = Device.CommandListsFreed;
+		var releasedBefore = Device.CommandMemoryReleases;
+
+		// Ten fewer a frame: the frames in flight leave 10 each spare, over the kept ones but by fewer than are kept
+		for ( ulong i = 0; i <= 2 * Device.UploadPageIdleFrames; i++ ) Frame( 30 );
+		var freed = Device.CommandListsFreed - freedBefore;
+		Assert.IsTrue( freed > 0 && freed < Device.KeptFreeCommandLists, $"{freed} lists freed" );
+		Assert.AreEqual( releasedBefore, Device.CommandMemoryReleases, "the spares kept keep their command memory" );
 	}
 
 	/// <summary>

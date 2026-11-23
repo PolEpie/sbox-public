@@ -186,6 +186,7 @@ internal sealed partial class SceneBridge
 		// frame gain nothing from workers
 		var state = captureFaces[i] ??= new CameraState( camera ) { System = { ParallelRecording = false } };
 		lastCaptureFace = Application.FrameCount;
+		lastCaptureFaceTicks = System.Diagnostics.Stopwatch.GetTimestamp();
 		state.Camera.SetTarget( camera );
 		// What preparing the world loads (a map's textures and lightmaps at the first capture after a load) written with the face's
 		// submission rather than each submitted and waited for
@@ -202,11 +203,12 @@ internal sealed partial class SceneBridge
 	/// <summary>Free the capture faces and their copies and filters.</summary>
 	// The engine frame a capture last rendered a face in, for freeing the faces' systems once captures stop
 	ulong lastCaptureFace;
+	long lastCaptureFaceTicks;
 
-	/// <summary>The capture faces' render systems and targets, once no capture has drawn a face for <see cref="ViewIdleFrames"/> frames.</summary>
+	/// <summary>The capture faces' render systems and targets, once no capture has drawn a face for a while (<see cref="IdleLongEnough"/>).</summary>
 	void FreeIdleCaptures( ulong frame )
 	{
-		if ( spread is not null || lastCaptureFace == 0 || frame - lastCaptureFace <= ViewIdleFrames ) return;
+		if ( spread is not null || lastCaptureFace == 0 || !IdleLongEnough( frame, lastCaptureFace, lastCaptureFaceTicks ) ) return;
 		lastCaptureFace = 0;
 		for ( int i = 0; i < captureFaces.Length; i++ )
 		{
