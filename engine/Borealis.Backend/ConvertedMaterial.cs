@@ -3,6 +3,7 @@ using Borealis.Source2.Shaders;
 using Sandbox.ShaderCompiler;
 using System.IO;
 using System.Linq;
+using System.Threading;
 
 namespace Borealis.Backend;
 
@@ -128,6 +129,50 @@ internal sealed class ConvertedMaterial : SurfaceMaterial
 		}
 
 		featuresSet = features is { Count: > 0 } ? new Dictionary<string, int>( features, StringComparer.OrdinalIgnoreCase ) : null;
+	}
+
+	Dictionary<string, bool> moduleAttributes;
+
+	/// <summary>
+	/// The bool attributes the surface's module declares (<c>BoolAttribute( overlay, true )</c>) for the material's feature
+	/// values, as the material compiler reads them (<see cref="MaterialInputs.Attributes"/>), shared by materials with the
+	/// same features.
+	/// </summary>
+	private protected override bool? ModuleAttribute( string name )
+	{
+		var declared = Volatile.Read( ref moduleAttributes );
+		if ( declared is null ) Volatile.Write( ref moduleAttributes, declared = DeclaredAttributes( Shader, File?.Ints ) );
+		return declared.TryGetValue( name, out var value ) ? value : null;
+	}
+
+	static readonly Dictionary<string, (PassModule Module, Dictionary<string, bool> Attributes)> declaredAttributes = new( StringComparer.OrdinalIgnoreCase );
+
+	static Dictionary<string, bool> DeclaredAttributes( string path, IReadOnlyDictionary<string, int> ints )
+	{
+		var features = new SortedDictionary<string, int>( StringComparer.OrdinalIgnoreCase );
+		foreach ( var (name, value) in ints ?? new Dictionary<string, int>() )
+		{
+			if ( name.StartsWith( "F_", StringComparison.OrdinalIgnoreCase ) ) features[name] = value;
+		}
+
+		var module = ModuleOf( path );
+		var key = path + "|" + string.Join( ",", features.Select( f => $"{f.Key}={f.Value}" ) );
+		lock ( declaredAttributes )
+		{
+			if ( declaredAttributes.TryGetValue( key, out var known ) && ReferenceEquals( known.Module, module ) ) return known.Attributes;
+		}
+
+		var attributes = new Dictionary<string, bool>( StringComparer.OrdinalIgnoreCase );
+		if ( module is not null )
+		{
+			foreach ( var (name, kind, value) in MaterialInputs.Read( module, features ).Attributes )
+			{
+				if ( kind == "Bool" && value is [var first, ..] ) attributes.TryAdd( name, first != 0 );
+			}
+		}
+
+		lock ( declaredAttributes ) declaredAttributes[key] = (module, attributes);
+		return attributes;
 	}
 
 	static bool Fills( MaterialField field, string variable )

@@ -107,9 +107,23 @@ public abstract class SurfaceMaterial : GpuMaterial, IStreamDependent
 	/// <summary>
 	/// A bool attribute of the material as the scene reads it for its objects' flags (<c>overlay</c>, <c>NoZPrepass</c>,
 	/// <c>DoNotCastShadows</c>, <c>bWantsFBCopyTexture</c>): a converted <c>.vmat</c>'s are its <c>.shader</c> material's;
-	/// <paramref name="fallback"/> for a material with none.
+	/// <paramref name="fallback"/> for a material with none. A surface standing in for a deleted <c>.shader</c> has no
+	/// static combos to read them from: after the material's own, it answers what its module declares for its features
+	/// (<see cref="ModuleAttribute"/>), so a map's <c>static_overlay</c> decals stay overlays.
 	/// </summary>
-	internal bool Attribute( string name, bool fallback ) => attributes?.Value is { } source ? source.Attribute( name, fallback ) : fallback;
+	internal bool Attribute( string name, bool fallback )
+	{
+		var source = attributes?.Value;
+		if ( source?.Shader is not null ) return source.Attribute( name, fallback );
+		var declared = ModuleAttribute( name ) ?? fallback;
+		return source is null ? declared : source.Attribute( name, declared );
+	}
+
+	/// <summary>
+	/// A bool attribute its surface's module declares for the material's feature values (<c>BoolAttribute( overlay, true )</c>),
+	/// as a <c>.shader</c>'s static combos export it; null when it declares none.
+	/// </summary>
+	private protected virtual bool? ModuleAttribute( string name ) => null;
 
 	Lazy<BackendMaterial> attributes;
 
