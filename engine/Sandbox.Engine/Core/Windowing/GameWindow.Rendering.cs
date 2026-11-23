@@ -131,6 +131,7 @@ internal sealed partial class GameWindow
 		// The game's half on this thread: its cameras prepared, with every game hook that runs for them (the extract). One that
 		// throws leaves the frame undrawn by the game: said, and the window shows the overlay over the cleared image
 		extractThrew = false;
+		Rendering.GameDrawExtract.BeginFrame();
 		try
 		{
 			using ( global::Borealis.Zones.Extract.Start() )
@@ -139,6 +140,10 @@ internal sealed partial class GameWindow
 				drawnScene = IGameInstanceDll.Current is null ? null : Game.ExtractRender( drawnCameras );
 				using ( menuRender.Start() )
 					IMenuDll.Current?.OnRender( default );
+
+				// The game's own custom objects' drawing, recorded per camera for the render thread to replay, when the frame may
+				// draw there; last frame's recordings let go either way
+				Rendering.GameDrawExtract.Extract( drawnCameras, record: drawnScene is not null && DrawsHereAnyway() is null );
 			}
 		}
 		catch ( Exception e )
@@ -160,7 +165,16 @@ internal sealed partial class GameWindow
 			return;
 		}
 
-		DrawFrame();
+		// Drawn here, a game's custom objects run their drawing, which teaches the extract what they draw in
+		Rendering.GameDrawExtract.Learning( true );
+		try
+		{
+			DrawFrame();
+		}
+		finally
+		{
+			Rendering.GameDrawExtract.Learning( false );
+		}
 	}
 
 	/// <summary>The last frame whose drawing was handed to the render thread, for the deadline latency mode.</summary>
@@ -190,12 +204,19 @@ internal sealed partial class GameWindow
 	/// </summary>
 	string InlineReason()
 	{
+		if ( DrawsHereAnyway() is { } here ) return here;
+		if ( Game.IsPlaying && Game.ActiveScene is not null && drawnScene is null && !extractThrew ) return "loading";
+		if ( Rendering.RenderSync.GameDrawsInFrame is { } game ) return game;
+		return null;
+	}
+
+	// Why this frame draws on the main thread whatever the game draws in it, or null (known before the extract)
+	static string DrawsHereAnyway()
+	{
 		if ( !BorealisGpuFrameThread.Enabled ) return "serial";
 		if ( !BorealisGpuFrameThread.Draws ) return "off";
-		if ( Game.IsPlaying && Game.ActiveScene is not null && drawnScene is null && !extractThrew ) return "loading";
 		if ( Sandbox.Diagnostics.DevTools.IsOpen ) return "dev tools";
 		if ( ScreenRecorder.IsRecording() ) return "recording";
-		if ( Rendering.RenderSync.GameDrawsInFrame is { } game ) return game;
 		return null;
 	}
 

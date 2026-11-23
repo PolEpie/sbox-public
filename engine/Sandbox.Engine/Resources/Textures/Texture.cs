@@ -127,6 +127,30 @@ public partial class Texture : Resource, IDisposable
 		DirtyVersion++;
 	}
 
+	/// <summary>
+	/// Refreshes cached metadata when the texture behind a strong handle changes: a baked texture written over its file and
+	/// reloaded in place. Its description, file header and sheet are read again when next used, and what every device made
+	/// of the old contents is released.
+	/// </summary>
+	internal void RefreshNativeDescription()
+	{
+		// One made at run time keeps what it was made with: its handle hasn't changed
+		if ( !describedAtCreation )
+		{
+			gotdesc = false;
+			_desc = default;
+			fileHeader = null;
+			fileHeaderRead = false;
+		}
+
+		sheetRead = false;
+
+		RenderBackend.Default.Release( this );
+		RenderBackend.ReleaseEverywhere( this );
+
+		DirtyVersion++;
+	}
+
 	/// <summary>How many textures were described from their files, and how many by asking Source 2, for diagnostics.</summary>
 	internal static int DescribedFromFiles, DescribedBySource2;
 

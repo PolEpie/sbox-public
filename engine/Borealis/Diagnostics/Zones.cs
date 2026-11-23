@@ -70,6 +70,7 @@ internal static class Zones
 	public static readonly Zone RenderThreadFrame = new( "Borealis Render Thread Frame", Color.Blue );
 	public static readonly Zone SyncPoint = new( "Borealis Sync Point", Color.Cyan );
 	public static readonly Zone Extract = new( "Borealis Extract", Color.Cyan );
+	public static readonly Zone CustomExtract = new( "Borealis Custom Object Extract", Color.Cyan );
 
 	/// <summary>Sandbox.ShaderCompiler's phases (<c>CompilePhase</c>), by value.</summary>
 	public static readonly Zone[] Slang =

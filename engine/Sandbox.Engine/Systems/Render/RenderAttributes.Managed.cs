@@ -193,6 +193,12 @@ internal sealed class ManagedRenderAttributes
 	}
 
 	/// <summary>
+	/// Whether the set is written only while no frame reads it, between the render thread's frames (a game drawing's
+	/// recording, written in the extract and read by the frame it hands over): its writes never need a copy for a frame.
+	/// </summary>
+	internal bool BetweenFrames { get; set; }
+
+	/// <summary>
 	/// The store a write goes into. While a frame handed over may be drawing on the render thread (<see cref="Rendering.RenderSync.Overlapping"/>),
 	/// the main thread's first write since the hand-over leaves the store as it was for that frame and goes on in a copy, so the
 	/// frame reads every value as it was handed over, as it reads them on the main thread before the next update writes them. A
@@ -200,7 +206,7 @@ internal sealed class ManagedRenderAttributes
 	/// </summary>
 	Store Writing()
 	{
-		if ( !Rendering.RenderSync.Overlapping || ThreadSafe.IsRenderThread ) return current;
+		if ( !Rendering.RenderSync.Overlapping || ThreadSafe.IsRenderThread || BetweenFrames ) return current;
 		var epoch = Rendering.RenderSync.Epoch;
 		if ( splitEpoch == epoch ) return current;
 

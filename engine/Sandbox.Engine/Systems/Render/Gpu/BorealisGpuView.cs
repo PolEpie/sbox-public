@@ -162,13 +162,19 @@ internal sealed class BorealisGpuView : Graphics.IFrameView, IDisposable
 	/// flag and its combo; outside every volume they're cleared, and the shaders light from the environment maps instead.
 	/// Only the managed values are written, which are all Borealis.Gpu reads.
 	/// </summary>
-	void Graphics.IFrameView.SetupLighting( SceneObject obj, RenderAttributes attributes )
+	void Graphics.IFrameView.SetupLighting( SceneObject obj, RenderAttributes attributes ) => SetupLighting( obj, attributes, LightingWorld, LightingSubWorlds );
+
+	/// <summary>
+	/// <see cref="Graphics.SetupLighting"/> for a view lighting from <paramref name="lightingWorld"/>'s volumes that a view
+	/// showing <paramref name="subWorlds"/> shows (null: the object's own world, all of its volumes).
+	/// </summary>
+	internal static void SetupLighting( SceneObject obj, RenderAttributes attributes, Borealis.RenderWorld lightingWorld, ulong subWorlds )
 	{
 		if ( attributes.ManagedValues is not { } values ) return;
-		var world = LightingWorld ?? obj.RenderObject?.World;
+		var world = lightingWorld ?? obj.RenderObject?.World;
 		if ( world is null ) return;
 
-		if ( LightProbeConstants( world, LightingWorld is null ? ~0UL : LightingSubWorlds, obj ) is { } constants )
+		if ( LightProbeConstants( world, lightingWorld is null ? ~0UL : subWorlds, obj ) is { } constants )
 		{
 			// The same volume as last time (a set filled each frame) changes nothing
 			if ( values.Get( ProbeConstantsName ) is byte[] held && held.AsSpan().SequenceEqual( constants ) && values.GetCombo( ProbeComboName ) == 1 && values.GetFloats( UsesProbeName ) is [1f] ) return;

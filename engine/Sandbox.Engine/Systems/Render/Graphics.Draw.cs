@@ -131,8 +131,10 @@ public static partial class Graphics
 
 		if ( !obj.IsValid() ) return;
 
-		// Native draws it through its layer's view; a Borealis frame draws it from its own copy of the object
-		_state.view?.RenderSceneObject( obj, transform ?? obj.Transform, color ?? Color.White, material, Attributes );
+		// Native draws it through its layer's view; a Borealis frame draws it from its own copy of the object. On the render
+		// thread the object's transform is its render object's, as the sync point wrote it: the game may be moving it meanwhile
+		var at = transform ?? (Rendering.RenderSync.OnRenderThread && obj.RenderObject is { } drawn ? drawn.Transform : obj.Transform);
+		_state.view?.RenderSceneObject( obj, at, color ?? Color.White, material, Attributes );
 	}
 
 	/// <summary>

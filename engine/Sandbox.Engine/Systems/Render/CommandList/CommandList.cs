@@ -312,7 +312,6 @@ public sealed unsafe partial class CommandList
 		lock ( _lock )
 		{
 			Writing( clearing: true );
-			ForgetRendererDraws();
 			if ( _resources is not null )
 			{
 				foreach ( var resource in _resources )
