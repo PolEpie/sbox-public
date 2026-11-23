@@ -21,7 +21,7 @@ internal sealed partial class BackendContext
 	}
 
 	ShaderAttributes idsViewAttributes;
-	byte[] idsViewConstants, idsViewTables;
+	byte[] idsViewConstants;
 
 	/// <inheritdoc/>
 	internal override IdsViewResult ResolveIdsView( object view, GpuTexture target, Rect viewport, IdsView mode )
@@ -67,10 +67,6 @@ internal sealed partial class BackendContext
 		attributes.Set( "BorealisIdsViewOut", output.Handle );
 		attributes.SetCombo( "D_MSAA", visibility.Samples > 1 ? 1 : 0 );
 		attributes.SetData( "BorealisIdsView_t", idsViewConstants );
-		var slots = device.GpuDrivenTables.Slots;
-		idsViewTables ??= new byte[Marshal.SizeOf<GpuDrivenConstants>()];
-		MemoryMarshal.Write( idsViewTables, new GpuDrivenConstants { Draws = (uint)slots.Draws, Geometry = (uint)slots.Geometry, Materials = (uint)slots.Materials, Lighting = (uint)slots.Lighting } );
-		attributes.SetData( "BorealisGpuDriven_t", idsViewTables );
 		cullDrawer.Dispatch( r.List, shader, attributes, width, height, 1 );
 
 		r.List.Marker( "end Ids view" );
