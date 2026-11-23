@@ -43,6 +43,12 @@ public partial class SceneObject
 	}
 
 	/// <summary>
+	/// Hands this object to the native twin made next, for its handle: only when it gets one (<see cref="MakesNativeTwin"/>).
+	/// One made without a twin isn't in the handle index, so nothing waits for a native object that's never made.
+	/// </summary>
+	private protected IHandle.NextHandleScope NextHandleForTwin() => IHandle.MakeNextHandle( MakesNativeTwin ? this : null );
+
+	/// <summary>
 	/// Made without a native twin (<see cref="MakesNativeTwin"/> off): in its world and its renderer as <see cref="OnNativeInit"/>
 	/// puts one, with native's defaults for what a new native object would have had (visible, white, no layer match, no LOD
 	/// override, batchable, the model's default mesh groups or all of them without a model).
