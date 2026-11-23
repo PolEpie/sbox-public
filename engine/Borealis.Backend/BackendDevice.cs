@@ -2515,12 +2515,35 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 		~VisibilityView() => Retire?.Enqueue( this );
 
 		/// <summary>Every buffer it made.</summary>
-		public IEnumerable<BufferHandle> Buffers() => [Mask, Stamps, .. Compacted, PrepassCompacted, PrepassCompacted16, MeshletStamps, MeshletJobs, .. HiZVisible, HiZ, IdsCalls];
+		public IEnumerable<BufferHandle> Buffers() => [Mask, Stamps, Compacted, PrepassCompacted, PrepassCompacted16, MeshletStamps, MeshletJobs, .. HiZVisible, HiZ, IdsCalls];
 
+		/// <summary>
+		/// The ids target and the id prepass's scratch target, at <see cref="Width"/> by <see cref="Height"/>: made when a
+		/// prepass first draws ids into the view and freed once none has for a while (<see cref="BackendDevice.IdsTargetsFor"/>),
+		/// readable without the lock once <see cref="IdsReady"/> says so.
+		/// </summary>
 		public TextureHandle Ids, Scratch;
+		public volatile bool IdsReady;
+
+		/// <summary>Whether a prepass call asked for <see cref="Ids"/> while they weren't there.</summary>
+		public bool IdsWanted;
+
+		/// <summary>Ids targets made on a worker, put in place before the view's next frame.</summary>
+		public TextureHandle PendingIds, PendingScratch;
+
+		/// <summary>The frames (<see cref="GpuDrivenFrame"/>) a prepass last drew ids into the view and a forward pass last compacted from them.</summary>
+		public uint IdsFrame, ListsFrame;
+
+		/// <summary>The size of the view's depth target, which its ids and compacted buffer are made for.</summary>
 		public int Width, Height, Samples;
 		public BufferHandle Mask, Stamps;
-		public readonly BufferHandle[] Compacted = new BufferHandle[3];
+
+		/// <summary>
+		/// Forward's compacted indices (the triangles that own a sample), made with the view: written and drawn within a frame on
+		/// the graphics queue, after the barrier that clears the view's buffers (<c>BeginGpuDrivenView</c>) waited for the frames
+		/// before, so one is enough. Its cursor is its first words (<see cref="CompactedCursorIndices"/>).
+		/// </summary>
+		public BufferHandle Compacted;
 
 		/// <summary>
 		/// The prepass's kept meshlets' indices (<see cref="Meshlets"/>), made when a prepass first culls meshlets: written
@@ -2600,7 +2623,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 		public int IdsCallCount;
 
 		/// <summary>Every texture it made.</summary>
-		public IEnumerable<TextureHandle> Textures() => [Ids, Scratch];
+		public IEnumerable<TextureHandle> Textures() => [Ids, Scratch, PendingIds, PendingScratch];
 
 		/// <summary>
 		/// Indices at the start of each compacted buffer that hold its cursor instead: every call compacting into the view
@@ -2809,7 +2832,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 		var list = Gpu.BeginCommandList( QueueType.Graphics, "Borealis visibility made mid-frame" );
 		if ( compacted )
 		{
-			foreach ( var buffer in state.Compacted ) list.FillBuffer( buffer, VisibilityView.CompactedCursorIndices, 0, 4 );
+			list.FillBuffer( state.Compacted, VisibilityView.CompactedCursorIndices, 0, 4 );
 		}
 
 		if ( prepass.IsValid )
@@ -2851,9 +2874,17 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 		{
 			foreach ( var (_, state) in visibilityViews )
 			{
-				if ( !state.Ready || GpuDrivenFrame - state.ClearedFrame < IdleVisibilityFrames ) continue;
-				FreeVisibility( state );
-				VisibilityViewsIdled++;
+				if ( !state.Ready ) continue;
+				if ( GpuDrivenFrame - state.ClearedFrame >= IdleVisibilityFrames )
+				{
+					FreeVisibility( state );
+					VisibilityViewsIdled++;
+				}
+				else if ( state.IdsReady && GpuDrivenFrame - state.IdsFrame >= IdleVisibilityFrames )
+				{
+					FreeIdsTargets( state );
+					VisibilityIdsIdled++;
+				}
 			}
 		}
 	}
@@ -2862,6 +2893,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	// Under the visibility lock
 	void FreeVisibility( VisibilityView state )
 	{
+		state.IdsReady = false;
 		foreach ( var buffer in state.Buffers() )
 		{
 			if ( buffer.IsValid && visibilityBuffers.Remove( buffer ) ) Gpu.Destroy( buffer );
@@ -2878,8 +2910,9 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 		state.HiZWidth = state.HiZHeight = state.HiZLevels = 0;
 		state.HiZWrote = state.HiZReadValid = false;
 		(state.HiZBuiltFrame, state.HiZBuiltBy) = (0, null);
-		state.Compacted.AsSpan().Clear();
-		state.Ids = state.Scratch = default;
+		state.Compacted = default;
+		state.Ids = state.Scratch = state.PendingIds = state.PendingScratch = default;
+		state.IdsWanted = false;
 		state.IdsCalls = default;
 		state.IdsCallCount = 0;
 		state.MeshletStampsAttribute = null;
@@ -2953,33 +2986,20 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 
 			// Room for every sample's triangle: made with the view, and made again when its target grows past it
 			var compacted = CompactedIndicesFor( depth );
-			if ( !state.Compacted[0].IsValid || compacted > state.CompactedCapacity )
+			if ( !state.Compacted.IsValid || compacted > state.CompactedCapacity )
 			{
-				for ( int i = 0; i < state.Compacted.Length; i++ )
-				{
-					if ( state.Compacted[i].IsValid && visibilityBuffers.Remove( state.Compacted[i] ) ) Gpu.Destroy( state.Compacted[i] );
-					state.Compacted[i] = VisibilityCompacted( compacted );
-					visibilityBuffers.Add( state.Compacted[i] );
-				}
-
+				if ( state.Compacted.IsValid && visibilityBuffers.Remove( state.Compacted ) ) Gpu.Destroy( state.Compacted );
+				state.Compacted = VisibilityCompacted( compacted );
+				visibilityBuffers.Add( state.Compacted );
 				state.CompactedCapacity = compacted;
 				ClearMadeAfterClear( state, compacted: true, prepass: default );
 			}
 
+			// Its ids targets are made at its new size when a prepass next draws ids (IdsTargetsFor)
 			if ( depth.Width != 0 && (state.Width != depth.Width || state.Height != depth.Height || state.Samples != depth.Samples) )
 			{
-				foreach ( var old in (TextureHandle[])[state.Ids, state.Scratch] )
-				{
-					if ( !old.IsValid ) continue;
-					visibilityTextures.Remove( old );
-					Gpu.Destroy( old );
-				}
-
-				(state.Scratch, state.Ids) = VisibilityTargets( depth );
-				visibilityTextures.Add( state.Scratch );
-				visibilityTextures.Add( state.Ids );
+				FreeIdsTargets( state );
 				(state.Width, state.Height, state.Samples) = (depth.Width, depth.Height, depth.Samples);
-				ClearIdsMadeAfterClear( state );
 			}
 
 			state.Ready = true;
@@ -2998,9 +3018,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 			using var zone = Zones.VisibilityMake.Start();
 			var compacted = CompactedIndicesFor( depth );
 			var (mask, stamps) = (VisibilityMask(), VisibilityStamps());
-			var buffers = new BufferHandle[3];
-			for ( int i = 0; i < buffers.Length; i++ ) buffers[i] = VisibilityCompacted( compacted );
-			var (scratch, ids) = VisibilityTargets( depth );
+			var buffer = VisibilityCompacted( compacted );
 			var idsCalls = IdsNormals ? VisibilityIdsCalls() : default;
 
 			VisibilityView state;
@@ -3010,10 +3028,8 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 				if ( state.Ready || state.Mask.IsValid )
 				{
 					// Made meanwhile where it was asked
-					foreach ( var buffer in (BufferHandle[])[mask, stamps, .. buffers] ) Gpu.Destroy( buffer );
+					foreach ( var made in (BufferHandle[])[mask, stamps, buffer] ) Gpu.Destroy( made );
 					if ( idsCalls.IsValid ) Gpu.Destroy( idsCalls );
-					Gpu.Destroy( scratch );
-					Gpu.Destroy( ids );
 					return;
 				}
 
@@ -3026,12 +3042,9 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 				(state.Mask, state.Stamps) = (mask, stamps);
 				visibilityBuffers.Add( mask );
 				visibilityBuffers.Add( stamps );
-				buffers.CopyTo( state.Compacted, 0 );
-				visibilityBuffers.AddRange( buffers );
+				state.Compacted = buffer;
+				visibilityBuffers.Add( buffer );
 				state.CompactedCapacity = compacted;
-				(state.Scratch, state.Ids) = (scratch, ids);
-				visibilityTextures.Add( scratch );
-				visibilityTextures.Add( ids );
 				(state.Width, state.Height, state.Samples) = (depth.Width, depth.Height, depth.Samples);
 				state.Ready = true;
 			}
@@ -3056,35 +3069,161 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 
 	BufferHandle VisibilityIdsCalls() => Gpu.CreateBuffer( new BufferInfo { Size = VisibilityView.MaxIdsCalls * VisibilityView.IdsCallBytes, Usage = BufferUsage.Storage | BufferUsage.CopyDestination, Name = "Borealis visibility ids calls" } );
 
-	/// <summary>
-	/// With <see cref="IdsNormals"/>, a view's ids target made after this frame cleared the view's (its depth target changed
-	/// size): cleared and left readable as that clear leaves it, in a list of its own submitted now, since this frame's calls
-	/// load it. Under the visibility lock.
-	/// </summary>
-	void ClearIdsMadeAfterClear( VisibilityView state )
-	{
-		if ( !IdsNormals || state.ClearedFrame != GpuDrivenFrame || !state.Ids.IsValid ) return;
-		var list = Gpu.BeginCommandList( QueueType.Graphics, "Borealis visibility ids made mid-frame" );
-		list.Barrier( Borealis.Gpu.TextureBarrier.Transition( state.Ids, ImageLayout.Undefined, ImageLayout.CopyDestination, PipelineStage.AllCommands, MemoryAccess.None, PipelineStage.Transfer, MemoryAccess.TransferWrite ) );
-		list.ClearTexture( state.Ids );
-		list.Barrier( Borealis.Gpu.TextureBarrier.Transition( state.Ids, ImageLayout.CopyDestination, ImageLayout.ShaderRead, PipelineStage.Transfer, MemoryAccess.TransferWrite, PipelineStage.AllCommands, MemoryAccess.MemoryRead ) );
-		Gpu.Submit( list );
-	}
-
 	BufferHandle VisibilityCompacted( int indices ) => Gpu.CreateBuffer( new BufferInfo { Size = indices * 4L, Usage = BufferUsage.Index | BufferUsage.Storage | BufferUsage.CopyDestination, Name = "Borealis visibility triangles" } );
 
-	// Target 0 of the id prepass (the authored output, which only its alpha to coverage is wanted from) and the ids
-	(TextureHandle Scratch, TextureHandle Ids) VisibilityTargets( in TextureInfo depth )
+	// Views whose ids targets are being made on a worker
+	readonly HashSet<VisibilityView> idsMaking = new( ReferenceEqualityComparer.Instance );
+
+	/// <summary>
+	/// Whether a prepass call may draw ids into a view: its ids target and scratch target (<see cref="VisibilityView.Ids"/>)
+	/// are there. Otherwise the call notes that ids are wanted, and they're made before the view's next frame
+	/// (<see cref="PrepareIdsTargets"/>), so a view whose prepass draws no ids holds none. Notes that this frame draws ids.
+	/// </summary>
+	internal bool IdsTargetsFor( VisibilityView state )
 	{
-		var scratch = Gpu.CreateTexture( new TextureInfo { Width = depth.Width, Height = depth.Height, Depth = 1, Layers = 1, Mips = 1, Samples = depth.Samples, Dimension = TextureDimension.Texture2D, Format = Format.R8Unorm, Usage = TextureUsage.ColorTarget, Name = "Borealis visibility scratch" } );
+		if ( state.IdsReady )
+		{
+			state.IdsFrame = GpuDrivenFrame;
+			return true;
+		}
+
+		state.IdsWanted = true;
+		return false;
+	}
+
+	/// <summary>
+	/// Before a frame's calls of the view (<c>BackendContext.BeginGpuDrivenView</c>, ahead of its clear): the ids targets a
+	/// call asked for, made at the view's size, so every call of the frame decides the same. While loading asynchronously
+	/// (<see cref="MakeVisibilityAhead"/>) they're made on a worker and put in place at the first frame after, the prepass
+	/// drawing without ids until then, as on the view's first frame. Freed once no prepass has drawn ids for
+	/// <see cref="IdleVisibilityFrames"/>.
+	/// </summary>
+	internal void PrepareIdsTargets( VisibilityView state )
+	{
+		if ( state.IdsReady || !state.IdsWanted && !state.PendingIds.IsValid || !state.Ready || state.Width == 0 ) return;
+		lock ( visibilityViews )
+		{
+			if ( state.PendingIds.IsValid )
+			{
+				var (ids, scratch) = (state.PendingIds, state.PendingScratch);
+				state.PendingIds = state.PendingScratch = default;
+				if ( Gpu.InfoOf( ids ) is var info && (info.Width, info.Height, info.Samples) == (state.Width, state.Height, state.Samples) )
+				{
+					(state.Ids, state.Scratch) = (ids, scratch);
+					(state.IdsWanted, state.IdsReady) = (false, true);
+					return;
+				}
+
+				// Made for the size the view had
+				foreach ( var texture in (TextureHandle[])[ids, scratch] )
+				{
+					if ( visibilityTextures.Remove( texture ) ) Gpu.Destroy( texture );
+				}
+			}
+
+			if ( MakeVisibilityAhead && AsyncModels )
+			{
+				if ( idsMaking.Add( state ) ) System.Threading.ThreadPool.UnsafeQueueUserWorkItem( static s => s.Device.MakeIdsTargets( s.State, ahead: true ), (Device: this, State: state), preferLocal: false );
+				return;
+			}
+		}
+
+		MakeIdsTargets( state, ahead: false );
+	}
+
+	// A view's ids targets, made without the lock and kept unless the view changed meanwhile: in place now, or made ahead on
+	// a worker for the next frame to put in place
+	void MakeIdsTargets( VisibilityView state, bool ahead )
+	{
+		try
+		{
+			using var zone = Zones.VisibilityMake.Start();
+			int width, height, samples;
+			lock ( visibilityViews )
+			{
+				if ( state.IdsReady || state.PendingIds.IsValid || !state.Ready ) return;
+				(width, height, samples) = (state.Width, state.Height, state.Samples);
+			}
+
+			var (scratch, ids) = VisibilityTargets( width, height, samples );
+			lock ( visibilityViews )
+			{
+				if ( state.IdsReady || state.PendingIds.IsValid || !state.Ready || (state.Width, state.Height, state.Samples) != (width, height, samples) )
+				{
+					Gpu.Destroy( scratch );
+					Gpu.Destroy( ids );
+					return;
+				}
+
+				visibilityTextures.Add( scratch );
+				visibilityTextures.Add( ids );
+				if ( ahead ) (state.PendingIds, state.PendingScratch) = (ids, scratch);
+				else
+				{
+					(state.Ids, state.Scratch) = (ids, scratch);
+					(state.IdsWanted, state.IdsReady) = (false, true);
+				}
+			}
+		}
+		catch ( GpuException ) when ( ahead )
+		{
+			// Out of memory: asked again the next frame, made where it's asked from then on, which reports it
+		}
+		finally
+		{
+			if ( ahead )
+			{
+				lock ( visibilityViews ) idsMaking.Remove( state );
+			}
+		}
+	}
+
+	// A view's ids targets, destroyed once the GPU is done with them. Under the visibility lock
+	void FreeIdsTargets( VisibilityView state )
+	{
+		state.IdsReady = false;
+		foreach ( var texture in state.Textures() )
+		{
+			if ( texture.IsValid && visibilityTextures.Remove( texture ) ) Gpu.Destroy( texture );
+		}
+
+		state.Ids = state.Scratch = state.PendingIds = state.PendingScratch = default;
+	}
+
+	/// <summary>
+	/// For <c>GraphMeasure</c>: each view's visibility set, its size, whether its ids targets are there and how many frames ago
+	/// it was last cleared, drew ids and compacted, a line each.
+	/// </summary>
+	internal string VisibilityViewsReport()
+	{
+		var text = new System.Text.StringBuilder( "width\theight\tsamples\tready\tids\tcleared_ago\tids_ago\tlists_ago\tcompacted_bytes\n" );
+		lock ( visibilityViews )
+		{
+			foreach ( var (_, s) in visibilityViews )
+			{
+				uint Ago( uint frame ) => frame == 0 ? uint.MaxValue : GpuDrivenFrame - frame;
+				text.Append( System.Globalization.CultureInfo.InvariantCulture, $"{s.Width}\t{s.Height}\t{s.Samples}\t{s.Ready}\t{s.IdsReady}\t{Ago( s.ClearedFrame )}\t{Ago( s.IdsFrame )}\t{Ago( s.ListsFrame )}\t{(s.Compacted.IsValid ? Gpu.SizeOf( s.Compacted ) : 0)}\n" );
+			}
+		}
+
+		return text.ToString();
+	}
+
+	/// <summary>Views' ids targets freed after their prepasses stopped drawing ids, for soaks and tests.</summary>
+	public int VisibilityIdsIdled { get; private set; }
+
+	// Target 0 of the id prepass (the authored output, which only its alpha to coverage is wanted from) and the ids
+	(TextureHandle Scratch, TextureHandle Ids) VisibilityTargets( int width, int height, int samples )
+	{
+		var scratch = Gpu.CreateTexture( new TextureInfo { Width = width, Height = height, Depth = 1, Layers = 1, Mips = 1, Samples = samples, Dimension = TextureDimension.Texture2D, Format = Format.R8Unorm, Usage = TextureUsage.ColorTarget, Name = "Borealis visibility scratch" } );
 		var ids = Gpu.CreateTexture( new TextureInfo
 		{
-			Width = depth.Width,
-			Height = depth.Height,
+			Width = width,
+			Height = height,
 			Depth = 1,
 			Layers = 1,
 			Mips = 1,
-			Samples = depth.Samples,
+			Samples = samples,
 			Dimension = TextureDimension.Texture2D,
 			Format = IdsFormat,
 			Usage = TextureUsage.ColorTarget | TextureUsage.Sampled | (IdsNormals ? TextureUsage.CopyDestination : 0) | (Figure is not null ? TextureUsage.CopySource : 0),
@@ -3249,6 +3388,9 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	/// <summary>The frame's composite morph atlas, which <see cref="BackendMorphs"/> queue meshes in.</summary>
 	internal MorphAtlas Morphs => morphs ??= new MorphAtlas( this );
 
+	/// <summary>For <c>GraphMeasure</c>: the morph atlas's height (0 while there's none) and the frames since anything morphed, a line.</summary>
+	internal string MorphReport() => morphs is { } m ? $"morph atlas\t{m.MadeHeight}\tidle\t{m.IdleFor}\tresized\t{m.Resized}\tlongest_ms\t{m.LongestResize:0.000}\tfreed\t{m.Freed}\n" : "morph atlas\tnone\n";
+
 	MorphAtlas morphs;
 
 	/// <inheritdoc/>
@@ -3346,7 +3488,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	public void BeginDeviceFrame()
 	{
 		// Before the device recycles lists: the last frame's still say where they were submitted
-		GraphMeasureReport.BeginFrame( Gpu );
+		GraphMeasureReport.BeginFrame( Gpu, this );
 
 		using ( Zones.DeviceFrame.Start() )
 			Gpu.BeginFrame();
@@ -3363,6 +3505,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 			FreeRetiredVisibility();
 			if ( GpuDrivenFrame % 60 == 0 ) FreeIdleVisibility();
 			FreeUnheldModels();
+			morphs?.BeginFrame();
 			surfaces?.Records.BeginFrame();
 			gpuDrivenTables?.BeginFrame();
 			if ( meshletStore is { } meshlets ) meshlets.Loading = Loading;

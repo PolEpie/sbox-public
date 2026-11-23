@@ -48,6 +48,9 @@ public abstract class GpuTest
 			Assert.Inconclusive( e.Message );
 		}
 
+		// Spares go by frames in the tests, which run thousands of frames in moments; the tests of keeping them by time set it
+		Device.Allocator.SpareSeconds = 0;
+
 		// Tests check the pixels of the frames they draw: no draw is skipped for a pipeline workers are still making
 		Device.SkipDrawsUntilReady = false;
 

@@ -33,10 +33,11 @@ internal sealed partial class BorealisGpuRenderBackend
 		BiasMips( next );
 		services.Loading = GameLoading( Sandbox.Engine.GlobalContext.Game?.ActiveScene );
 
-		frameThread ??= new BorealisGpuFrameThread( startAhead ??= StartAhead, renderThread: BorealisGpuFrameThread.Draws );
+		frameThread ??= NewFrameThread( BorealisGpuFrameThread.Draws );
 		aheadFrame = next;
 		aheadDeviceFrame = gpu.FrameNumber + 1;
 		aheadWindow = window;
+		ArmKeepPresenting( window );
 		frameThread.HandOver();
 	}
 
@@ -63,12 +64,13 @@ internal sealed partial class BorealisGpuRenderBackend
 		BiasMips( next );
 		services.Loading = GameLoading( Sandbox.Engine.GlobalContext.Game?.ActiveScene );
 
-		frameThread ??= new BorealisGpuFrameThread( startAhead ??= StartAhead, renderThread: true );
+		frameThread ??= NewFrameThread( renderThread: true );
 		renderDraw = draw;
 		drawFrame = Application.FrameCount;
 		aheadFrame = next;
 		aheadDeviceFrame = gpu.FrameNumber + 1;
 		aheadWindow = window;
+		ArmKeepPresenting( window );
 		drawn.Reset();
 		drawing = true;
 		Sandbox.Rendering.RenderSync.HandOver();
@@ -178,7 +180,10 @@ internal sealed partial class BorealisGpuRenderBackend
 		services.BeginDeviceFrame();
 		BorealisGpuFrameThread.Doing = "acquiring the window's image";
 		aheadWindow?.AcquireAhead();
+		StartKeepPresenting();
 	}
+
+	BorealisGpuFrameThread NewFrameThread( bool renderThread ) => new( startAhead ??= StartAhead, renderThread: renderThread, idle: KeepPresenting ? KeepPresentingIdle : null );
 
 	/// <summary>
 	/// Join the frame thread if a frame was handed to it, then finish that frame's start on this thread: what frees the
@@ -189,6 +194,7 @@ internal sealed partial class BorealisGpuRenderBackend
 		// The render thread doesn't join itself: it's drawing the frame the main thread joins
 		if ( frameThread is not { Pending: true } thread || ThreadSafe.IsRenderThread ) return;
 		using var timing = FrameStartTiming.Scope();
+		StopKeepPresenting();
 		var window = aheadWindow;
 		aheadWindow = null;
 		try

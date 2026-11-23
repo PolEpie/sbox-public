@@ -68,6 +68,50 @@ public class FrameThreadTests
 		}
 	}
 
+	/// <summary>
+	/// What the thread does while the main thread is away (the window presenting its last frame again): called once the work
+	/// is done, again after the time it returns, until it returns a negative time; the next hand-over cuts its wait short and
+	/// the join never waits for it.
+	/// </summary>
+	[TestMethod]
+	public void IdleRunsAfterTheWorkUntilItStopsOrTheNextHandOver()
+	{
+		var idles = 0;
+		var stopAfter = 3;
+		var worked = 0;
+		var thread = new Sandbox.BorealisGpuFrameThread( () => worked++, timed: false, idle: () =>
+		{
+			Interlocked.Increment( ref idles );
+			return Volatile.Read( ref idles ) >= Volatile.Read( ref stopAfter ) ? Timeout.InfiniteTimeSpan : TimeSpan.FromMilliseconds( Volatile.Read( ref stopAfter ) == int.MaxValue ? 10_000 : 5 );
+		} );
+
+		try
+		{
+			// Stops by itself after three calls
+			thread.HandOver();
+			thread.Join();
+			var clock = System.Diagnostics.Stopwatch.StartNew();
+			while ( Volatile.Read( ref idles ) < 3 && clock.Elapsed < TimeSpan.FromSeconds( 5 ) ) Thread.Sleep( 1 );
+			Thread.Sleep( 50 );
+			Assert.AreEqual( 3, Volatile.Read( ref idles ), "called until it returned a negative time" );
+
+			// A long wait is cut short by the next hand-over, whose work runs at once
+			Volatile.Write( ref stopAfter, int.MaxValue );
+			thread.HandOver();
+			thread.Join();
+			Assert.AreEqual( 2, worked );
+			clock.Restart();
+			thread.HandOver();
+			thread.Join();
+			Assert.AreEqual( 3, worked );
+			Assert.IsTrue( clock.Elapsed < TimeSpan.FromSeconds( 1 ), $"the hand-over waited {clock.Elapsed} for the idle" );
+		}
+		finally
+		{
+			thread.Dispose();
+		}
+	}
+
 	[TestMethod]
 	public void StoppingWaitsNoLongerThanTheTimeout()
 	{

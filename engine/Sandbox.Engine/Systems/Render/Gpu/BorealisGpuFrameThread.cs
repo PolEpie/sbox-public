@@ -31,6 +31,7 @@ internal sealed class BorealisGpuFrameThread : IDisposable
 	internal static readonly TimeSpan StopTimeout = TimeSpan.FromSeconds( 2 );
 
 	readonly Action work;
+	readonly Func<TimeSpan> idle;
 	readonly Thread thread;
 	readonly bool timed, markRenderThread;
 
@@ -57,11 +58,14 @@ internal sealed class BorealisGpuFrameThread : IDisposable
 
 	/// <summary>
 	/// A thread that runs <paramref name="work"/> each time it's handed a frame; <paramref name="timed"/> times it and the
-	/// joins that wait in the engine's timings (which need the engine's native side).
+	/// joins that wait in the engine's timings (which need the engine's native side). Once the work is done and until the
+	/// next hand-over the thread calls <paramref name="idle"/>, if given, again after each time it returns, until it returns a
+	/// negative time (the window presenting its last frame again while the main thread is away).
 	/// </summary>
-	public BorealisGpuFrameThread( Action work, string name = "Borealis.Gpu frame", bool timed = true, bool renderThread = false )
+	public BorealisGpuFrameThread( Action work, string name = "Borealis.Gpu frame", bool timed = true, bool renderThread = false, Func<TimeSpan> idle = null )
 	{
 		this.work = work;
+		this.idle = idle;
 		this.timed = timed;
 		markRenderThread = renderThread;
 		thread = new Thread( Loop ) { IsBackground = true, Name = name, Priority = ThreadPriority.AboveNormal };
@@ -158,6 +162,13 @@ internal sealed class BorealisGpuFrameThread : IDisposable
 			finally
 			{
 				done.Set();
+			}
+
+			// Until the next hand-over, which ends the wait at once
+			if ( idle is not null )
+			{
+				var wait = idle();
+				while ( wait >= TimeSpan.Zero && !stopping && !go.Wait( wait ) ) wait = idle();
 			}
 		}
 	}

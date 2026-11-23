@@ -73,7 +73,7 @@ public class LayoutPlanTests : GpuTest
 			var again = Frame( plans: true, 1 );
 
 			Assert.AreEqual( 2, unplanned, "without a plan, each segment's list needs its layouts fixed up" );
-			Assert.AreEqual( 2, learning, "the first planned frame learns the plan" );
+			Assert.AreEqual( 1, learning, "the first planned frame learns the plan: the first segment's target starts where the last frame left it, the second's needs moving from where the first left it" );
 			Assert.AreEqual( 0, planned, "a planned frame needs no fix-up lists" );
 			Assert.AreEqual( 0, again, "nor does the next" );
 
@@ -120,6 +120,84 @@ public class LayoutPlanTests : GpuTest
 			Assert.AreEqual( 1f, (float)BitConverter.ToHalf( texels, 0 ), "the last frame's clear" );
 			Assert.AreEqual( 0.5f, (float)BitConverter.ToHalf( texels, 2 ) );
 			BackendDevice.SetLayout( color, ImageLayout.CopySource );
+		}
+		finally
+		{
+			Device.WaitIdle();
+			RenderHost.Current = previousHost;
+		}
+	}
+
+	/// <summary>
+	/// A segment that draws one of two targets in turn, as a point light's shadow segment draws whichever maps are due this
+	/// frame, then a segment that reads it: the plan names last frame's target, not this one, which then starts where it was
+	/// last left (readable, two frames ago) rather than needing a fix-up list each frame. Each frame's target holds its clear.
+	/// </summary>
+	[TestMethod]
+	public void TargetsDrawnInTurnNeedNoFixUps()
+	{
+		using var backend = new BackendDevice( Device );
+		var previousHost = RenderHost.Current;
+		RenderHost.Current = new BackendRenderHost( backend );
+		try
+		{
+			using var first = backend.CreateTexture( TextureDesc.Target( Width, Height, TextureFormat.RGBA16161616F ), "First" );
+			using var second = backend.CreateTexture( TextureDesc.Target( Width, Height, TextureFormat.RGBA16161616F ), "Second" );
+			using var frame = new BackendContext( backend, null );
+			using var drawing = new BackendContext( backend, frame );
+			using var reading = new BackendContext( backend, frame );
+			backend.LayoutPlans = true;
+
+			int Frame( GpuTexture target, float red )
+			{
+				Device.BeginFrame();
+				var before = BackendContext.LayoutFixUps;
+				frame.Begin();
+
+				drawing.BeginSegment( frame, null );
+				drawing.PlanLayouts( 1 );
+				drawing.Bind( new StageTarget
+				{
+					Context = drawing,
+					Attributes = drawing.Attributes,
+					Color = target,
+					Size = new Vector2( Width, Height ),
+					Viewport = new Rect( 0, 0, Width, Height ),
+					MaxZ = 1,
+					ColorFormat = TextureFormat.RGBA16161616F,
+					Samples = 1,
+				} );
+				drawing.Clear( new Color( red, 0.5f, 0.25f, 1 ) );
+				drawing.BarrierToPixelShaderRead( target );
+
+				reading.BeginSegment( frame, null );
+				reading.PlanLayouts( 2 );
+				reading.BarrierToPixelShaderRead( target );
+
+				frame.Submit();
+				drawing.Submit();
+				reading.Submit();
+				Device.WaitIdle();
+				return BackendContext.LayoutFixUps - before;
+			}
+
+			// Each target's first frames learn
+			Frame( first, 0.1f );
+			Frame( second, 0.2f );
+			Frame( first, 0.3f );
+
+			var fixUps = 0;
+			for ( int i = 0; i < 6; i++ ) fixUps += Frame( i % 2 == 0 ? second : first, 0.4f + i * 0.1f );
+			Assert.AreEqual( 0, fixUps, "a target the plan doesn't name starts where it was last left" );
+
+			foreach ( var (target, red) in new[] { (second, 0.8f), (first, 0.9f) } )
+			{
+				var (handle, current) = BackendDevice.Unwrap( target );
+				Assert.AreEqual( ImageLayout.ShaderRead, current );
+				var texels = ReadBack( handle, current );
+				Assert.AreEqual( red, (float)BitConverter.ToHalf( texels, 0 ), 0.01f, "its last frame's clear" );
+				BackendDevice.SetLayout( target, ImageLayout.CopySource );
+			}
 		}
 		finally
 		{
