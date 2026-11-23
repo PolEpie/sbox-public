@@ -1945,6 +1945,12 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	internal const Format IdsColorKey = Format.R32Uint;
 
 	/// <summary>
+	/// An ids pipeline's target 0, the scratch beside the ids: written nowhere (its contents are never stored). Its alpha still
+	/// drives alpha to coverage, which takes the shader's output whatever is written.
+	/// </summary>
+	internal static BlendState IdsScratchBlend => BlendState.NoWrites;
+
+	/// <summary>
 	/// A pipeline for a variant drawing vertices laid out as <paramref name="layout"/> into targets of these formats,
 	/// made once. Mesh vertices are stream 0, instance ids stream 1 (<c>TEXCOORD13</c>), and inputs the mesh lacks, or
 	/// has as integers where the shader wants floats (or the other way round), read the default stream 2, as native's
@@ -1984,7 +1990,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 
 			// A module with task and mesh stages draws with them, and no vertex input
 			var info = variant.Mesh is not null && Gpu.Capabilities.MeshShaders ? variant.MeshPipelineInfo( colors, depth, samples, depthBias, name ).Value : variant.PipelineInfo( streams, attributes, colors, depth, samples, depthBias, name );
-			if ( ids ) info.Blend = [BlendState.Opaque, BlendState.Opaque];
+			if ( ids ) info.Blend = [IdsScratchBlend, BlendState.Opaque];
 			if ( normals ) AddNormalsTarget( ref info, !depthOnly && WritesNormals( variant ) );
 			if ( sets is not null ) info.Sets = sets;
 
