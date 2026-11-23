@@ -386,7 +386,8 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 		if ( busyTimer is null )
 		{
 			if ( services.PassTimer is not null || !gpu.Capabilities.Timestamps ) return;
-			busyTimer = new Borealis.Backend.PassTimer( gpu );
+			// -pass-stats: each pass also counts primitives and shader invocations; closes rendering at scope edges, so not for timing
+			busyTimer = new Borealis.Backend.PassTimer( gpu, statistics: Sandbox.Utility.CommandLine.HasSwitch( "-pass-stats" ) );
 		}
 
 		services.PassTimer ??= busyTimer;
