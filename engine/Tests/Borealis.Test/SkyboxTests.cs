@@ -108,6 +108,45 @@ public class SkyboxTests
 	}
 
 	/// <summary>
+	/// A view clipped at a plane (a planar refraction's oblique projection, <see cref="RenderView.ClipPlane"/>) clips its skybox
+	/// at the same plane taken into skybox space: what's on the near side isn't drawn, as the world's isn't. Without the plane,
+	/// the skybox keeps native's template frustum and draws both.
+	/// </summary>
+	[TestMethod]
+	public void ClippedViewClipsItsSkybox()
+	{
+		var mesh = TestMesh( false );
+		var sky = new RenderWorld();
+		sky.Add( new MeshObject( mesh, new Transform( new Vector3( 5100, 0, -20 ) ) ) );
+		sky.Add( new MeshObject( mesh, new Transform( new Vector3( 5100, 0, 20 ) ) ) );
+		var world = new RenderWorld { Skybox3D = new Skybox3D( sky ) { Origin = new Vector3( 5000, 0, 0 ), Scale = 16 } };
+
+		using var system = new RenderSystem();
+		CollectAndPrepare( system, world, ClippedBelow( -10, clipPlane: false ) );
+		var skybox = system.SkyboxSystem;
+		CollectionAssert.AreEquivalent( new[] { 0, 1 }, skybox.MainPass.Visible( skybox.GetFeature<MeshRenderFeature>() ).ToArray(), "unclipped skybox" );
+
+		CollectAndPrepare( system, world, ClippedBelow( -10, clipPlane: true ) );
+		Assert.IsNotNull( system.SkyboxStats );
+		CollectionAssert.AreEquivalent( new[] { 0 }, skybox.MainPass.Visible( skybox.GetFeature<MeshRenderFeature>() ).ToArray(), "only what's below the plane" );
+	}
+
+	/// <summary>
+	/// <see cref="LookingDownX"/> with <c>CommandList.DrawRefraction</c>'s oblique projection, keeping what's below
+	/// <paramref name="height"/>, and the plane itself when <paramref name="clipPlane"/>.
+	/// </summary>
+	static RenderView ClippedBelow( float height, bool clipPlane )
+	{
+		var view = LookingDownX();
+		var plane = new Plane( new Vector3( 0, 0, height ), Vector3.Down );
+		var projection = Matrix.CreateProjection( view.ZNear, view.ZFar, view.FieldOfView, 1 );
+		view.Projection = Matrix.CreateObliqueProjection( new Transform( view.Position, view.Rotation ), plane, projection );
+		view.ClipPlane = clipPlane ? plane : null;
+		view.Update();
+		return view;
+	}
+
+	/// <summary>
 	/// The skybox's frame records with the main one: its layers are planned in the 3D skybox layer's place, after the main
 	/// frame's opaque layer and before its translucency, and the skybox layer records nothing itself.
 	/// </summary>
