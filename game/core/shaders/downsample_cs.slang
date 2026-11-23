@@ -187,66 +187,76 @@ enum DownsampleMethod
 		return BlurVertically(vDispatchId.xy, (vGroupThreadID.y << 3) + vGroupThreadID.x);
 	}
 
-	// GGX: each 8x8 group blurs a 16x16 output tile, so the apron costs 2.25 fetches per texel instead of 4
-	groupshared uint2 GgxTile[24 * 24];
-	groupshared uint2 GgxRows[24 * 16];
+	// GGX: each 8x8 group blurs a 16x16 output tile, so the apron costs 2.25 fetches per texel instead of 4. Half4s are
+	// held as two planes of packed halves (red-green, blue-alpha), so a lane's read is one bank, and lanes take neighbouring
+	// texels; the rows' 24 stride puts the vertical pass's 32 lanes on 32 banks
+	groupshared uint GgxTileRG[24 * 24];
+	groupshared uint GgxTileBA[24 * 24];
+	groupshared uint GgxRowsRG[24 * 24];
+	groupshared uint GgxRowsBA[24 * 24];
 
 	uint2 PackHalf4( float4 v ) { return uint2( f32tof16( v.r ) | f32tof16( v.g ) << 16, f32tof16( v.b ) | f32tof16( v.a ) << 16 ); }
 	float4 UnpackHalf4( uint2 p ) { return float4( f16tof32( p.x ), f16tof32( p.x >> 16 ), f16tof32( p.y ), f16tof32( p.y >> 16 ) ); }
 
-	void FilterGGX( uint2 vGroupID, uint2 vThread )
+	void FilterGGX( uint2 vGroupID, uint nThread )
 	{
 		int2 vTileOrigin = int2( vGroupID * 16 ) - 4;
 
+		// The 24x24 source tile, a row of lanes along each row of it
 		[unroll]
-		for ( uint y = 0; y < 3; y++ )
+		for ( uint k = 0; k < 9; k++ )
 		{
-			[unroll]
-			for ( uint x = 0; x < 3; x++ )
-			{
-				uint2 t = vThread * 3 + uint2( x, y );
-				GgxTile[t.y * 24 + t.x] = PackHalf4( LoadColorSRGB( vTileOrigin + int2( t ) ) );
-			}
+			uint i = k * 64 + nThread;
+			uint2 p = PackHalf4( LoadColorSRGB( vTileOrigin + int2( i % 24, i / 24 ) ) );
+			GgxTileRG[i] = p.x;
+			GgxTileBA[i] = p.y;
 		}
 
 		GroupMemoryBarrierWithGroupSync();
 
+		// Horizontal: 24 rows of 8 pairs of outputs, three a lane, neighbouring lanes on neighbouring pairs
 		[unroll]
 		for ( uint r = 0; r < 3; r++ )
 		{
-			uint row = vThread.y * 3 + r;
-			uint col = vThread.x * 2;
+			uint item = r * 64 + nThread;
+			uint at = ( item / 8 ) * 24 + ( item % 8 ) * 2;
 			float4 s[10];
 			[unroll]
 			for ( uint i = 0; i < 10; i++ )
-				s[i] = UnpackHalf4( GgxTile[row * 24 + col + i] );
+				s[i] = UnpackHalf4( uint2( GgxTileRG[at + i], GgxTileBA[at + i] ) );
 
-			GgxRows[row * 16 + col] = PackHalf4( BlurPixels( s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8] ) );
-			GgxRows[row * 16 + col + 1] = PackHalf4( BlurPixels( s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9] ) );
+			uint2 a = PackHalf4( BlurPixels( s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8] ) );
+			uint2 b = PackHalf4( BlurPixels( s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9] ) );
+			GgxRowsRG[at] = a.x;
+			GgxRowsBA[at] = a.y;
+			GgxRowsRG[at + 1] = b.x;
+			GgxRowsBA[at + 1] = b.y;
 		}
 
 		GroupMemoryBarrierWithGroupSync();
 
+		// Vertical: 16 columns of 8 pairs of outputs, two a lane, neighbouring lanes on neighbouring columns
 		[unroll]
 		for ( uint c = 0; c < 2; c++ )
 		{
-			uint col = vThread.x * 2 + c;
+			uint item = c * 64 + nThread;
+			uint col = item % 16, pair = item / 16;
 			float4 s[10];
 			[unroll]
 			for ( uint i = 0; i < 10; i++ )
-				s[i] = UnpackHalf4( GgxRows[( vThread.y * 2 + i ) * 16 + col] );
+				s[i] = UnpackHalf4( uint2( GgxRowsRG[( pair * 2 + i ) * 24 + col], GgxRowsBA[( pair * 2 + i ) * 24 + col] ) );
 
-			uint2 vOut = vGroupID * 16 + uint2( col, vThread.y * 2 );
+			uint2 vOut = vGroupID * 16 + uint2( col, pair * 2 );
 			StoreColor( vOut, BlurPixels( s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8] ) );
 			StoreColor( vOut + uint2( 0, 1 ), BlurPixels( s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9] ) );
 		}
 	}
 
 	[numthreads( 8, 8, 1 )]
-	[shader( "compute" )] void MainCs( uint2 vGroupID : SV_GroupID, uint2 vGroupThreadID : SV_GroupThreadID, uint2 vDispatchId : SV_DispatchThreadID )
+	[shader( "compute" )] void MainCs( uint2 vGroupID : SV_GroupID, uint2 vGroupThreadID : SV_GroupThreadID, uint2 vDispatchId : SV_DispatchThreadID, uint nThread : SV_GroupIndex )
 	{
 		if ( D_DOWNSAMPLE_METHOD == DownsampleMethod::GGX )
-			FilterGGX( vGroupID, vGroupThreadID );
+			FilterGGX( vGroupID, nThread );
 		else
 			StoreColor( vDispatchId.xy, FilterGaussianBlur( vGroupID, vGroupThreadID, vDispatchId ) );
 	}
