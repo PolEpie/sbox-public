@@ -85,6 +85,9 @@ public sealed partial class RenderSystem
 			new StageLayer( RenderStage.Tonemapping ),
 			new OutputLayer(),
 			new StageLayer( RenderStage.AfterPostProcess, final: true ),
+
+			// The visibility ids views, over the finished frame and under the tool overlays and UI.
+			new IdsViewLayer(),
 			new ToolOverlayLayer(),
 			new ToolScreenOverlayLayer(),
 			new ScreenOverlayLayer( withDepth: true ),
