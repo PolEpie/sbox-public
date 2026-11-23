@@ -250,27 +250,30 @@ public static partial class Graphics
 		get
 		{
 			AssertRenderBlock();
-
-			var cf = ViewFrustum;
-
-			// Native planes are camera-relative.
-			cf.GetPlane( 0, out var rn, out var rd );
-			cf.GetPlane( 1, out var ln, out var ld );
-			cf.GetPlane( 2, out var tn, out var td );
-			cf.GetPlane( 3, out var bn, out var bd );
-			cf.GetPlane( 4, out var nn, out var nd );
-			cf.GetPlane( 5, out var fn, out var fd );
-
-			var origin = cf.GetCameraPosition();
-			return new Frustum(
-				right: new Plane( rn, rd + origin.Dot( rn ) ),
-				left: new Plane( ln, ld + origin.Dot( ln ) ),
-				top: new Plane( tn, td + origin.Dot( tn ) ),
-				bottom: new Plane( bn, bd + origin.Dot( bn ) ),
-				near: new Plane( nn, nd + origin.Dot( nn ) ),
-				far: new Plane( fn, fd + origin.Dot( fn ) )
-			);
+			return FrustumOf( ViewFrustum );
 		}
+	}
+
+	/// <summary>A native frustum's planes in world space, as <see cref="Frustum"/> gives a view's.</summary>
+	internal static Frustum FrustumOf( CFrustum cf )
+	{
+		// Native planes are camera-relative.
+		cf.GetPlane( 0, out var rn, out var rd );
+		cf.GetPlane( 1, out var ln, out var ld );
+		cf.GetPlane( 2, out var tn, out var td );
+		cf.GetPlane( 3, out var bn, out var bd );
+		cf.GetPlane( 4, out var nn, out var nd );
+		cf.GetPlane( 5, out var fn, out var fd );
+
+		var origin = cf.GetCameraPosition();
+		return new Frustum(
+			right: new Plane( rn, rd + origin.Dot( rn ) ),
+			left: new Plane( ln, ld + origin.Dot( ln ) ),
+			top: new Plane( tn, td + origin.Dot( tn ) ),
+			bottom: new Plane( bn, bd + origin.Dot( bn ) ),
+			near: new Plane( nn, nd + origin.Dot( nn ) ),
+			far: new Plane( fn, fd + origin.Dot( fn ) )
+		);
 	}
 
 
@@ -382,6 +385,59 @@ public static partial class Graphics
 			}
 		}
 	}
+
+	/// <summary>
+	/// A block in which a game's drawing is recorded rather than drawn (<see cref="Rendering.GameDrawExtract"/>): <see cref="Backend"/>
+	/// is the recording backend, which keeps every call in the recording, the view is a camera's (as its block was when last
+	/// drawn), the attributes are the recording's own, and a temporary target the drawing grabs or gives back stays with the
+	/// recording until it's replayed.
+	/// </summary>
+	internal ref struct RecordingScope
+	{
+		RenderState _previous;
+		HashSet<RenderTarget> _grabbed;
+		Rendering.DrawRecording _recording;
+		bool _active;
+
+		internal static RecordingScope Create( Rendering.RecordingRenderBackend backend, Rendering.RecordingFrameView view, Rendering.DrawRecording into, SceneLayerType layerType, ImageFormat colorFormat, MultisampleAmount msaa )
+		{
+			ThreadSafe.AssertIsMainThread();
+
+			if ( IsActive )
+				throw new InvalidOperationException( "A recorded drawing cannot overlap another render scope." );
+
+			var scope = new RecordingScope { _previous = _state, _grabbed = grabbedTextures, _recording = recording, _active = true };
+			grabbedTextures = into.Grabbed;
+			recording = into;
+			_state = new RenderState
+			{
+				active = true,
+				view = view,
+				layerType = layerType,
+				attributes = into.BlockAttributes,
+				backend = backend,
+				colorFormat = colorFormat,
+				msaaLevel = msaa,
+				cameraTransform = new Transform( view.Frustum.GetCameraPosition(), view.Frustum.GetCameraAngles() ),
+			};
+
+			return scope;
+		}
+
+		public void Dispose()
+		{
+			if ( !_active ) return;
+			_state = _previous;
+			grabbedTextures = _grabbed;
+			recording = _recording;
+		}
+	}
+
+	[ThreadStatic]
+	static Rendering.DrawRecording recording;
+
+	/// <summary>The recording a game's drawing on this thread goes into (<see cref="RecordingScope"/>), or null.</summary>
+	internal static Rendering.DrawRecording Recording => recording;
 
 	/// <summary>Uses private attributes for a drawing pass, preserving its caller's attributes.</summary>
 	internal readonly ref struct AttributeScope

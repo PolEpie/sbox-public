@@ -62,20 +62,21 @@ internal static class RenderSync
 	internal static void CountAttributeSplit() => Interlocked.Increment( ref attributeSplits );
 
 	/// <summary>
-	/// Why game code would run in this frame's drawing, or null: a custom object drawn by game code, a renderer drawn from a
-	/// command list. Such a frame draws on the main thread; the render thread runs no game code.
+	/// Why game code would run in this frame's drawing, or null: a custom object drawn by game code that the frame's extract
+	/// didn't record (<see cref="GameDrawExtract"/>: it's new, or the extract is off). Such a frame draws on the main thread;
+	/// the render thread runs no game code. A renderer drawn from a command list is the engine's own drawing of its scene
+	/// object, which the render thread draws.
 	/// </summary>
 	internal static string GameDrawsInFrame
 	{
 		get
 		{
-			if ( SceneCustomObject.GameDrawn() is { } custom )
+			if ( GameDrawExtract.NotCovered is { } reason && SceneCustomObject.GameDrawn() is { } custom )
 			{
 				LastGameDrawn = custom.GetType().FullName;
-				return "a custom object drawn by game code";
+				return reason;
 			}
 
-			if ( CommandList.AnyDrawsRenderers ) return "a renderer drawn from a command list";
 			return null;
 		}
 	}
@@ -167,6 +168,8 @@ internal static class RenderSync
 		{
 			if ( what is null ) return;
 			var ticks = Stopwatch.GetTimestamp() - start;
+			// In a game's drawing recorded in the extract: a sync point that drawing makes, counted as one
+			if ( Graphics.Recording is not null ) GameDrawExtract.CountSyncPoint( what );
 			var n = Interlocked.Increment( ref readbacks );
 			Interlocked.Add( ref readbackTicks, ticks );
 			if ( (n & (n - 1)) != 0 ) return;
