@@ -152,9 +152,9 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 		[ThreadStatic] static long[] started;
 		[ThreadStatic] static int depth;
 
-		public unsafe void BeginZone( nint name, uint color )
+		public void BeginZone( nint name, uint color )
 		{
-			if ( NativeEngine.PerformanceTrace.__N.PerformanceTrace_BeginEvent != null ) NativeEngine.PerformanceTrace.BeginEvent( name, null, color, null, 0, null );
+			Sandbox.Utility.ProfilerZones.Begin( name, color );
 			if ( !ThreadSafe.IsRenderThread ) return;
 
 			started ??= new long[16];
@@ -163,9 +163,9 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 			depth++;
 		}
 
-		public unsafe void EndZone()
+		public void EndZone()
 		{
-			if ( NativeEngine.PerformanceTrace.__N.PerformanceTrace_BeginEvent != null ) NativeEngine.PerformanceTrace.EndEvent();
+			Sandbox.Utility.ProfilerZones.End();
 			if ( !ThreadSafe.IsRenderThread || depth == 0 ) return;
 
 			depth--;
