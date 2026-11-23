@@ -29,40 +29,37 @@ public class DecalTests
 	}
 
 	/// <summary>
-	/// A decal's settings are kept in managed code, start as native's defaults, and reach the native twin only while
-	/// something in the process reads it (<see cref="SceneObject.WritesNative"/>). The renderer reads the managed ones.
+	/// A decal is managed only: no native object, native's old defaults for its settings, a unit box around its transform for
+	/// bounds, and the renderer reads its settings.
 	/// </summary>
 	[TestMethod]
-	public void SettingsAreManagedAndReachTheNativeTwinOnlyWhenRead()
+	public void SettingsAreManagedWithNativesDefaults()
 	{
 		var scene = new Scene();
 		using var scope = scene.Push();
 		try
 		{
 			var source = new DecalSceneObject( scene.SceneWorld );
-			var native = (NativeEngine.CDecalSceneObject)source.native;
-			Assert.AreEqual( (Color)native.m_vColorTint, source.Color, "starts as native's default" );
+			Assert.IsFalse( source.HasTwin, "no native object" );
+			Assert.IsTrue( source.IsValid() );
+			Assert.AreEqual( Color.White, source.Color );
+			Assert.AreEqual( 1.0f, source.AttenuationAngle );
+			Assert.AreEqual( 1.0f, source.EmissionEnergy );
+			Assert.AreEqual( 1.0f, source.ColorMix );
+			Assert.AreEqual( 0.25f, source.ParallaxStrength );
+			Assert.AreEqual( 1.0f, source.CoverageAmount );
+			Assert.AreEqual( 0.07f, source.CoverageRange );
 			Assert.IsNull( source.ColorTexture );
+			Assert.IsFalse( source.Batchable );
+			Assert.IsTrue( source.RenderingEnabled );
 
-			SceneObject.WritesNativeOverride = true;
+			source.Transform = new Transform( new Vector3( 10, 20, 30 ), Rotation.Identity, new Vector3( 64, 32, 8 ) );
+			Assert.AreEqual( new BBox( new Vector3( -22, 4, 26 ), new Vector3( 42, 36, 34 ) ), source.WorldBounds, "a unit box around its transform" );
+
 			source.ColorTexture = Texture.White;
-			source.Color = Color.Red;
-			source.SortOrder = 7;
-			source.CoverageRange = 0.5f;
-			Assert.AreSame( Texture.White, Texture.FromNative( native.m_hColor ), "written through while read" );
-			Assert.AreEqual( new Vector4( 1, 0, 0, 1 ), native.m_vColorTint );
-			Assert.AreEqual( 7u, native.m_nSortOrder );
-			Assert.AreEqual( 0.5f, native.m_flCoverageRange );
-
-			SceneObject.WritesNativeOverride = false;
-			source.ColorTexture = null;
 			source.Color = Color.Blue;
 			source.SortOrder = 9;
-			Assert.IsNull( source.ColorTexture );
-			Assert.AreEqual( Color.Blue, source.Color );
-			Assert.AreEqual( 9u, source.SortOrder );
-			Assert.AreSame( Texture.White, Texture.FromNative( native.m_hColor ), "not written while nothing reads it" );
-			Assert.AreEqual( 7u, native.m_nSortOrder );
+			source.CoverageRange = 0.5f;
 
 			var decal = new Borealis.DecalObject( Transform.Zero );
 			using var render = NewRender( scene.SceneWorld );
@@ -71,10 +68,10 @@ public class DecalTests
 			Assert.AreEqual( 9u, decal.SortOrder );
 			Assert.AreEqual( 0.5f, decal.CoverageRange );
 			source.Delete();
+			Assert.IsFalse( source.IsValid() );
 		}
 		finally
 		{
-			SceneObject.WritesNativeOverride = null;
 			scene.Destroy();
 		}
 	}

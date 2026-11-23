@@ -13,16 +13,13 @@ public partial class SceneObject
 	internal static bool? WritesNativeOverride { get; set; }
 
 	/// <summary>
-	/// Whether scene objects managed code makes get a native twin: while anything native reads them. In a process drawing on
-	/// Borealis.Gpu nothing does in the game (render-mesh traces walk the managed objects, and render meshes carry trace
-	/// triangles only in tools mode anyway); the editor and Hammer keep twins. Headless processes (tests, servers) keep them
-	/// too. Objects native code makes (tool previews) always have their native object.
+	/// Whether scene objects managed code makes get a native twin: only in a process without a Borealis.Gpu device (headless
+	/// tests, servers, content workers), where tests compare managed state against native's. Nothing native reads a managed
+	/// object's twin in the game or the editor: render-mesh traces walk the managed objects, and Hammer's views, gizmos and
+	/// picking are managed or trace Hammer's own map data. Objects native code makes (Hammer's lights and probes, tool previews)
+	/// always have their native object; decals never have one.
 	/// </summary>
-	internal static bool MakesNativeTwin => MakesNativeTwinOverride ?? (!Rendering.ManagedSceneRendering.Enabled || Application.IsEditor || KeepsTwinsBySwitch);
-
-	/// <summary><c>-scene-native-twins</c>: keep twins in the game as well, to compare the cost of making and writing them.</summary>
-	static bool KeepsTwinsBySwitch => _keepsTwinsBySwitch ??= Sandbox.Utility.CommandLine.HasSwitch( "-scene-native-twins" );
-	static bool? _keepsTwinsBySwitch;
+	internal static bool MakesNativeTwin => MakesNativeTwinOverride ?? !Rendering.ManagedSceneRendering.Enabled;
 
 	/// <summary>Tests set <see cref="MakesNativeTwin"/> either way; null follows the process.</summary>
 	internal static bool? MakesNativeTwinOverride { get; set; }
