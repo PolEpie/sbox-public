@@ -1,4 +1,3 @@
-using NativeEngine;
 using Sandbox.Rendering;
 
 namespace Sandbox;
@@ -7,12 +6,10 @@ namespace Sandbox;
 /// A decal. Use the Component.
 /// </summary>
 /// <remarks>
-/// Its settings live here; the native twin gets them only while something reads it (<see cref="SceneObject.WritesNative"/>).
+/// Managed only: it has no native object, and its settings live here.
 /// </remarks>
 internal sealed class DecalSceneObject : SceneObject
 {
-	NativeEngine.CDecalSceneObject decalNative;
-
 	Texture colorTexture, normalTexture, rmoTexture, heightTexture, emissionTexture;
 	Vector4 color;
 	uint sortOrder, exclusionBitMask, sequenceIndex;
@@ -32,7 +29,6 @@ internal sealed class DecalSceneObject : SceneObject
 	}
 
 	internal DecalSceneObject() { }
-	internal DecalSceneObject( HandleCreationData _ ) { }
 
 	public Texture ColorTexture
 	{
@@ -134,18 +130,14 @@ internal sealed class DecalSceneObject : SceneObject
 	{
 		Assert.IsValid( world );
 
-		using ( var h = IHandle.MakeNextHandle( this ) )
-		{
-			if ( MakesNativeTwin ) CSceneSystem.CreateDecal( world );
-			else MakeDecalWithoutTwin( world );
-		}
+		MakeDecal( world );
 	}
 
 	/// <summary>
-	/// Made without a native twin: what <c>CDecalSceneObjectDesc::Create</c> gives a new one (opaque, visible, not batchable,
-	/// no bounds until it's placed) and <c>CDecalSceneObject</c>'s defaults for its settings.
+	/// What native's decal object started as (opaque, visible, not batchable, no bounds until it's placed), with its defaults for
+	/// the settings.
 	/// </summary>
-	void MakeDecalWithoutTwin( SceneWorld world )
+	void MakeDecal( SceneWorld world )
 	{
 		color = new Vector4( 1, 1, 1, 1 );
 		attenuationAngle = 1.0f;
@@ -159,73 +151,14 @@ internal sealed class DecalSceneObject : SceneObject
 		KeepFixedBounds( false );
 	}
 
-	/// <summary>A unit box around its transform, as <c>CDecalSceneObjectDesc::UpdateBoundingBoxToMatchTransform</c> bounds it.</summary>
+	/// <summary>A unit box around its transform.</summary>
 	internal override void OnTransformChanged( in Transform tx )
 	{
 		base.OnTransformChanged( tx );
-		if ( !HasTwin ) KeepBounds( TransformBounds( tx, new BBox( new Vector3( -0.5f ), new Vector3( 0.5f ) ) ) );
+		KeepBounds( TransformBounds( tx, new BBox( new Vector3( -0.5f ), new Vector3( 0.5f ) ) ) );
 	}
 
-	void SettingsChanged()
-	{
-		if ( WritesNative && !decalNative.IsNull ) WriteNative();
-		NotifyChanged( Rendering.SceneObjectChange.Settings );
-	}
-
-	/// <summary>The settings, written to the native twin.</summary>
-	void WriteNative()
-	{
-		decalNative.m_hColor = colorTexture?.native ?? default;
-		decalNative.m_hNormal = normalTexture?.native ?? default;
-		decalNative.m_hRMO = rmoTexture?.native ?? default;
-		decalNative.m_hHeight = heightTexture?.native ?? default;
-		decalNative.m_hEmission = emissionTexture?.native ?? default;
-		decalNative.m_vColorTint = color;
-		decalNative.m_nSortOrder = sortOrder;
-		decalNative.m_nExclusionBitMask = exclusionBitMask;
-		decalNative.m_flAttenuationAngle = attenuationAngle;
-		decalNative.m_flColorMix = colorMix;
-		decalNative.m_flEmissionEnergy = emissionEnergy;
-		decalNative.m_nSequenceIndex = sequenceIndex;
-		decalNative.m_flParallaxStrength = parallaxStrength;
-		decalNative.m_nSamplerIndex = samplerIndex;
-		decalNative.m_flCoverageAmount = coverageAmount;
-		decalNative.m_flCoverageRange = coverageRange;
-	}
-
-	/// <summary>The settings a new native twin starts with: native's defaults, or what native code made it with.</summary>
-	void ReadNative()
-	{
-		colorTexture = Texture.FromNative( decalNative.m_hColor );
-		normalTexture = Texture.FromNative( decalNative.m_hNormal );
-		rmoTexture = Texture.FromNative( decalNative.m_hRMO );
-		heightTexture = Texture.FromNative( decalNative.m_hHeight );
-		emissionTexture = Texture.FromNative( decalNative.m_hEmission );
-		color = decalNative.m_vColorTint;
-		sortOrder = decalNative.m_nSortOrder;
-		exclusionBitMask = decalNative.m_nExclusionBitMask;
-		attenuationAngle = decalNative.m_flAttenuationAngle;
-		colorMix = decalNative.m_flColorMix;
-		emissionEnergy = decalNative.m_flEmissionEnergy;
-		sequenceIndex = decalNative.m_nSequenceIndex;
-		parallaxStrength = decalNative.m_flParallaxStrength;
-		samplerIndex = decalNative.m_nSamplerIndex;
-		coverageAmount = decalNative.m_flCoverageAmount;
-		coverageRange = decalNative.m_flCoverageRange;
-	}
-
-	internal override void OnNativeInit( CSceneObject ptr )
-	{
-		decalNative = (NativeEngine.CDecalSceneObject)ptr;
-		ReadNative();
-		base.OnNativeInit( ptr );
-	}
-
-	internal override void OnNativeDestroy()
-	{
-		decalNative = default;
-		base.OnNativeDestroy();
-	}
+	void SettingsChanged() => NotifyChanged( Rendering.SceneObjectChange.Settings );
 
 	internal override bool OwnsRenderObject => true;
 

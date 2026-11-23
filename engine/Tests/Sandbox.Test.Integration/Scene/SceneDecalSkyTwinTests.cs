@@ -5,9 +5,9 @@ using Sandbox.Rendering;
 namespace SceneTests;
 
 /// <summary>
-/// Decals, sky boxes and aggregates made without a native twin (<see cref="SceneObject.MakesNativeTwin"/> off, the game under
+/// Sky boxes and aggregates made without a native twin (<see cref="SceneObject.MakesNativeTwin"/> off: any process drawing on
 /// Borealis.Gpu) start with the state a twin would have given them, follow the same changes, and leave their world (and its
-/// skies) when deleted.
+/// skies) when deleted, as decals (never twinned) do.
 /// </summary>
 [TestClass]
 public class SceneDecalSkyTwinTests
@@ -39,50 +39,12 @@ public class SceneDecalSkyTwinTests
 		CollectionAssert.AreEqual( twin.TagTokens.ToArray(), twinless.TagTokens.ToArray(), $"{what}: tags" );
 	}
 
-	static void AssertSameDecal( DecalSceneObject twin, DecalSceneObject twinless, string what )
-	{
-		AssertSameObject( twin, twinless, what );
-		Assert.AreEqual( twin.Color, twinless.Color, $"{what}: colour" );
-		Assert.AreEqual( twin.ColorTexture, twinless.ColorTexture, $"{what}: colour texture" );
-		Assert.AreEqual( twin.NormalTexture, twinless.NormalTexture, $"{what}: normal texture" );
-		Assert.AreEqual( twin.SortOrder, twinless.SortOrder, $"{what}: sort order" );
-		Assert.AreEqual( twin.ExclusionBitMask, twinless.ExclusionBitMask, $"{what}: exclusion" );
-		Assert.AreEqual( twin.AttenuationAngle, twinless.AttenuationAngle, $"{what}: attenuation angle" );
-		Assert.AreEqual( twin.ColorMix, twinless.ColorMix, $"{what}: colour mix" );
-		Assert.AreEqual( twin.EmissionEnergy, twinless.EmissionEnergy, $"{what}: emission" );
-		Assert.AreEqual( twin.SequenceIndex, twinless.SequenceIndex, $"{what}: sequence" );
-		Assert.AreEqual( twin.ParallaxStrength, twinless.ParallaxStrength, $"{what}: parallax" );
-		Assert.AreEqual( twin.SamplerIndex, twinless.SamplerIndex, $"{what}: sampler" );
-		Assert.AreEqual( twin.CoverageAmount, twinless.CoverageAmount, $"{what}: coverage" );
-		Assert.AreEqual( twin.CoverageRange, twinless.CoverageRange, $"{what}: coverage range" );
-		Assert.AreEqual( twin.BlendMode, twinless.BlendMode, $"{what}: blend mode" );
-	}
-
 	[TestMethod]
-	public void TwinlessDecalsSkiesAndAggregatesStartAndChangeAsTwinnedOnes()
+	public void TwinlessSkiesAndAggregatesStartAndChangeAsTwinnedOnes()
 	{
 		var world = new SceneWorld();
 		try
 		{
-			// A decal as the component makes and places it
-			var decal = Make( world, w => new DecalSceneObject( w ), true );
-			var decalless = Make( world, w => new DecalSceneObject( w ), false );
-			AssertSameDecal( decal, decalless, "new decal" );
-			Both( decal, decalless, d =>
-			{
-				d.Transform = new Transform( new Vector3( 10, -20, 30 ), Rotation.From( 30, 60, 10 ), new Vector3( 64, 32, 8 ) );
-				d.Color = new Color( 1, 0.5f, 0.25f, 0.75f );
-				d.SortOrder = 2;
-				d.ExclusionBitMask = 4;
-				d.AttenuationAngle = 0.5f;
-				d.ColorMix = 0.25f;
-				d.ParallaxStrength = 0.1f;
-				d.CoverageAmount = 0.5f;
-				d.BlendMode = DecalBlendMode.Multiply;
-				d.Tags.Add( "decal" );
-			} );
-			AssertSameDecal( decal, decalless, "placed decal" );
-
 			// A sky as the sky component makes it
 			var material = Material.Load( "materials/skybox/skybox_day_01.vmat" );
 			var sky = Make( world, w => new SceneSkyBox( w, material ), true );
@@ -129,7 +91,7 @@ public class SceneDecalSkyTwinTests
 			var sky = Make( world, w => new SceneSkyBox( w, material ), false );
 			var fragments = new[] { new AggregateFragment { Transform = Transform.Zero, BoundsMax = new Vector3( 32 ), Tint = Color.White, DrawDescriptorIndex = 0 } };
 			var aggregate = Make( world, w => new SceneAggregateObject( w, AggregateModel( 1 ), fragments, true ), false );
-			var decal = Make( world, w => new DecalSceneObject( w ), false );
+			var decal = new DecalSceneObject( world );
 
 			sky.Delete();
 			aggregate.Delete();
