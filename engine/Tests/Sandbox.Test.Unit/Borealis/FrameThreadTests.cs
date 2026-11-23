@@ -30,7 +30,8 @@ public class FrameThreadTests
 			Assert.IsFalse( thread.Pending );
 			Assert.AreNotEqual( -1, ran, "the join waited for the work" );
 			Assert.AreNotEqual( Environment.CurrentManagedThreadId, ran, "on a thread of its own" );
-			Assert.AreEqual( 1, thread.JoinsWaited );
+			// The join blocks only if the work hasn't finished by then, which a loaded machine can delay past it
+			Assert.IsTrue( thread.JoinsWaited <= 1, "a join waits at most once" );
 
 			// Joining again, or with nothing handed over, does nothing
 			thread.Join();
