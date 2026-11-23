@@ -165,7 +165,7 @@ internal sealed partial class BackendContext
 
 	static readonly StringToken MipLevel0 = new( "MipLevel0" ), MipLevel1 = new( "MipLevel1" ), TextureSize = new( "TextureSize" ), InvTextureSize = new( "InvTextureSize" ), DownsampleMethod = new( "D_DOWNSAMPLE_METHOD" );
 	static readonly StringToken MipRegion = new( "MipRegion" );
-	static readonly StringToken MaskOutput = new( "Output" ), MaskMip = new( "Mip" ), MaskSource = new( "MaskSource" ), MaskRegion = new( "MaskRegion" ), MaskCopies = new( "D_COPY" );
+	static readonly StringToken MaskOutput = new( "Output" ), MaskMip = new( "Mip" ), MaskSource = new( "MaskSource" ), MaskRegion = new( "MaskRegion" ), MaskCopies = new( "D_COPY" ), MaskSamples = new( "MaskSamples" );
 
 	/// <summary>The frame buffer copy's mask and downsample parameters, kept between frames.</summary>
 	readonly BackendParameters maskParameters = new(), mipParameters = new();
@@ -173,12 +173,13 @@ internal sealed partial class BackendContext
 	/// <summary>
 	/// The frame buffer copy made by its depth-aware mask (<c>depthaware_mask_cs</c>'s <c>D_COPY</c>): one pass writes the
 	/// last frame's blurred copy where the mask takes it and the frame everywhere else, so the frame is read only where it's
-	/// kept and the copy written once. The same texels as a copy then the mask; a multisampled frame (resolved by the copy)
-	/// or one of another format (converted by it) isn't made this way. False when it wasn't.
+	/// kept and the copy written once. The same texels as a copy then the mask; a multisampled frame is resolved there, its
+	/// samples averaged as a resolve averages them, so most of its samples (where the mask takes last frame's) aren't read.
+	/// A frame of another format (converted by the copy) isn't made this way. False when it wasn't.
 	/// </summary>
 	bool CopyFrameBufferMasked( BackendTexture source, BackendTexture copy, Rect viewport )
 	{
-		if ( !device.FrameBufferCopyMasked || source is not { Samples: <= 1 } || source.Format != copy.Format ) return false;
+		if ( !device.FrameBufferCopyMasked || source is null || source.Format != copy.Format ) return false;
 		if ( source.Width < copy.Width || source.Height < copy.Height ) return false;
 		return MaskFrameBufferCopy( copy, viewport, source );
 	}
@@ -197,8 +198,10 @@ internal sealed partial class BackendContext
 		maskParameters.Set( MaskOutput, copy, 0 );
 		maskParameters.Set( MaskMip, copy, 1 );
 		maskParameters.Set( MaskRegion, new Vector4( 0, 0, Math.Min( copy.Width, (int)viewport.Width ), Math.Min( copy.Height, (int)viewport.Height ) ) );
-		maskParameters.SetCombo( MaskCopies, source is null ? 0 : 1 );
-		if ( source is not null ) maskParameters.Set( MaskSource, source, 0 );
+		maskParameters.SetCombo( MaskCopies, source is null ? 0 : source.Samples > 1 ? 2 : 1 );
+		if ( source is { Samples: > 1 } ) maskParameters.Set( MaskSource, source );
+		else if ( source is not null ) maskParameters.Set( MaskSource, source, 0 );
+		if ( source is not null ) maskParameters.Set( MaskSamples, (float)source.Samples );
 		Dispatch( mask, maskParameters, copy.Width, copy.Height, 1 );
 		List.Barrier( PipelineStage.ComputeShader, MemoryAccess.ShaderWrite, PipelineStage.ComputeShader, MemoryAccess.ShaderRead | MemoryAccess.ShaderWrite );
 		EndGpuScope( scope );

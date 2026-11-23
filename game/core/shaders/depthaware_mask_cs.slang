@@ -33,9 +33,15 @@ Mode( Default );
     // Output texture
     RWTexture2D<float4> Output < Attribute("Output"); > ;
 
-    // D_COPY: the frame itself, copied into Output where the mask keeps it, so the copy and the mask are one pass
-    DynamicCombo( D_COPY, 0..1, Sys( ALL ) );
+    // D_COPY: the frame itself, copied into Output where the mask keeps it, so the copy and the mask are one pass; 2, a
+    // multisampled frame, resolved there (its samples averaged, as a resolve does)
+    DynamicCombo( D_COPY, 0..2, Sys( ALL ) );
+#if ( D_COPY == 2 )
+    Texture2DMS<float4> Source < Attribute("MaskSource"); SrgbRead( false ); > ;
+    float SourceSamples < Attribute("MaskSamples"); > ;
+#else
     Texture2D Source < Attribute("MaskSource"); SrgbRead( false ); > ;
+#endif
 
     // The pixels this dispatch covers, in the viewport: x, y its first, z, w past its last (the readers' area)
     float4 Region < Attribute("MaskRegion"); > ;
@@ -114,7 +120,16 @@ Mode( Default );
             const int2 vWritePos = vDispatchId.xy;
             Output[vWritePos] = clamp( sourceColor, 0.0f, 4.0f );
         }
-#if ( D_COPY )
+#if ( D_COPY == 2 )
+        else
+        {
+            const int samples = int( SourceSamples );
+            float4 sum = 0;
+            for ( int i = 0; i < samples; i++ )
+                sum += Source.Load( int2( vDispatchId.xy ), i );
+            Output[vDispatchId.xy] = sum / samples;
+        }
+#elif ( D_COPY )
         else
         {
             Output[vDispatchId.xy] = Source.Load( int3( vDispatchId.xy, 0 ) );

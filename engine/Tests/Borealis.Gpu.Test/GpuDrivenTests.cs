@@ -2129,9 +2129,10 @@ public class GpuDrivenTests : GpuTest
 			}
 
 			Device.WaitIdle();
-			var (texture, layout) = BackendDevice.Unwrap( target.Color );
+			var color = target.Samples > 1 ? target.Resolved : target.Color;
+			var (texture, layout) = BackendDevice.Unwrap( color );
 			pixels = ReadBack( texture, layout );
-			BackendDevice.SetLayout( target.Color, ImageLayout.CopySource );
+			BackendDevice.SetLayout( color, ImageLayout.CopySource );
 		}
 
 		return pixels;
@@ -2139,8 +2140,8 @@ public class GpuDrivenTests : GpuTest
 
 	/// <summary>
 	/// The frame buffer copy made with its depth-aware mask in one pass (<see cref="BackendDevice.FrameBufferCopyMasked"/>)
-	/// holds what a transfer copy and then the mask over it hold: the glass scene's frames are the same pixels either way,
-	/// classic and GPU-driven.
+	/// holds what a transfer copy (or a resolve) and then the mask over it hold: the glass scene's frames are the same pixels
+	/// either way, classic and GPU-driven, and multisampled.
 	/// </summary>
 	[TestMethod]
 	public void GlassFrameCopyMadeWithItsMaskInOnePass()
@@ -2152,19 +2153,22 @@ public class GpuDrivenTests : GpuTest
 		RenderHost.Current = new BackendRenderHost( backend );
 		try
 		{
-			using var target = ViewTarget.Create( new Vector2Int( Width, Height ), 1, TextureFormat.RGBA16161616F, TextureFormat.D32FS8, "Glass frame copy test" );
-			foreach ( var gpuDriven in new[] { false, true } )
+			// Multisampled, the pass resolves the frame where it keeps it
+			using var single = ViewTarget.Create( new Vector2Int( Width, Height ), 1, TextureFormat.RGBA16161616F, TextureFormat.D32FS8, "Glass frame copy test" );
+			using var multi = ViewTarget.Create( new Vector2Int( Width, Height ), 4, TextureFormat.RGBA16161616F, TextureFormat.D32FS8, "Glass frame copy test (4x)" );
+			foreach ( var (target, gpuDriven) in new[] { (single, false), (single, true), (multi, false) } )
 			{
+				var samples = target.Samples;
 				backend.FrameBufferCopyMasked = false;
 				var apart = GlassFrames( backend, world, view, target, gpuDriven, new DrawCensus() );
 				backend.FrameBufferCopyMasked = true;
 				var census = new DrawCensus();
 				var together = GlassFrames( backend, world, view, target, gpuDriven, census );
 
-				TestContext.WriteLine( $"GPU-driven {gpuDriven}: {Differences( apart, together )}" );
+				TestContext.WriteLine( $"{samples}x, GPU-driven {gpuDriven}: {Differences( apart, together )}" );
 				Assert.AreEqual( 0, Device.ValidationErrors, "no validation errors" );
 				Assert.IsTrue( census.Draws.Any( d => d.Pass.EndsWith( "Translucent Forward", StringComparison.Ordinal ) ), "the glass draws" );
-				Assert.AreEqual( 0, Different( apart, together ), $"GPU-driven {gpuDriven}: the same pixels" );
+				Assert.AreEqual( 0, Different( apart, together ), $"{samples}x, GPU-driven {gpuDriven}: the same pixels" );
 			}
 		}
 		finally
