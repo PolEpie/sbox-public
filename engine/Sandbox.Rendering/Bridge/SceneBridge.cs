@@ -928,8 +928,8 @@ internal sealed partial class SceneBridge : ISceneRenderer
 	/// Render a view asked for while one of ours draws (a command list's <c>DrawView</c>, water's refraction) as its child: in a
 	/// frame of its own, prepared, recorded and submitted now, on this thread, in the middle of the parent's recording. The
 	/// parent submits after it, so what samples it (a later command, the object drawn next) reads it finished, this frame.
-	/// The parent's workers carry on recording meanwhile. Shadow maps the parent drew aren't submitted yet, so the child
-	/// draws its own (<c>ShadowMapper</c>'s maps in flight).
+	/// The parent's workers carry on recording meanwhile. The parent's frame goes to the GPU through its shadow layers first,
+	/// so the child uses the shadow maps it drew (<c>RenderSystem.SubmitShadowsFor</c>).
 	/// </summary>
 	bool RenderChild( SceneCamera camera, in ViewSetup setup, Texture target, Texture depthTarget, out ViewData viewData )
 	{
