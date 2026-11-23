@@ -117,14 +117,59 @@ internal static class SceneRenderer
 	}
 
 	/// <summary>
-	/// Called when a camera is disposed.
+	/// Called when a camera is disposed. While the render thread draws a frame, after it (<see cref="ForgetAfterDrawing"/>):
+	/// the frame may be drawing the camera's views.
 	/// </summary>
-	internal static void Forget( SceneCamera camera ) => Borealis?.Forget( camera );
+	internal static void Forget( SceneCamera camera )
+	{
+		if ( Borealis is null ) return;
+		if ( WhileDrawing )
+		{
+			lock ( forgottenCameras ) forgottenCameras.Add( camera );
+			return;
+		}
+
+		Borealis.Forget( camera );
+	}
 
 	/// <summary>
-	/// Called when a scene world is deleted.
+	/// Called when a scene world is deleted. While the render thread draws a frame, after it (<see cref="ForgetAfterDrawing"/>):
+	/// the frame may be drawing the world.
 	/// </summary>
-	internal static void Forget( SceneWorld world ) => Borealis?.Forget( world );
+	internal static void Forget( SceneWorld world )
+	{
+		if ( Borealis is null ) return;
+		if ( WhileDrawing )
+		{
+			lock ( forgottenCameras ) forgottenWorlds.Add( world );
+			return;
+		}
+
+		Borealis.Forget( world );
+	}
+
+	// Cameras and worlds that went while the render thread drew a frame, forgotten once it's drawn
+	static readonly List<SceneCamera> forgottenCameras = new();
+	static readonly List<SceneWorld> forgottenWorlds = new();
+
+	// The main thread, while the render thread draws a frame handed to it
+	static bool WhileDrawing => !ThreadSafe.IsRenderThread && Sandbox.Engine.GameWindow.Current?.DrawingOnRenderThread == true;
+
+	/// <summary>
+	/// The render thread has drawn the frame handed to it (the main thread joined it): the cameras and worlds that went while
+	/// it drew are forgotten now, in the order they went (cameras first: a world's views go with its cameras).
+	/// </summary>
+	internal static void ForgetAfterDrawing()
+	{
+		lock ( forgottenCameras )
+		{
+			if ( forgottenCameras.Count == 0 && forgottenWorlds.Count == 0 ) return;
+			foreach ( var camera in forgottenCameras ) Borealis?.Forget( camera );
+			foreach ( var world in forgottenWorlds ) Borealis?.Forget( world );
+			forgottenCameras.Clear();
+			forgottenWorlds.Clear();
+		}
+	}
 
 	/// <summary>
 	/// Called at startup, before anything renders. Picks the renderer for what renders before the first frame's output

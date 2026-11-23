@@ -38,6 +38,44 @@ public class UploadPageTests : GpuTest
 	}
 
 	/// <summary>
+	/// With <see cref="CommandList.SharedPages"/>, a burst's biggest pages share large blocks rather than each being a driver
+	/// allocation of its own, and still go back once idle.
+	/// </summary>
+	[TestMethod]
+	public void SharedPagesTakeFewDriverAllocations()
+	{
+		var shared = CommandList.SharedPages;
+		CommandList.SharedPages = true;
+		try
+		{
+			for ( ulong i = 0; i <= 2 * Device.UploadPageIdleFrames; i++ ) Device.BeginFrame();
+			var reserved = Device.MemoryUsage.Reserved;
+			var allocations = Device.Allocator.DriverAllocations;
+			var list = Device.BeginCommandList( QueueType.Graphics, "Burst" );
+			for ( int i = 0; i < 24; i++ ) list.AllocateUpload( 3 << 20 );
+			Device.Wait( Device.Submit( list ) );
+			for ( int i = 0; i <= Device.FramesInFlight; i++ ) Device.BeginFrame();
+			var clock = System.Diagnostics.Stopwatch.StartNew();
+			while ( Device.MakingUploadPagesAhead && clock.Elapsed.TotalSeconds < 10 ) System.Threading.Thread.Sleep( 5 );
+
+			var made = Device.Allocator.DriverAllocations - allocations;
+			Assert.IsTrue( Device.FreePages[2].Count >= 24, $"the burst's pages are free for reuse ({Device.FreePages[2].Count})" );
+			Assert.IsTrue( made <= 4, $"{made} driver allocations for {Device.FreePages[2].Count} pages" );
+			Assert.IsTrue( Device.FreePages[2].TryPeek( out var page ) && !Device.Get( page.Buffer ).Memory.Block.Dedicated, "pages share blocks" );
+
+			// Idle: the pages go but for the spare, and their blocks with them
+			for ( ulong i = 0; i <= 2 * Device.UploadPageIdleFrames; i++ ) Device.BeginFrame();
+			Assert.AreEqual( Device.KeptFreeUploadPages, Device.FreePages[2].Count );
+			for ( ulong i = 0; i <= Borealis.Gpu.Memory.MemoryAllocator.SpareFrames; i++ ) Device.BeginFrame();
+			Assert.IsTrue( Device.MemoryUsage.Reserved - reserved <= (long)Borealis.Gpu.Memory.MemoryAllocator.LargeBlockSize, $"{(Device.MemoryUsage.Reserved - reserved) >> 20} MiB more reserved than before the burst" );
+		}
+		finally
+		{
+			CommandList.SharedPages = shared;
+		}
+	}
+
+	/// <summary>
 	/// A frame whose lists had to make pages of the biggest size (none free) has twice as many made on a worker when the next
 	/// frame starts, so a burst's next frames find them free instead of each list waiting for the driver.
 	/// </summary>
