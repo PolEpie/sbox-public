@@ -866,8 +866,14 @@ internal sealed class SurfaceProgram : IDisposable
 {
 	readonly BackendDevice device;
 	readonly Dictionary<string, PassObjects> passes = new();
-	readonly Dictionary<(PassObjects Pass, VertexLayout Layout, Format Color, Format Depth, int Samples, ulong Constants, bool Ids, bool OpaqueFade, SurfaceRenderState State, bool DepthEqual, ulong Features, bool Normals), PipelineHandle> pipelines = new();
-	readonly HashSet<(PassObjects Pass, VertexLayout Layout, Format Color, Format Depth, int Samples, ulong Constants, bool Ids, bool OpaqueFade, SurfaceRenderState State, bool DepthEqual, ulong Features, bool Normals)> building = new();
+	// Pipelines' keys are record structs, not tuples: a tuple of eight or more keeps the rest in a tuple of its own, which its
+	// hash and equality box until the JIT has optimised them, so every draw's lookup allocated in a run's first seconds
+	readonly record struct PipelineKey( PassObjects Pass, VertexLayout Layout, Format Color, Format Depth, int Samples, ulong Constants, bool Ids, bool OpaqueFade, SurfaceRenderState State, bool DepthEqual, ulong Features, bool Normals );
+	readonly record struct ImmediateKey( PassObjects Pass, VertexLayout Layout, Format Color, Format Depth, int Samples, ulong Constants, SurfaceRenderState State, PrimitiveTopology Topology, bool Ids, bool OpaqueFade, ToolsPass Tools );
+	readonly record struct ToolsKey( PassObjects Pass, VertexLayout Layout, Format Color, Format Depth, int Samples, ulong Constants, bool OpaqueFade, SurfaceRenderState State, bool DepthEqual, bool Normals, ToolsPass Tools );
+
+	readonly Dictionary<PipelineKey, PipelineHandle> pipelines = new();
+	readonly HashSet<PipelineKey> building = new();
 	readonly Dictionary<ulong, SurfaceFeatures> features = new();
 	readonly List<System.Threading.Tasks.Task> builds = new();
 	bool disposed;
@@ -882,7 +888,7 @@ internal sealed class SurfaceProgram : IDisposable
 	public string SourceFile { get; init; }
 
 	/// <summary>Pipelines being made ahead from the manifest (<see cref="Prewarm"/>), by key, and whether a worker has started each.</summary>
-	readonly Dictionary<(PassObjects Pass, VertexLayout Layout, Format Color, Format Depth, int Samples, ulong Constants, bool Ids, bool OpaqueFade, SurfaceRenderState State, bool DepthEqual, ulong Features, bool Normals), Prewarming> prewarming = new();
+	readonly Dictionary<PipelineKey, Prewarming> prewarming = new();
 
 	sealed class Prewarming
 	{
@@ -1058,7 +1064,7 @@ internal sealed class SurfaceProgram : IDisposable
 		if ( !pass.Pixel.IsValid ) specialized = null;
 		normals &= color != Format.Unknown && !ids;
 		if ( tools != ToolsPass.None && color != Format.Unknown && !ids ) return ToolsPipeline( pass, layout, color, depth, samples, vertexConstants, constantsKey, state, opaqueFade, depthEqual, normals, tools );
-		var key = (pass, layout, color, depth, samples, constantsKey, ids, opaqueFade, state, depthEqual, specialized?.Key ?? 0, normals);
+		var key = new PipelineKey( pass, layout, color, depth, samples, constantsKey, ids, opaqueFade, state, depthEqual, specialized?.Key ?? 0, normals );
 
 		// Never waited for: one a worker is making from the manifest is asked for again here, its draws skipped until made
 		// (GraphicsPipelineInfo.SkipUntilReady); the worker finds it made and drops its own
@@ -1069,7 +1075,7 @@ internal sealed class SurfaceProgram : IDisposable
 		}
 	}
 
-	readonly Dictionary<(PassObjects Pass, VertexLayout Layout, Format Color, Format Depth, int Samples, ulong Constants, SurfaceRenderState State, PrimitiveTopology Topology, bool Ids, bool OpaqueFade, ToolsPass Tools), PipelineHandle> immediatePipelines = new();
+	readonly Dictionary<ImmediateKey, PipelineHandle> immediatePipelines = new();
 
 	/// <summary>
 	/// A pipeline for the engine's own drawing (<see cref="ShaderDrawer.DrawSurface"/>: <c>Graphics.Draw</c>, models drawn in
@@ -1081,7 +1087,7 @@ internal sealed class SurfaceProgram : IDisposable
 	public PipelineHandle ImmediatePipeline( PassObjects pass, VertexLayout layout, Format color, Format depth, int samples, SpecializationConstant[] vertexConstants, SpecializationConstant[] pixelConstants, ulong constantsKey, SurfaceRenderState state, PrimitiveTopology topology, bool ids, bool opaqueFade, ToolsPass tools )
 	{
 		if ( color == Format.Unknown ) tools = ToolsPass.None;
-		var key = (pass, layout, color, depth, samples, constantsKey, state, topology, ids, opaqueFade, tools);
+		var key = new ImmediateKey( pass, layout, color, depth, samples, constantsKey, state, topology, ids, opaqueFade, tools );
 		lock ( pipelines )
 		{
 			if ( immediatePipelines.TryGetValue( key, out var made ) ) return made;
@@ -1093,11 +1099,11 @@ internal sealed class SurfaceProgram : IDisposable
 		}
 	}
 
-	readonly Dictionary<(PassObjects Pass, VertexLayout Layout, Format Color, Format Depth, int Samples, ulong Constants, bool OpaqueFade, SurfaceRenderState State, bool DepthEqual, bool Normals, ToolsPass Tools), PipelineHandle> toolsPipelines = new();
+	readonly Dictionary<ToolsKey, PipelineHandle> toolsPipelines = new();
 
 	PipelineHandle ToolsPipeline( PassObjects pass, VertexLayout layout, Format color, Format depth, int samples, SpecializationConstant[] vertexConstants, ulong constantsKey, SurfaceRenderState state, bool opaqueFade, bool depthEqual, bool normals, ToolsPass tools )
 	{
-		var key = (pass, layout, color, depth, samples, constantsKey, opaqueFade, state, depthEqual, normals, tools);
+		var key = new ToolsKey( pass, layout, color, depth, samples, constantsKey, opaqueFade, state, depthEqual, normals, tools );
 		lock ( pipelines )
 		{
 			if ( toolsPipelines.TryGetValue( key, out var made ) ) return made;
@@ -1185,7 +1191,7 @@ internal sealed class SurfaceProgram : IDisposable
 			{
 				var r = request;
 				var normals = r.Normals && r.Color != Format.Unknown && !r.Ids;
-				var key = (r.Pass, r.Layout, r.Color, r.Depth, r.Samples, r.ConstantsKey, r.Ids, r.OpaqueFade, r.State, r.DepthEqual, 0ul, normals);
+				var key = new PipelineKey( r.Pass, r.Layout, r.Color, r.Depth, r.Samples, r.ConstantsKey, r.Ids, r.OpaqueFade, r.State, r.DepthEqual, 0ul, normals );
 				if ( pipelines.ContainsKey( key ) || !building.Add( key ) ) continue;
 
 				var ahead = new Prewarming();
@@ -1196,7 +1202,7 @@ internal sealed class SurfaceProgram : IDisposable
 		}
 	}
 
-	void MakeAhead( (PassObjects Pass, VertexLayout Layout, Format Color, Format Depth, int Samples, ulong Constants, bool Ids, bool OpaqueFade, SurfaceRenderState State, bool DepthEqual, ulong Features, bool Normals) key, SurfaceManifestRequest r, bool normals, Prewarming ahead )
+	void MakeAhead( PipelineKey key, SurfaceManifestRequest r, bool normals, Prewarming ahead )
 	{
 		lock ( pipelines )
 		{
@@ -1236,7 +1242,7 @@ internal sealed class SurfaceProgram : IDisposable
 	}
 
 	// Pipeline's miss, apart so the hit (every draw) doesn't allocate the background build's closure. Under the pipelines' lock
-	PipelineHandle MakePipeline( (PassObjects Pass, VertexLayout Layout, Format Color, Format Depth, int Samples, ulong Constants, bool Ids, bool OpaqueFade, SurfaceRenderState State, bool DepthEqual, ulong Features, bool Normals) key, PassObjects pass, VertexLayout layout, Format color, Format depth, int samples, SpecializationConstant[] vertexConstants, SpecializationConstant[] pixelConstants, ulong constantsKey, SurfaceRenderState state, bool ids, bool opaqueFade, bool depthEqual, SurfaceFeatures specialized, bool normals )
+	PipelineHandle MakePipeline( PipelineKey key, PassObjects pass, VertexLayout layout, Format color, Format depth, int samples, SpecializationConstant[] vertexConstants, SpecializationConstant[] pixelConstants, ulong constantsKey, SurfaceRenderState state, bool ids, bool opaqueFade, bool depthEqual, SurfaceFeatures specialized, bool normals )
 	{
 		// What it draws, noted too, so the passes that go with it (its depth passes) are guessed
 		if ( specialized is null && device.Surfaces.PrepareParts && device.Gpu.Capabilities.PipelineLibraries ) device.Surfaces.NoteDrawn( this, state, SurfacePassNotes.KindOf( pass.Pass.Name ) );

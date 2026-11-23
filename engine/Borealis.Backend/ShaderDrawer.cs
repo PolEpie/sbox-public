@@ -425,7 +425,10 @@ public sealed partial class ShaderDrawer : IDisposable
 	// Variants by their combos' values packed (ShaderAttributes.ComboBits) and the material's features array, built with no
 	// strings: what most draws find theirs by
 	readonly Dictionary<(ShaderFile Shader, string Mode, int[] Features, ulong Combos, ulong More, ulong Specialization), ShaderVariant> packedVariants = new();
-	readonly Dictionary<(ShaderVariant Variant, Format Color, Format Depth, int Samples, VertexStreamLayout Layout, PrimitiveTopology Topology, bool Ids, ToolsPass Tools, bool Redrawn), PipelineHandle> pipelines = new();
+	// A record struct, not a tuple: a tuple of eight or more keeps the rest in a tuple of its own, which its hash and equality
+	// box until the JIT has optimised them
+	readonly record struct PipelineKey( ShaderVariant Variant, Format Color, Format Depth, int Samples, VertexStreamLayout Layout, PrimitiveTopology Topology, bool Ids, ToolsPass Tools, bool Redrawn );
+	readonly Dictionary<PipelineKey, PipelineHandle> pipelines = new();
 
 	// The attribute ids a shader's specialization constants come from (ToolsVisMode, ShadowFilterQuality...), whose values
 	// pick its variant as its combos' do
@@ -927,7 +930,7 @@ public sealed partial class ShaderDrawer : IDisposable
 	PipelineHandle Pipeline( ShaderVariant variant, Format color, Format depth, int samples, VertexStreamLayout layout, PrimitiveTopology topology, BindingLayoutHandle[] sets, bool ids = false, bool redrawn = false )
 	{
 		var tools = color == Format.Unknown ? ToolsPass.None : ToolsPass;
-		var key = (variant, color, depth, samples, layout, topology, ids, tools, redrawn);
+		var key = new PipelineKey( variant, color, depth, samples, layout, topology, ids, tools, redrawn );
 		if ( sets is null && pipelines.TryGetValue( key, out var pipeline ) ) return pipeline;
 
 		// Inputs the stream lacks (or every input, with no stream) read the default stream. No colour format draws into
