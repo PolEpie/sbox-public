@@ -64,9 +64,9 @@ public sealed unsafe class GpuCounters
 		["default"] =
 		[
 			"GPUTime", "GPUBusy", "VsGsBusy", "PSBusy", "CSBusy",
-			"VALUBusy", "SALUBusy", "VALUUtilization", "Occupancy", "WavesLaunched",
+			"VALUBusy", "SALUBusy", "VALUInstsPerWave", "SALUInstsPerWave", "VMemInstsPerWave", "Occupancy", "WavesLaunched", "LDSBankConflictCycles",
 			"TexUnitBusy", "MemUnitBusy", "MemUnitStalled", "WriteUnitStalled", "FetchSize", "WriteSize",
-			"L0CacheHit", "L1CacheHit", "L2CacheHit", "MALLHit", "ScalarCacheHit", "InstCacheHit",
+			"L0CacheHit", "L1CacheHit", "L2CacheHit", "ScalarCacheHit", "InstCacheHit",
 			"PrimitivesIn", "CulledPrims", "PrimitiveAssemblyBusy", "PSPixelsOut", "PSExportStalls",
 			"PreZSamplesPassing", "PreZSamplesFailingZ", "PostZSamplesPassing", "PostZSamplesFailingZ", "DepthStencilTestBusy", "ZUnitStalled",
 			"CSWavefrontsLaunched", "CSThreadsLaunched", "CSLDSBankConflict",
@@ -75,7 +75,7 @@ public sealed unsafe class GpuCounters
 		["memory"] =
 		[
 			"GPUTime", "TexUnitBusy", "MemUnitBusy", "MemUnitStalled", "WriteUnitStalled", "FetchSize", "WriteSize", "LocalVidMemBytes",
-			"L0CacheHit", "L1CacheHit", "L2CacheHit", "MALLHit", "ScalarCacheHit", "InstCacheHit", "L0TagConflictReadStalledCycles", "TexTriFilteringPct", "TexAveAnisotropy",
+			"L0CacheHit", "L1CacheHit", "L2CacheHit", "ScalarCacheHit", "InstCacheHit", "L0TagConflictReadStalledCycles", "TexTriFilteringPct", "TexAveAnisotropy",
 		],
 		["raster"] =
 		[
@@ -85,7 +85,7 @@ public sealed unsafe class GpuCounters
 		],
 		["compute"] =
 		[
-			"GPUTime", "CSBusy", "VALUBusy", "SALUBusy", "VALUUtilization", "Occupancy", "CSThreadGroupsLaunched", "CSWavefrontsLaunched", "CSThreadsLaunched",
+			"GPUTime", "CSBusy", "VALUBusy", "SALUBusy", "VALUInstsPerWave", "SALUInstsPerWave", "Occupancy", "CSThreadGroupsLaunched", "CSWavefrontsLaunched", "CSThreadsLaunched",
 			"CSALUStalledByLDS", "CSLDSBankConflict", "MemUnitBusy", "MemUnitStalled", "FetchSize", "WriteSize", "L0CacheHit", "L2CacheHit",
 		],
 	};
@@ -93,6 +93,58 @@ public sealed unsafe class GpuCounters
 	readonly nint context;
 	readonly object gate = new();
 	readonly int[] enabled;
+	readonly bool[] enabledFloat;
+	readonly int busyCycles;
+
+	// Where each shown counter comes from: its position among the enabled counters, or a composite and the positions of its
+	// events' instances
+	readonly (int Position, Composite Composite, int[][] Events)[] sources;
+
+	/// <summary>
+	/// A counter made of GPA's raw shader counters (exposed with hardware counters on): each event summed over every
+	/// workgroup processor (<c>SQWGP0_..SQWGPn_</c>), then put together with the GPU's busy cycles.
+	/// </summary>
+	internal sealed record Composite( string Name, GpuCounterUnit Unit, string Description, string[] Events, Func<double[], double, GpuCounters, double> Value )
+	{
+		static readonly System.Text.RegularExpressions.Regex Instance = new( @"^SQWGP(\d+)_(.+)$" );
+
+		/// <summary>Per event, the indices of its instances in <paramref name="available"/>.</summary>
+		public List<int>[] Instances( IReadOnlyList<GpuCounterInfo> available )
+		{
+			var lists = Events.Select( _ => new List<int>() ).ToArray();
+			foreach ( var c in available )
+			{
+				var m = Instance.Match( c.Name );
+				if ( !m.Success || !c.Discrete ) continue;
+				var e = Array.IndexOf( Events, m.Groups[2].Value );
+				if ( e >= 0 ) lists[e].Add( c.Index );
+			}
+
+			return lists;
+		}
+	}
+
+	static double Ratio( double a, double b ) => b > 0 ? a / b : 0;
+
+	/// <summary>The composites: VALU and SALU work, waves and occupancy, LDS bank conflicts.</summary>
+	internal static readonly Composite[] Composites =
+	[
+		// One VALU instruction issued per SIMD per cycle at most: issue cycles over the SIMDs' busy cycles (4 SIMD32s per WGP)
+		new( "VALUBusy", GpuCounterUnit.Percentage, "Share of the busy time the SIMDs spent issuing vector ALU instructions (all WGPs' SQ_PERF_SEL_INST_CYCLES_VALU over busy cycles x SIMDs)",
+			["SQ_PERF_SEL_INST_CYCLES_VALU"], ( e, busy, g ) => 100 * Ratio( e[0], busy * g.Simds ) ),
+		new( "SALUBusy", GpuCounterUnit.Percentage, "Share of the busy time the SIMDs spent issuing scalar ALU instructions, at one a cycle (SQ_PERF_SEL_INSTS_SALU over busy cycles x SIMDs)",
+			["SQ_PERF_SEL_INSTS_SALU"], ( e, busy, g ) => 100 * Ratio( e[0], busy * g.Simds ) ),
+		new( "VALUInstsPerWave", GpuCounterUnit.Ratio, "Vector ALU instructions per wave", ["SQ_PERF_SEL_INSTS_VALU", "SQ_PERF_SEL_WAVES"], ( e, _, _ ) => Ratio( e[0], e[1] ) ),
+		new( "SALUInstsPerWave", GpuCounterUnit.Ratio, "Scalar ALU instructions per wave", ["SQ_PERF_SEL_INSTS_SALU", "SQ_PERF_SEL_WAVES"], ( e, _, _ ) => Ratio( e[0], e[1] ) ),
+		new( "VMemInstsPerWave", GpuCounterUnit.Ratio, "Texture and buffer load instructions per wave", ["SQ_PERF_SEL_INSTS_TEX_LOAD", "SQ_PERF_SEL_WAVES"], ( e, _, _ ) => Ratio( e[0], e[1] ) ),
+		new( "WavesLaunched", GpuCounterUnit.Items, "Waves launched, every shader stage", ["SQ_PERF_SEL_WAVES"], ( e, _, _ ) => e[0] ),
+		new( "Occupancy", GpuCounterUnit.Percentage, "Waves resident on average over the busy time, as a share of the GPU's wave slots (SQ_PERF_SEL_LEVEL_WAVES over busy cycles x wave slots)",
+			["SQ_PERF_SEL_LEVEL_WAVES"], ( e, busy, g ) => 100 * Ratio( e[0], busy * g.Hardware.WaveSlots ) ),
+		new( "LDSBankConflictCycles", GpuCounterUnit.Cycles, "Cycles LDS accesses stalled on bank conflicts, every stage, summed over the WGPs", ["SQC_PERF_SEL_LDS_BANK_CONFLICT"], ( e, _, _ ) => e[0] ),
+	];
+
+	/// <summary>SIMDs on the GPU: four per workgroup processor.</summary>
+	internal int Simds { get; }
 	readonly Action<string> note;
 
 	/// <summary>Every counter GPA offers on the device, derived and (with hardware counters on) raw.</summary>
@@ -153,24 +205,46 @@ public sealed unsafe class GpuCounters
 			}
 
 			Available = available;
+			Simds = 4 * Math.Max( 1, available.Count( c => c.Name.StartsWith( "SQWGP", StringComparison.Ordinal ) && c.Name.EndsWith( "_SQ_PERF_SEL_WAVES", StringComparison.Ordinal ) ) );
 			var (wanted, list) = Parse( selection );
 			ListRequested = list;
 			var byName = new Dictionary<string, GpuCounterInfo>( StringComparer.OrdinalIgnoreCase );
 			foreach ( var c in available ) byName.TryAdd( c.Name, c );
 
-			var chosen = new List<GpuCounterInfo>();
+			// What's shown: GPA's counters by name, and composites of the raw shader counters (Composites); GPU time first, as
+			// it weights the percentages when scopes are added together
+			var shown = new List<(GpuCounterInfo Info, Composite Composite)>();
 			var missing = new List<string>();
+			if ( byName.TryGetValue( "GPUTime", out var time ) ) shown.Add( (time, null) );
 			foreach ( var w in wanted )
 			{
-				if ( byName.TryGetValue( w, out var c ) && c.Discrete ) { if ( !chosen.Contains( c ) ) chosen.Add( c ); }
+				if ( shown.Any( s => s.Info.Name.Equals( w, StringComparison.OrdinalIgnoreCase ) ) ) continue;
+				if ( byName.TryGetValue( w, out var c ) && c.Discrete ) shown.Add( (c, null) );
+				else if ( Composites.FirstOrDefault( x => x.Name.Equals( w, StringComparison.OrdinalIgnoreCase ) ) is { } composite && composite.Instances( available ).All( i => i.Count > 0 ) && byName.ContainsKey( "GPUBusyCycles" ) )
+					shown.Add( (new GpuCounterInfo( -1, composite.Name, "Composite", composite.Description, composite.Unit, true ), composite) );
 				else missing.Add( w );
 			}
 
-			// GPU time comes first: it weights the percentages when scopes are added together
-			if ( byName.TryGetValue( "GPUTime", out var time ) && !chosen.Contains( time ) ) chosen.Insert( 0, time );
 			Missing = missing;
 
-			foreach ( var c in chosen ) Check( Gpa.EnableCounter( session, (uint)c.Index ), $"GpaEnableCounter {c.Name}" );
+			// Enable what's shown and what the composites are made of
+			var raw = new HashSet<int>();
+			var listing = session;
+			void Enable( int index )
+			{
+				if ( raw.Add( index ) ) Check( Gpa.EnableCounter( listing, (uint)index ), $"GpaEnableCounter {available[index].Name}" );
+			}
+
+			foreach ( var (info, composite) in shown )
+			{
+				if ( composite is null ) Enable( info.Index );
+				else
+				{
+					Enable( byName["GPUBusyCycles"].Index );
+					foreach ( var instances in composite.Instances( available ) ) foreach ( var i in instances ) Enable( i );
+				}
+			}
+
 			uint passes, enabledCount;
 			Check( Gpa.GetPassCount( session, &passes ), "GpaGetPassCount" );
 			Check( Gpa.GetNumEnabledCounters( session, &enabledCount ), "GpaGetNumEnabledCounters" );
@@ -178,16 +252,21 @@ public sealed unsafe class GpuCounters
 
 			// Results come in the order GPA reports the enabled counters
 			enabled = new int[enabledCount];
-			var ordered = new List<GpuCounterInfo>();
+			var position = new Dictionary<int, int>();
 			for ( uint i = 0; i < enabledCount; i++ )
 			{
 				uint index;
 				Check( Gpa.GetEnabledIndex( session, i, &index ), "GpaGetEnabledIndex" );
 				enabled[i] = (int)index;
-				ordered.Add( available[(int)index] );
+				position[(int)index] = (int)i;
 			}
 
-			Counters = ordered;
+			enabledFloat = enabled.Select( i => available[i].Float ).ToArray();
+			busyCycles = byName.TryGetValue( "GPUBusyCycles", out var busy ) && position.TryGetValue( busy.Index, out var at ) ? at : -1;
+			sources = shown.Select( s => s.Composite is null
+				? (position[s.Info.Index], (Composite)null, (int[][])null)
+				: (-1, s.Composite, s.Composite.Instances( available ).Select( list => list.Select( i => position[i] ).ToArray() ).ToArray()) ).ToArray();
+			Counters = shown.Select( s => s.Info ).ToList();
 		}
 		finally
 		{
@@ -386,21 +465,23 @@ public sealed unsafe class GpuCounters
 
 	void Read( Session s )
 	{
-		var values = stackalloc ulong[Counters.Count];
-		var size = (nuint)(Counters.Count * sizeof( ulong ));
+		var values = new ulong[enabled.Length];
+		var raw = new double[enabled.Length];
+		var size = (nuint)(enabled.Length * sizeof( ulong ));
 		var read = 0;
 		foreach ( var (key, sample) in s.Samples )
 		{
 			nuint needed;
 			if ( Gpa.GetSampleResultSize( s.Id, sample, &needed ) != Gpa.Ok || needed != size ) continue;
-			if ( Gpa.GetSampleResult( s.Id, sample, size, values ) != Gpa.Ok ) continue;
+			fixed ( ulong* p = values )
+			{
+				if ( Gpa.GetSampleResult( s.Id, sample, size, p ) != Gpa.Ok ) continue;
+			}
+
+			for ( int i = 0; i < raw.Length; i++ ) raw[i] = enabledFloat[i] ? BitConverter.UInt64BitsToDouble( values[i] ) : values[i];
 
 			if ( !totals.TryGetValue( key, out var total ) ) total = (new double[Counters.Count], 0);
-			for ( int c = 0; c < Counters.Count; c++ )
-			{
-				var raw = values[c];
-				total.Sum[c] += Counters[c].Float ? BitConverter.UInt64BitsToDouble( raw ) : raw;
-			}
+			for ( int c = 0; c < Counters.Count; c++ ) total.Sum[c] += Evaluate( c, raw );
 
 			totals[key] = (total.Sum, total.Count + 1);
 			read++;
@@ -408,6 +489,17 @@ public sealed unsafe class GpuCounters
 
 		if ( read == 0 ) Fail( "a counter sample's results couldn't be read" );
 		else Sessions = Sessions with { Done = Sessions.Done + 1 };
+	}
+
+	// A shown counter's value in a sample, from the enabled counters' raw values
+	double Evaluate( int counter, double[] raw )
+	{
+		var (position, composite, events) = sources[counter];
+		if ( composite is null ) return raw[position];
+
+		var sums = new double[events.Length];
+		for ( int e = 0; e < events.Length; e++ ) foreach ( var p in events[e] ) sums[e] += raw[p];
+		return composite.Value( sums, busyCycles >= 0 ? raw[busyCycles] : 0, this );
 	}
 
 	/// <summary>A list begins: on the graphics queue while a sample records, it joins the sample's current pass.</summary>
