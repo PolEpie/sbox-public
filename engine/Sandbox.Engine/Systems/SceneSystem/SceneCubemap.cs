@@ -42,7 +42,7 @@ public sealed class SceneCubemap : SceneLight
 	{
 		Assert.IsValid( sceneWorld );
 
-		using ( var h = IHandle.MakeNextHandle( this ) )
+		using ( var h = NextHandleForTwin() )
 		{
 			if ( MakesNativeTwin ) CSceneSystem.CreateEnvMap( sceneWorld, projectionMode );
 			else MakeLightWithoutTwin( sceneWorld, NewDescription( TypeEnvironmentProbe ), Rendering.SceneObjectFlags.IsEnvMap | Rendering.SceneObjectFlags.IsLight | Rendering.SceneObjectFlags.IsIndirectLight );
