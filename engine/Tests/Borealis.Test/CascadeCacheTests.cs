@@ -311,7 +311,8 @@ public class CascadeCacheTests
 		int IntoCascades( List<GpuCommand> commands )
 		{
 			var maps = Cascades( system.ShadowMaps.Passes ).Select( p => p.TargetMap.Texture ).ToHashSet();
-			return commands.Count( c => (c.Op == GpuOp.Clear && maps.Contains( c.Depth )) || (c.Op == GpuOp.CopyTexture && maps.Contains( c.Texture )) );
+			return commands.Count( c => (c.Op == GpuOp.Clear && maps.Contains( c.Depth )) || (c.Op == GpuOp.CopyTexture && maps.Contains( c.Texture ))
+				|| (c.Op == GpuOp.DrawFullscreen && c.Material?.Name == "shaders/borealis_shadow_cache_copy.shader" && maps.Contains( c.Depth )) );
 		}
 
 		var commands = Frame();

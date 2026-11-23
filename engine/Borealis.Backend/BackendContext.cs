@@ -1545,9 +1545,14 @@ internal sealed partial class BackendContext : GpuContext
 	/// (<see cref="BackendDevice.FullscreenQuad"/>) with <paramref name="parameters"/> over this context's, in
 	/// <paramref name="shaderMode"/> (else the material's first mode). A frame's flipped output is copied this way.
 	/// </summary>
-	public override void DrawFullscreen( GpuMaterial material, ShaderParameters parameters, StringToken shaderMode )
+	public override void DrawFullscreen( GpuMaterial material, ShaderParameters parameters, StringToken shaderMode ) => Fullscreen( material, parameters, shaderMode );
+
+	public override bool DrawFullscreenNow( GpuMaterial material, ShaderParameters parameters, StringToken shaderMode )
+		=> Fullscreen( material, parameters, shaderMode ) && recording is not null && !recording.List.SkippingDraws;
+
+	bool Fullscreen( GpuMaterial material, ShaderParameters parameters, StringToken shaderMode )
 	{
-		if ( recording is null || material is not BackendMaterial { Shader: { } shader } || shader.Modes.Count == 0 ) return;
+		if ( recording is null || material is not BackendMaterial { Shader: { } shader } || shader.Modes.Count == 0 ) return false;
 
 		var mode = ModeName( shader, shaderMode ) is null ? Token( shader.Modes[0].Name ) : shaderMode;
 
@@ -1562,8 +1567,9 @@ internal sealed partial class BackendContext : GpuContext
 
 		var quad = device.FullscreenQuad;
 		SetObjectAttributes( parameters );
-		DrawModel( material, mode, quad, quad.DrawsForLod( 0 )[0], 0, 1 );
+		var drew = DrawModel( material, mode, quad, quad.DrawsForLod( 0 )[0], 0, 1 );
 		SetObjectAttributes( null );
+		return drew;
 	}
 
 	public override void DrawIndexedInstanced( in RenderMesh.Draw draw, int instanceCount ) { }
