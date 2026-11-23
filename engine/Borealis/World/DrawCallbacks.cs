@@ -23,4 +23,19 @@ public abstract class DrawCallbacks
 	/// Targets are restored afterward.
 	/// </summary>
 	internal abstract void Render( GpuContext context, ViewPass view, MeshLayer layer, bool after );
+
+	/// <summary>
+	/// Count the samples its stretches of draws pass in colour layers (occlusion queries, <see cref="GpuContext.BeginCount"/>)
+	/// and give a frame's total to <see cref="Counted"/> a few frames later, one frame's counts at a time.
+	/// </summary>
+	internal virtual bool Counts => false;
+
+	/// <summary>
+	/// The samples the object's draws passed in every view of one frame: none when all of it was hidden.
+	/// </summary>
+	internal virtual void Counted( ulong samples ) { }
+
+	// The frame's counts still out, for the device that takes them
+	internal int CountFrame, CountPending;
+	internal ulong CountSum;
 }

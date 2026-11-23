@@ -29,7 +29,7 @@ internal sealed partial class FrameRecorder : IDisposable
 	{
 		/// <summary>Drawing: <see cref="Segment.Count"/> of the <see cref="work"/> from <see cref="Segment.Index"/>.</summary>
 		Draw,
-		/// <summary>Consecutive main-thread layers from one frame.</summary>
+		/// <summary>Consecutive layers from one frame that record on the same kind of thread.</summary>
 		Layers,
 	}
 
@@ -905,7 +905,7 @@ internal sealed partial class FrameRecorder : IDisposable
 						var scope = rc.BeginGpuScope( rc.Census ? CensusScope( item.View.View?.Name, item.View.IsShadow, item.Layer.Name ) : item.Layer.Name );
 						if ( GraphMeasure.Listing ) GraphMeasure.Pass( MeasureRender, item.Layer.Name );
 						item.Layer.Begin( frame, rc, item.View, start: from == 0 );
-						frame.System.DrawRange( rc, item.View, item.Layer, from, to - from, ref stats );
+						frame.DrawRange( rc, item.View, item.Layer, from, to - from, ref stats );
 						rc.EndPass();
 						rc.EndGpuScope( scope );
 						if ( started != 0 ) stats.PrepassRecordMs += Stopwatch.GetElapsedTime( started ).TotalMilliseconds;

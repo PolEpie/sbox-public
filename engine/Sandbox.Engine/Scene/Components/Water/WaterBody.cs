@@ -256,7 +256,11 @@ public sealed partial class WaterBody : Component, Component.ExecuteInEditor
 		if ( below )
 			normal = -normal;
 
-		if ( MaterialOpacity( ActiveMaterial, below ) >= 1 )
+		// A surface wholly hidden behind the scene needs no capture: its count comes a few frames late, so the first
+		// frames of it coming into view draw without refraction
+		var surface = _renderer.SceneObject;
+		if ( surface.IsValid() ) surface.CountsSamples = true;
+		if ( !Refraction || MaterialOpacity( ActiveMaterial, below ) >= 1 || surface is { IsCountedHidden: true } )
 			return key;
 
 		key.Camera = viewer;

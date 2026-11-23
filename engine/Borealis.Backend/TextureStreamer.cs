@@ -217,8 +217,16 @@ internal sealed class TextureStreamer
 	/// <summary>Bytes of streamed textures' images.</summary>
 	public long ResidentBytes { get; private set; }
 
-	/// <summary>Bytes they'd take at the mips they want.</summary>
-	public long WantedBytes { get; private set; }
+	/// <summary>Bytes they'd take at the mips they want: summed when asked, as only the window's title and reports read it.</summary>
+	public long WantedBytes
+	{
+		get
+		{
+			long wanted = 0;
+			foreach ( var texture in textures ) wanted += texture.BytesFrom( Math.Min( texture.Wanted, texture.ResidentTop ) );
+			return wanted;
+		}
+	}
 
 	/// <summary>Builds in flight.</summary>
 	public int BuildsInFlight => builds.Count;
@@ -637,10 +645,6 @@ internal sealed class TextureStreamer
 		var left = room - startedSinceMemory;
 		if ( BudgetBytes > 0 ) left = Math.Min( left, BudgetBytes - ResidentBytes - InFlightBytes() );
 		available = left;
-
-		long wanted = 0;
-		foreach ( var texture in textures ) wanted += texture.BytesFrom( Math.Min( texture.Wanted, texture.ResidentTop ) );
-		WantedBytes = wanted;
 	}
 
 	long available;

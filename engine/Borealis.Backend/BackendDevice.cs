@@ -3438,6 +3438,66 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	}
 
 	//
+	// Draw callbacks' sample counts (GpuContext.BeginCount): taken and read on the main thread, where their runs record
+	//
+
+	const int CountQueries = 16;
+	OcclusionQueries counts;
+	readonly (DrawCallbacks For, int Frame)[] counting = new (DrawCallbacks, int)[CountQueries];
+	int countFrame;
+
+	internal OcclusionQueries Counts => counts ??= Gpu.CreateOcclusionQueries( CountQueries );
+
+	/// <summary>
+	/// A query to count a stretch of <paramref name="counted"/>'s draws into, or -1: an earlier frame's counts are still
+	/// out, or no query is free.
+	/// </summary>
+	internal int TakeCount( DrawCallbacks counted )
+	{
+		if ( counted.CountPending > 0 && counted.CountFrame != countFrame ) return -1;
+
+		// The frame's total starts at its first stretch, counted or not
+		if ( counted.CountFrame != countFrame ) (counted.CountFrame, counted.CountSum) = (countFrame, 0);
+
+		var query = 0;
+		while ( query < CountQueries && counting[query].For is not null ) query++;
+		if ( query == CountQueries )
+		{
+			// A stretch that can't be counted mustn't leave the frame's total saying it was hidden
+			counted.CountSum++;
+			return -1;
+		}
+
+		counted.CountPending++;
+		counting[query] = (counted, countFrame);
+		return query;
+	}
+
+	void ReceiveCounts()
+	{
+		countFrame++;
+		for ( int query = 0; query < CountQueries; query++ )
+		{
+			var (counted, frame) = counting[query];
+
+			// Two frames on, as auto exposure's counts wait (AutoExposure.ReceiveQueries): one reset in a list the GPU hasn't
+			// run yet still reads as its last count
+			if ( counted is null || countFrame <= frame + 2 ) continue;
+
+			if ( !counts.TryRead( query, out var samples ) )
+			{
+				// A list that was never submitted never finishes its queries: counted as seen
+				if ( countFrame < frame + 600 ) continue;
+				samples = 1;
+			}
+
+			counting[query] = default;
+			counted.CountSum += samples;
+			if ( --counted.CountPending == 0 ) counted.Counted( counted.CountSum );
+		}
+	}
+
+	//
 	// Readbacks: copies to the CPU, delivered once their submission has finished
 	//
 
@@ -3520,6 +3580,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 			ResidentCulls.BeginFrame( GpuDrivenFrame, Gpu );
 			TimeFrame();
 			Poll();
+			ReceiveCounts();
 		}
 
 		// Streamed textures' new images, written now, ahead of the frame's work

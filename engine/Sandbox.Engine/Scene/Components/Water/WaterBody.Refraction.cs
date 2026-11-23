@@ -12,6 +12,12 @@ public sealed partial class WaterBody
 	internal static int RefractionDownsampleFactor { get; set; } = 1;
 
 	/// <summary>
+	/// Whether water draws the scene under it into its surface. Off, a body in view no longer renders the scene a second time.
+	/// </summary>
+	[ConVar( "r.water.refraction", Help = "Draw the scene under water into its surface (0: off, saves a second render of the scene)." )]
+	internal static bool Refraction { get; set; } = true;
+
+	/// <summary>
 	/// Record the refraction capture: a view through the surface rendered where the surface draws, into a target the
 	/// renderer takes then, bound to the surface's draws with the view's viewport.
 	/// </summary>

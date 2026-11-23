@@ -168,10 +168,13 @@ internal sealed class LightModulatorSystem : GameObjectSystem<LightModulatorSyst
 	{
 		RebuildCount++;
 		candidates.Clear();
-		foreach ( var state in previousLights )
+		for ( int i = 0; i < previousLights.Count; i++ )
 		{
-			if ( state.Light.IsValid() )
-				state.Light.SetModulatorRange( 0, 0 );
+			// One still in the snapshot at its place gets its new range below
+			var light = previousLights[i].Light;
+			if ( i < lights.Count && lights[i].Light == light ) continue;
+			if ( light.IsValid() )
+				light.SetModulatorRange( 0, 0 );
 		}
 
 		foreach ( var state in lights )
@@ -183,7 +186,9 @@ internal sealed class LightModulatorSystem : GameObjectSystem<LightModulatorSyst
 					candidates.Add( (uint)i );
 			}
 
-			state.Light.SetModulatorRange( (uint)first, (uint)(candidates.Count - first) );
+			// An empty range starts at 0 wherever it falls, so a light no rectangle reaches isn't written again
+			var count = candidates.Count - first;
+			state.Light.SetModulatorRange( count > 0 ? (uint)first : 0, (uint)count );
 		}
 	}
 

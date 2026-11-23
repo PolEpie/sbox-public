@@ -319,7 +319,17 @@ public partial class SceneObject : IHandle
 	public BBox Bounds
 	{
 		get => GetSafeBounds();
-		set { if ( WritesTwin( "SetBounds" ) ) native.SetBounds( value ); SetKeptBounds( value ); NotifyChanged( Rendering.SceneObjectChange.Bounds ); }
+		set
+		{
+			if ( WritesTwin( "SetBounds" ) ) native.SetBounds( value );
+			var kept = _bounds;
+			SetKeptBounds( value );
+
+			// Copies set the box they already have every frame; the render object holds it, and follows a moved or reposed object itself
+			if ( _boundsKind != BoundsKind.Native && _bounds == kept ) return;
+
+			NotifyChanged( Rendering.SceneObjectChange.Bounds );
+		}
 	}
 
 	/// <summary>
@@ -365,7 +375,12 @@ public partial class SceneObject : IHandle
 		set
 		{
 			var twin = WritesTwin( "SetTintRGBA" );
-			_tint = NativeTint( value );
+			var tint = NativeTint( value );
+
+			// Copies set the tint they already have every frame, and each write goes through the render object
+			if ( _tint is { } held && held == tint ) return;
+
+			_tint = tint;
 			if ( WritesNative && twin ) native.SetTintRGBA( value );
 			NotifyChanged( Rendering.SceneObjectChange.Tint );
 		}

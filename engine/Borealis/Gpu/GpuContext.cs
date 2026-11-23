@@ -131,6 +131,15 @@ internal abstract class GpuContext : IDisposable
 	/// <summary>Invalidate target, parameter and material caches after external drawing.</summary>
 	internal abstract void Invalidate();
 
+	/// <summary>
+	/// Count the samples drawn from here to <see cref="EndCount"/> for <paramref name="counted"/> (an occlusion query), given
+	/// to <see cref="DrawCallbacks.Counted"/> a few frames later. Nothing while its last frame's counts are still out.
+	/// </summary>
+	internal virtual void BeginCount( DrawCallbacks counted ) { }
+
+	/// <summary>Stop the count <see cref="BeginCount"/> started, if one is running.</summary>
+	internal virtual void EndCount() { }
+
 	/// <summary>Bind the view constants and cache their key.</summary>
 	public abstract void SetViewConstants( in ViewConstants constants, ViewConstantsKey? key );
 
@@ -532,8 +541,11 @@ internal abstract class GpuContext : IDisposable
 	/// <summary>Read part of a buffer back once the GPU has written it. The callback runs later, on any thread.</summary>
 	public abstract void ReadBuffer( GpuBuffer buffer, int offset, int bytes, GpuReadback callback );
 
-	/// <summary>Allow one lazy frame copy for this translucent layer.</summary>
-	public abstract void BeginFrameBufferReads( GpuTexture copy, Rect viewport );
+	/// <summary>
+	/// Allow one lazy frame copy for this translucent layer; with <paramref name="madeBefore"/>, an earlier part of the layer
+	/// made it, and its first reader here only binds it.
+	/// </summary>
+	public abstract void BeginFrameBufferReads( GpuTexture copy, Rect viewport, bool madeBefore = false );
 
 	/// <summary>Stop frame copies after the translucent layer.</summary>
 	public abstract void EndFrameBufferReads();

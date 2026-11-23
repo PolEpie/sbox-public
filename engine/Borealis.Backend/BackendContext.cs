@@ -655,12 +655,47 @@ internal sealed partial class BackendContext : GpuContext
 
 	void CloseScope( bool flushClears = true )
 	{
+		// A count ends with its scope: whatever the object draws after that isn't in it, so it can't say hidden
+		if ( counting >= 0 )
+		{
+			countingFor.CountSum++;
+			EndCount();
+		}
+
 		if ( flushClears ) FlushClears();
 		if ( recording is { Rendering: true } r )
 		{
 			r.List.EndRendering();
 			r.Rendering = false;
 		}
+	}
+
+	// The occlusion query counting an object's draws (BeginCount), or -1
+	int counting = -1;
+	DrawCallbacks countingFor;
+
+	internal override void BeginCount( DrawCallbacks counted )
+	{
+		if ( recording is null || !boundValid || (bound.Color is null && bound.Depth is null) ) return;
+
+		var query = device.TakeCount( counted );
+		if ( query < 0 ) return;
+
+		// Queries are reset outside rendering
+		CloseScope();
+		recording.List.ResetQueries( device.Counts, query, 1 );
+		if ( !EnsureScope() ) return;
+		recording.List.BeginQuery( device.Counts, query );
+		counting = query;
+		countingFor = counted;
+	}
+
+	internal override void EndCount()
+	{
+		if ( counting < 0 ) return;
+		recording.List.EndQuery( device.Counts, counting );
+		counting = -1;
+		countingFor = null;
 	}
 
 	/// <summary>
@@ -1405,13 +1440,14 @@ internal sealed partial class BackendContext : GpuContext
 
 	GpuTexture frameBufferCopy;
 	Rect frameBufferCopyViewport;
-	bool frameBufferCopied;
+	bool frameBufferCopied, frameBufferMadeBefore;
 
-	public override void BeginFrameBufferReads( GpuTexture copy, Rect viewport )
+	public override void BeginFrameBufferReads( GpuTexture copy, Rect viewport, bool madeBefore = false )
 	{
 		frameBufferCopy = copy;
 		frameBufferCopyViewport = viewport;
 		frameBufferCopied = false;
+		frameBufferMadeBefore = madeBefore;
 	}
 
 	public override void EndFrameBufferReads() => frameBufferCopy = null;
@@ -1421,13 +1457,14 @@ internal sealed partial class BackendContext : GpuContext
 		if ( frameBufferCopy is null || frameBufferCopied || bound.Color is null ) return;
 		frameBufferCopied = true;
 
-		CopyTexture( bound.Color, frameBufferCopy, 1 );
+		// Made by an earlier part of the layer, in a list submitted before this one, which left it readable
+		if ( !frameBufferMadeBefore ) CopyTexture( bound.Color, frameBufferCopy, 1 );
 		var viewport = frameBufferCopyViewport;
 
 		// Its mips for blurred refraction, then readable by the draws after it: they bind only what's readable
 		if ( frameBufferCopy is BackendTexture copy )
 		{
-			if ( device.FrameBufferCopyMips ) GenerateFrameBufferCopyMips( copy, viewport );
+			if ( device.FrameBufferCopyMips && !frameBufferMadeBefore ) GenerateFrameBufferCopyMips( copy, viewport );
 			Transition( copy, ImageLayout.ShaderRead );
 		}
 

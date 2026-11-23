@@ -159,7 +159,9 @@ internal static partial class PanelWindowInput
 				var copy = windowEvent;
 				var window = Sdl.GetWindowFromEvent( (IntPtr)(&copy) );
 				if ( window == IntPtr.Zero ) return;
-				if ( PanelWindows.Find( window ) is null ) return;
+				if ( PanelWindows.Find( window ) is not { } target ) return;
+				// An STA wait pumps messages mid-frame, so draw on the next frame instead. Borealis.Gpu's frames are ours, not the scene system's
+				if ( Graphics.IsActive || BorealisGpuWindow.Drawing is not null ) { target.Resized(); return; }
 				// Modal resize loops park the normal frame update, including scratch-target expiry.
 				CSceneSystem.FrameUpdate();
 				OnResized( window );

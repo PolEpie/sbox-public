@@ -21,6 +21,9 @@ internal sealed class DepthChainLayer : RenderLayer
 	public override FrameResources Writes => FrameResources.DepthChain;
 	public override FrameResources Reads( RenderFrame frame ) => FrameResources.Depth;
 
+	// Dispatches into a chain BeforeSegments pooled, through its own context
+	public override bool RecordsOffMainThread => true;
+
 	/// <summary>
 	/// Bind the chain before recording. Previous-frame depth aliases the current chain, matching native.
 	/// </summary>
