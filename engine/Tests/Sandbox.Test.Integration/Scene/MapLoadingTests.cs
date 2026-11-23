@@ -88,6 +88,11 @@ public class MapLoadingTests
 			var from = center.WithZ( map.Bounds.Maxs.z + 100 );
 			var to = center.WithZ( map.Bounds.Mins.z - 100 );
 
+			// The map's trace is built once however many threads ask for it first
+			var traces = new object[16];
+			System.Threading.Tasks.Task.Run( () => System.Threading.Tasks.Parallel.For( 0, traces.Length, i => traces[i] = map.Geometry.Trace() ) ).Wait();
+			Assert.IsTrue( traces.All( x => ReferenceEquals( x, traces[0] ) ), "one trace for every thread" );
+
 			var hits = new Sandbox.Engine.Utility.RayTrace.MeshTraceRequest.Result[16];
 			System.Threading.Tasks.Task.Run( () => System.Threading.Tasks.Parallel.For( 0, hits.Length, i =>
 				hits[i] = world.Trace.Ray( from + new Vector3( i, 0, 0 ), to + new Vector3( i, 0, 0 ) ).Run() ) ).Wait();
