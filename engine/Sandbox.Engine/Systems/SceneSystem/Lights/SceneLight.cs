@@ -292,7 +292,7 @@ public partial class SceneLight : SceneObject
 	{
 		Assert.IsValid( sceneWorld );
 
-		using ( var h = IHandle.MakeNextHandle( this ) )
+		using ( var h = NextHandleForTwin() )
 		{
 			if ( MakesNativeTwin ) CSceneSystem.CreatePointLight( sceneWorld );
 			else MakeLightWithoutTwin( sceneWorld, NewDescription( TypePoint ) );
