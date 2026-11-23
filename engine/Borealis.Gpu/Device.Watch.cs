@@ -32,22 +32,32 @@ public sealed unsafe partial class Device
 	/// </summary>
 	internal Doing Enter( string what )
 	{
-		if ( watchThread is null || Environment.CurrentManagedThreadId != frameThread ) return default;
+		// A profiler zone of the same name, on any thread
+		var profiler = Profiler;
+		profiler?.BeginZone( ZoneName( what ), 0x8080FFFF );
+
+		if ( watchThread is null || Environment.CurrentManagedThreadId != frameThread ) return new Doing( null, null, profiler );
 		var outer = doing;
 		doing = what;
 		Volatile.Write( ref doingSince, Stopwatch.GetTimestamp() );
-		return new Doing( this, outer );
+		return new Doing( this, outer, profiler );
 	}
 
-	internal readonly struct Doing( Device device, string outer ) : IDisposable
+	internal readonly struct Doing( Device device, string outer, IDeviceProfiler profiler ) : IDisposable
 	{
 		public void Dispose()
 		{
+			profiler?.EndZone();
 			if ( device is null ) return;
 			device.doing = outer;
 			Volatile.Write( ref device.doingSince, Stopwatch.GetTimestamp() );
 		}
 	}
+
+	// UTF-8 copies of Enter's names (constants) for profiler zones, made once each and kept for the process
+	static readonly System.Collections.Concurrent.ConcurrentDictionary<string, nint> zoneNames = new( ReferenceEqualityComparer.Instance );
+
+	static nint ZoneName( string what ) => zoneNames.TryGetValue( what, out var name ) ? name : zoneNames.GetOrAdd( what, static w => System.Runtime.InteropServices.Marshal.StringToCoTaskMemUTF8( "Borealis.Gpu " + w ) );
 
 	void StartWatch()
 	{

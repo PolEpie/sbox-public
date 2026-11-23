@@ -283,6 +283,7 @@ public sealed unsafe class CommandList
 
 	internal void Destroy()
 	{
+		using var _ = device.Enter( "destroy command list" );
 		LeaveGate();
 		foreach ( var p in descriptorPools ) vk.vkDestroyDescriptorPool( vk.Device, p, null );
 		descriptorPools.Clear();
@@ -295,7 +296,11 @@ public sealed unsafe class CommandList
 	/// Give the driver back the command memory its pool kept from its biggest recording; for a recycled spare only. The
 	/// next recording grows it again.
 	/// </summary>
-	internal void ReleaseCommandMemory() => vk.vkResetCommandPool( vk.Device, pool, Vulkan.Vk.CommandPoolResetReleaseResources ).Check( "vkResetCommandPool" );
+	internal void ReleaseCommandMemory()
+	{
+		using ( device.Enter( "release command memory" ) )
+			vk.vkResetCommandPool( vk.Device, pool, Vulkan.Vk.CommandPoolResetReleaseResources ).Check( "vkResetCommandPool" );
+	}
 
 	void Recording()
 	{
