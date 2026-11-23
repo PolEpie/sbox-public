@@ -462,11 +462,13 @@ public sealed unsafe partial class Device
 	/// (Construct's held 1.4 GB of mapped memory from then on), and a map's frames take over a hundred lists, whose command
 	/// pools keep the driver's command memory (Construct's held ~370 MB of video memory in the menu after it); steady
 	/// frames take a few. The pages freed are those in the emptiest memory blocks, so blocks drain rather than each keeping
-	/// a page or two (Construct had 100 MiB of 4 MiB holes in upload blocks).
+	/// a page or two (Construct had 100 MiB of 4 MiB holes in upload blocks). Lists go by a longer window of their own
+	/// (<see cref="CommandListSpareSeconds"/>).
 	/// </summary>
 	void TrimSpares()
 	{
 		for ( int c = 0; c < FreePages.Length; c++ ) freePagesLow[c] = Math.Min( freePagesLow[c], FreePages[c].Count );
+		if ( FrameNumber - listTrimFrom >= UploadPageIdleFrames && ListsKeptLongEnough() ) TrimSpareLists();
 		if ( FrameNumber - trimFrom < UploadPageIdleFrames || !Allocator.KeptLongEnough( trimFromTicks ) ) return;
 
 		for ( int c = 0; c < FreePages.Length; c++ )
@@ -487,6 +489,26 @@ public sealed unsafe partial class Device
 			trimPages.Clear();
 		}
 
+		trimFrom = FrameNumber;
+		trimFromTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+	}
+
+	/// <summary>
+	/// Seconds spare command lists have to go unused, as well as <see cref="UploadPageIdleFrames"/> frames, before they're
+	/// freed (when the allocator goes by time, <see cref="Memory.MemoryAllocator.SpareSeconds"/>): a view that comes and goes
+	/// every few seconds (a water body's refraction) takes a few dozen lists more while it draws, and lists freed between had
+	/// to be made and their pools grown again each time it came back.
+	/// </summary>
+	internal double CommandListSpareSeconds { get; set; } = 30;
+
+	ulong listTrimFrom;
+	long listTrimFromTicks;
+
+	bool ListsKeptLongEnough() => Allocator.SpareSeconds <= 0 || System.Diagnostics.Stopwatch.GetElapsedTime( listTrimFromTicks ).TotalSeconds >= CommandListSpareSeconds;
+
+	/// <summary>Free the spare command lists every frame in the window left unused, past <see cref="KeptFreeCommandLists"/> (<see cref="TrimSpares"/>).</summary>
+	void TrimSpareLists()
+	{
 		// A spare list's frame has finished: its command pool and descriptor pool can go at once
 		for ( int q = 0; q < freeLists.Length; q++ )
 		{
@@ -516,8 +538,8 @@ public sealed unsafe partial class Device
 			}
 		}
 
-		trimFrom = FrameNumber;
-		trimFromTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+		listTrimFrom = FrameNumber;
+		listTrimFromTicks = System.Diagnostics.Stopwatch.GetTimestamp();
 	}
 
 	readonly CommandList[] keptLists = new CommandList[KeptFreeCommandLists];
