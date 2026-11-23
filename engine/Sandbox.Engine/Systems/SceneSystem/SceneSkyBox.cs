@@ -54,7 +54,7 @@ public class SceneSkyBox : SceneObject
 		// Native's defaults (CSceneSkyBoxObject)
 		fogParams = new FogParamInfo { FogType = FogType.Distance, FogMinStart = -25, FogMinEnd = -35, FogMaxStart = 25, FogMaxEnd = 35 };
 
-		using ( var h = IHandle.MakeNextHandle( this ) )
+		using ( var h = NextHandleForTwin() )
 		{
 			if ( MakesNativeTwin ) CManagedSceneObject.Create( world );
 			else
