@@ -97,6 +97,53 @@ public class SceneObjectTwinTests
 		}
 	}
 
+	/// <summary>
+	/// A twinless object opens no handle scope: none is left waiting for a native object that's never made (it was taken by the
+	/// next native object made instead, and logged), while a scope that no native object takes is still logged.
+	/// </summary>
+	[TestMethod]
+	public void TwinlessObjectsLeaveNoHandleScopeOpen()
+	{
+		var world = new SceneWorld();
+		var logged = new List<string>();
+		void OnEmitted( LogEvent e ) { if ( e.Message?.Contains( "NextHandleScope" ) == true ) lock ( logged ) logged.Add( e.Message ); }
+		Sandbox.Diagnostics.Logging.OnEmitted += OnEmitted;
+		try
+		{
+			var sky = Material.Load( "materials/skybox/skybox_day_01.vmat" );
+			var kinds = Kinds.Concat( new (string Name, Func<SceneWorld, SceneObject> Make)[]
+			{
+				("point light", w => new ScenePointLight( w, Vector3.Zero, 100, Color.White )),
+				("spot light", w => new SceneSpotLight( w, Vector3.Zero, Color.White )),
+				("sun", w => new SceneDirectionalLight( w, Rotation.From( 45, 30, 0 ), Color.White )),
+				("cubemap", w => new SceneCubemap( w, null, BBox.FromPositionAndSize( 0, 200 ) )),
+				("light probe", w => new SceneLightProbe( w, null, null, null, BBox.FromPositionAndSize( 0, 200 ), Transform.Zero, 0, 0 )),
+				("sky", w => new SceneSkyBox( w, sky )),
+			} );
+
+			foreach ( var (name, make) in kinds )
+			{
+				var so = Make( world, make, false );
+				Assert.IsTrue( so.IsValid(), $"{name}: valid" );
+				Assert.IsFalse( so.HasTwin, $"{name}: twinless" );
+				Assert.IsNull( HandleIndex.nextObject, $"{name}: no scope left open" );
+			}
+
+			lock ( logged ) Assert.AreEqual( 0, logged.Count, string.Join( "; ", logged ) );
+
+			// A scope opened around code that makes no native object is a misuse, and is still logged
+			var unused = Make( world, Kinds[3].Make, false );
+			using ( IHandle.MakeNextHandle( unused ) ) { }
+			Assert.IsNull( HandleIndex.nextObject, "closed" );
+			lock ( logged ) Assert.AreEqual( 1, logged.Count, "an unused scope is logged" );
+		}
+		finally
+		{
+			Sandbox.Diagnostics.Logging.OnEmitted -= OnEmitted;
+			world.Delete();
+		}
+	}
+
 	[TestMethod]
 	public void TwinlessObjectsLeaveTheirWorldWhenDeleted()
 	{

@@ -15,6 +15,10 @@ namespace Sandbox
 
 		bool IValid.IsValid => HandleValid();
 
+		/// <summary>
+		/// Hands <paramref name="obj"/> to the next native object made on this thread, which binds its handle to it. Open one
+		/// only around code that makes that native object; a null object opens nothing.
+		/// </summary>
 		internal static NextHandleScope MakeNextHandle( IHandle obj ) => new NextHandleScope( obj );
 
 		internal ref struct NextHandleScope
@@ -25,15 +29,20 @@ namespace Sandbox
 			public NextHandleScope( IHandle handle )
 			{
 				self = handle;
+				if ( self is null ) return;
+
 				last = HandleIndex.nextObject;
 				HandleIndex.nextObject = self;
 			}
 
 			public void Dispose()
 			{
+				if ( self is null ) return;
+
+				// No native object took it: the scope was opened around code that made none
 				if ( HandleIndex.nextObject == self )
 				{
-					Log.Warning( "NextHandleScope: Didn't use nextObject!! WTF!!!" );
+					Log.Warning( $"NextHandleScope: no native object took the handle for {self.GetType()}" );
 				}
 
 				HandleIndex.nextObject = last;
