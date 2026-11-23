@@ -24,6 +24,7 @@ internal static class HandFilledConstants
 		new( typeof( BackendContext.MeshletCullConstants ), "BorealisMeshletCull_t", "g_nMeshlet", ["shaders/borealis_meshlet_cull_cs.shader"] ),
 		new( typeof( BackendContext.HiZConstants ), "BorealisHiZ_t", "g_nHiZ", ["shaders/borealis_hiz_cs.shader"] ),
 		new( typeof( BackendContext.IdsNormalsConstants ), "BorealisIdsNormals_t", "g_nIds", ["shaders/borealis_ids_normals_cs.shader"] ),
+		new( typeof( BackendContext.IdsViewConstants ), "BorealisIdsView_t", "g_nIdsView", ["shaders/borealis_ids_view_cs.shader"] ),
 	];
 
 	/// <summary>

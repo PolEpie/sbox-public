@@ -122,7 +122,6 @@ namespace Sandbox
 		internal static int RegisterHandle( IntPtr ptr, uint type )
 		{
 			// No auto create, should already be waiting in NextObject
-			if ( type == Types.ManagedSceneObject ) return New<SceneObject>( ptr, null );
 
 			if ( type == Types.SceneWorld ) return New<SceneWorld>( ptr, ( h ) => new SceneWorld( h ) );
 			if ( type == Types.SceneObject ) return New<SceneObject>( ptr, ( h ) => new SceneObject( h ) );
@@ -185,7 +184,6 @@ namespace Sandbox
 			internal static uint SceneSkyBoxObject { get; } = StringToken.FindOrCreate( "SceneSkyBoxObject" );
 			internal static uint SceneParticleObject { get; } = StringToken.FindOrCreate( "SceneParticleObject" );
 			internal static uint SceneAnimatableObject { get; } = StringToken.FindOrCreate( "SceneAnimatableObject" );
-			internal static uint ManagedSceneObject { get; } = StringToken.FindOrCreate( "ManagedSceneObject" );
 			internal static uint EnvMapSceneObject { get; } = StringToken.FindOrCreate( "EnvMapSceneObject" );
 			internal static uint SceneLightProbeVolumeObject { get; } = StringToken.FindOrCreate( "SceneLightProbeVolumeObject" );
 

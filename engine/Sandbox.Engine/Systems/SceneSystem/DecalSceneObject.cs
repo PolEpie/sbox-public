@@ -33,97 +33,105 @@ internal sealed class DecalSceneObject : SceneObject
 	public Texture ColorTexture
 	{
 		get => colorTexture;
-		set { colorTexture = value; SettingsChanged(); }
+		set => Set( ref colorTexture, value );
 	}
 
 	public Texture NormalTexture
 	{
 		get => normalTexture;
-		set { normalTexture = value; SettingsChanged(); }
+		set => Set( ref normalTexture, value );
 	}
 
 	public Texture RMOTexture
 	{
 		get => rmoTexture;
-		set { rmoTexture = value; SettingsChanged(); }
+		set => Set( ref rmoTexture, value );
 	}
 
 	public Texture HeightTexture
 	{
 		get => heightTexture;
-		set { heightTexture = value; SettingsChanged(); }
+		set => Set( ref heightTexture, value );
 	}
 
 	public Color Color
 	{
 		get => color;
-		set { color = value; SettingsChanged(); }
+		set => Set( ref color, value );
 	}
 
 	public uint SortOrder
 	{
 		get => sortOrder;
-		set { sortOrder = value; SettingsChanged(); }
+		set => Set( ref sortOrder, value );
 	}
 
 	public uint ExclusionBitMask
 	{
 		get => exclusionBitMask;
-		set { exclusionBitMask = value; SettingsChanged(); }
+		set => Set( ref exclusionBitMask, value );
 	}
 
 	public Texture EmissionTexture
 	{
 		get => emissionTexture;
-		set { emissionTexture = value; SettingsChanged(); }
+		set => Set( ref emissionTexture, value );
 	}
 
 	public float AttenuationAngle
 	{
 		get => attenuationAngle;
-		set { attenuationAngle = value; SettingsChanged(); }
+		set => Set( ref attenuationAngle, value );
 	}
 
 	public float ColorMix
 	{
 		get => colorMix;
-		set { colorMix = value; SettingsChanged(); }
+		set => Set( ref colorMix, value );
 	}
 
 	public float EmissionEnergy
 	{
 		get => emissionEnergy;
-		set { emissionEnergy = value; SettingsChanged(); }
+		set => Set( ref emissionEnergy, value );
 	}
 
 	public uint SequenceIndex
 	{
 		get => sequenceIndex;
-		set { sequenceIndex = value; SettingsChanged(); }
+		set => Set( ref sequenceIndex, value );
 	}
 
 	public float ParallaxStrength
 	{
 		get => parallaxStrength;
-		set { parallaxStrength = value; SettingsChanged(); }
+		set => Set( ref parallaxStrength, value );
 	}
 
 	public int SamplerIndex
 	{
 		get => samplerIndex;
-		set { samplerIndex = value; SettingsChanged(); }
+		set => Set( ref samplerIndex, value );
 	}
 
 	public float CoverageAmount
 	{
 		get => coverageAmount;
-		set { coverageAmount = value; SettingsChanged(); }
+		set => Set( ref coverageAmount, value );
 	}
 
 	public float CoverageRange
 	{
 		get => coverageRange;
-		set { coverageRange = value; SettingsChanged(); }
+		set => Set( ref coverageRange, value );
+	}
+
+	// Decal sets every setting every frame: only a change is written, or each would rewrite the render object
+	void Set<T>( ref T field, T value )
+	{
+		if ( EqualityComparer<T>.Default.Equals( field, value ) ) return;
+		field = value;
+		SettingsChanged();
 	}
 
 	public DecalSceneObject( SceneWorld world )
@@ -147,7 +155,7 @@ internal sealed class DecalSceneObject : SceneObject
 		coverageAmount = 1.0f;
 		coverageRange = 0.07f;
 
-		MakeWithoutTwin( world, null, Rendering.SceneObjectFlags.IsOpaque, batchable: false );
+		MakeManaged( world, null, Rendering.SceneObjectFlags.IsOpaque, batchable: false );
 		KeepFixedBounds( false );
 	}
 

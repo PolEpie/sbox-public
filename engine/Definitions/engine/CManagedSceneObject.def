@@ -1,8 +1,0 @@
-﻿
-#include "sbox/managedsceneobject.h"
-
-[Handle:Sandbox.SceneCustomObject]
-native class CManagedSceneObject as NativeEngine.CManagedSceneObject : CSceneObject
-{
-	static CManagedSceneObject Create( ISceneWorld world );
-}

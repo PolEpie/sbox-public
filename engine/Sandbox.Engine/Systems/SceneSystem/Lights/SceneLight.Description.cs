@@ -39,10 +39,9 @@ public partial class SceneLight
 	bool described;
 
 	/// <summary>
-	/// The light's description. The first time anything asks it's read from the native light, which has what it was made
-	/// with by then (native's defaults, or a map's settings); from then on managed code owns it, and the native light is
-	/// written only while something reads it (<see cref="SceneObject.WritesNative"/>), apart from what its bounds come from.
-	/// A light made without a twin starts with native's defaults (<see cref="NewDescription"/>).
+	/// The light's description. A light managed code makes starts with native's defaults (<see cref="NewDescription"/>). For
+	/// one native code made, the first time anything asks it's read from the native light; from then on managed code owns it,
+	/// and the native light gets only what its bounds come from.
 	/// </summary>
 	internal ref readonly LightDescription Description
 	{
@@ -140,16 +139,8 @@ public partial class SceneLight
 		d.Phi = phi;
 		Recalculate();
 
-		if ( !HasLight ) return;
-
-		if ( WritesNative )
-		{
-			lightNative.SetTheta( theta );
-			lightNative.SetFallOff( falloff );
-		}
-
-		// The outer cone is what a spot light's bounds come from
-		if ( phiChanged || WritesNative ) lightNative.SetPhi( phi );
+		// The outer cone is what a native spot light's bounds come from
+		if ( HasLight && phiChanged ) lightNative.SetPhi( phi );
 	}
 
 	/// <summary>A directional light's cascades, as native's setters set them (the count clamped to 0 to 4).</summary>
@@ -159,10 +150,6 @@ public partial class SceneLight
 		d.ShadowCascadeCount = Math.Clamp( count, 0, 4 );
 		d.ShadowCascadeSplitRatio = splitRatio;
 		d.CascadeDistanceScale = distanceScale;
-		if ( !WritesLight ) return;
-		lightNative.SetShadowCascades( count );
-		lightNative.SetShadowCascadeSplitRatio( splitRatio );
-		lightNative.SetCascadeDistanceScale( distanceScale );
 	}
 
 	/// <summary>Point the light as native's <c>CSceneLightObject::SetWorldDirection</c> does.</summary>
@@ -222,29 +209,11 @@ public partial class SceneLight
 		if ( recalculate ) Recalculate();
 		if ( data.Cookie is not null ) _lightCookie = data.Cookie;
 
-		if ( WritesLight )
-		{
-			var light = lightNative;
-			light.SetLightFlags( d.Flags );
-			light.SetBakeLightIndex( d.BakeLightIndex );
-			light.SetBakeLightIndexScale( d.BakeLightIndexScale );
-			light.SetUsesIndexedBakedLighting( data.BakedLightIndexing );
-			light.SetFogContributionStength( d.FogContributionStrength );
-			light.SetRenderDiffuse( data.RenderDiffuse );
-			light.SetRenderSpecular( data.RenderSpecular );
-			light.SetFogLightingMode( d.FogLightingMode );
-			if ( data.ConstantAttenuation is { } c ) light.SetConstantAttn( c );
-			if ( data.LinearAttenuation is { } l ) light.SetLinearAttn( l );
-			if ( data.QuadraticAttenuation is { } q ) light.SetQuadraticAttn( q );
-			if ( data.FallOff is { } f ) light.SetFallOff( f );
-			if ( data.Cookie is not null ) light.SetLightCookie( data.Cookie.native );
-		}
-
 		NotifyChanged( Rendering.SceneObjectChange.Settings );
 	}
 
 	/// <summary>
-	/// The description native makes a light of <paramref name="type"/> with, for one made without a twin: <c>LightDesc_t::Clear</c>,
+	/// The description native made a light of <paramref name="type"/> with, for one managed code makes: <c>LightDesc_t::Clear</c>,
 	/// then what <c>g_pSceneSystem</c>'s <c>CreatePointLight</c>, <c>CreateSpotLight</c>, <c>CreateDirectionalLight</c> (towards
 	/// <paramref name="direction"/>) and <c>CreateEnvMap</c> do to it: <c>InitPoint</c>, <c>InitSpot</c> or <c>InitDirectional</c>
 	/// with their colour, cone and constant attenuation (derived values worked out, then the constant attenuation cleared again

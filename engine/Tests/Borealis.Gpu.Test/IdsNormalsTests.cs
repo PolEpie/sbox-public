@@ -195,7 +195,7 @@ public class IdsNormalsTests : GpuTest
 	/// One box model drawn five times in one aggregate, each turned and tipped its own way, and a view of them: what each
 	/// instance's transform is, and the model's bounds. Inconclusive without the model.
 	/// </summary>
-	static (RenderWorld World, RenderView View, Transform[] Placed, BBox Box) BoxScene( BackendDevice backend )
+	internal static (RenderWorld World, RenderView View, Transform[] Placed, BBox Box) BoxScene( BackendDevice backend )
 	{
 		var model = backend.LoadModel( "models/dev/box.vmdl" );
 		if ( model is null ) Assert.Inconclusive( "models/dev/box.vmdl isn't built" );

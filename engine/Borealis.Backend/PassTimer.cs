@@ -25,7 +25,11 @@ internal sealed class PassTimer : IDisposable
 	/// A scope: a layer, setup, a list or the caller's own; its timestamps; its statistics query, -1 if none; what its list
 	/// had recorded when it began, then what it recorded.
 	/// </summary>
-	public record struct Scope( string Name, ScopeKind Kind, int Begin, int End, int Query, Recorded Before, Recorded Recorded );
+	public record struct Scope( string Name, ScopeKind Kind, int Begin, int End, int Query, Recorded Before, Recorded Recorded )
+	{
+		/// <summary>Whether it's a GPU counter sample too (<see cref="Device.Counters"/>).</summary>
+		public bool Sampled { get; init; }
+	}
 
 	/// <summary>Draw calls, pipeline binds, descriptor set binds, rendering scopes and barrier calls recorded.</summary>
 	public readonly record struct Recorded( int Draws, int Pipelines, int Sets, int Scopes, int Barriers )
@@ -49,6 +53,7 @@ internal sealed class PassTimer : IDisposable
 	}
 
 	readonly Device gpu;
+	readonly GpuCounters counters;
 	readonly TimestampQueries timestamps;
 	readonly PipelineStatistics statistics;
 	readonly List<Scope>[] scopes = new List<Scope>[Slots];
@@ -61,6 +66,7 @@ internal sealed class PassTimer : IDisposable
 	public PassTimer( Device gpu, bool statistics = false )
 	{
 		this.gpu = gpu;
+		counters = gpu.Counters;
 		timestamps = gpu.CreateTimestamps( Slots * PerSlot );
 		if ( statistics && gpu.Capabilities.PipelineStatistics ) this.statistics = gpu.CreatePipelineStatistics( Slots * PerSlot / 2 );
 		for ( int i = 0; i < Slots; i++ )
@@ -80,6 +86,7 @@ internal sealed class PassTimer : IDisposable
 	/// </summary>
 	public void BeginFrame( long frame )
 	{
+		counters?.BeginFrame();
 		slot = (int)(frame % Slots);
 		lock ( scopes[slot] ) scopes[slot].Clear();
 		usedTimestamps[slot] = 0;
@@ -117,7 +124,8 @@ internal sealed class PassTimer : IDisposable
 		var begin = Interlocked.Increment( ref usedTimestamps[slot] ) - 1;
 		if ( begin >= PerSlot - 1 ) return -1;
 		var query = -1;
-		if ( statistics is not null && count && kind != ScopeKind.List )
+		// Not on an async compute list: the pool counts graphics stages, which a compute-only queue can't begin (device lost)
+		if ( statistics is not null && count && kind != ScopeKind.List && list.Queue == QueueType.Graphics )
 		{
 			query = Interlocked.Increment( ref usedQueries[slot] ) - 1;
 			if ( query >= PerSlot / 2 ) query = -1;
@@ -126,9 +134,12 @@ internal sealed class PassTimer : IDisposable
 		list.WriteTimestamp( timestamps, slot * PerSlot + begin, PipelineStage.AllCommands );
 		if ( query >= 0 ) list.BeginQuery( statistics, slot * PerSlot / 2 + query );
 
+		// GPU counters sample passes and the caller's own scopes, not whole lists, outermost first
+		var sampled = counters is not null && kind != ScopeKind.List && counters.BeginScope( list, name );
+
 		lock ( scopes[slot] )
 		{
-			scopes[slot].Add( new Scope( name, kind, begin, -1, query, Recorded.Of( list ), default ) );
+			scopes[slot].Add( new Scope( name, kind, begin, -1, query, Recorded.Of( list ), default ) { Sampled = sampled } );
 			return slot * PerSlot + scopes[slot].Count - 1;
 		}
 	}
@@ -154,6 +165,8 @@ internal sealed class PassTimer : IDisposable
 			if ( index >= scopes[at].Count ) return;
 			s = scopes[at][index];
 		}
+
+		if ( s.Sampled ) counters.EndScope( list );
 
 		// Out of timestamps: still end the query, which began
 		var end = Interlocked.Increment( ref usedTimestamps[at] ) - 1;

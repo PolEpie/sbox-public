@@ -147,9 +147,9 @@ public sealed partial class SceneWorld : IHandle
 
 		RunQueuedDeletes();
 
-		// Objects without a native twin go with the world here; native destroys the rest with its world
+		// Objects managed code made go with the world here; native destroys the ones native code made with its world
 		SceneObject[] remaining;
-		lock ( InternalSceneObjects ) remaining = InternalSceneObjects.Where( x => !x.HasTwin ).ToArray();
+		lock ( InternalSceneObjects ) remaining = InternalSceneObjects.Where( x => !x.HasNativeObject ).ToArray();
 		foreach ( var sceneObject in remaining ) sceneObject.Destroyed();
 
 		Rendering.SceneRenderer.Forget( this );
@@ -200,8 +200,8 @@ public sealed partial class SceneWorld : IHandle
 	}
 
 	/// <summary>
-	/// Take the objects deleted since the last run out of this world and its renderer. A native twin goes with native's next
-	/// end-of-frame deletes.
+	/// Take the objects deleted since the last run out of this world and its renderer. A native object goes with native's
+	/// next end-of-frame deletes.
 	/// </summary>
 	void RunQueuedDeletes()
 	{
@@ -216,18 +216,29 @@ public sealed partial class SceneWorld : IHandle
 		foreach ( var sceneObject in deleted ) sceneObject.Destroyed();
 	}
 
+	[ThreadStatic] static List<SceneWorld> deleteScratch;
+
 	/// <summary>
 	/// The frame's end: every world's deleted objects leave it, whether or not anything called <see cref="DeletePendingObjects"/>
 	/// (a native view once ran each drawn world's; nothing draws natively now, so a world nobody flushed kept them).
 	/// </summary>
 	internal static void RunEndOfFrameDeletes()
 	{
-		foreach ( var world in All.ToArray() )
+		// Taken out while in use so a nested flush makes its own; a snapshot, as deleting may change All
+		var worlds = deleteScratch ?? new List<SceneWorld>();
+		deleteScratch = null;
+
+		foreach ( var world in All )
 		{
 			bool any;
 			lock ( world.queuedDeletes ) any = world.queuedDeletes.Count > 0;
-			if ( any ) world.DeletePendingObjects();
+			if ( any ) worlds.Add( world );
 		}
+
+		foreach ( var world in worlds ) world.DeletePendingObjects();
+
+		worlds.Clear();
+		deleteScratch = worlds;
 	}
 
 	/// <summary>

@@ -75,6 +75,21 @@ internal sealed class PassTotals
 
 	IEnumerable<Total> Ordered => totals.Values.OrderBy( t => t.Kind == PassTimer.ScopeKind.List ? 1 : 0 ).ThenBy( t => t.Start / t.Scopes );
 
+	/// <summary>GPU ms per frame of each pass and own scope by its name, its rows (a layer drawn again later) added together.</summary>
+	public Dictionary<string, double> MsPerName()
+	{
+		var ms = new Dictionary<string, double>();
+		if ( frames == 0 ) return ms;
+		foreach ( var t in totals.Values )
+		{
+			if ( t.Kind == PassTimer.ScopeKind.List ) continue;
+			var name = t.Name.EndsWith( ')' ) && t.Name.LastIndexOf( " (", StringComparison.Ordinal ) is > 0 and var at && int.TryParse( t.Name[(at + 2)..^1], out _ ) ? t.Name[..at] : t.Name;
+			ms[name] = ms.GetValueOrDefault( name ) + t.Ms / frames;
+		}
+
+		return ms;
+	}
+
 	public string Describe( string title, int pixels, bool statistics )
 	{
 		var sb = new StringBuilder();

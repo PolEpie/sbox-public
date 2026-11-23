@@ -27,39 +27,14 @@ internal class SceneLightProbe : SceneObject
 	{
 		Assert.IsValid( sceneWorld );
 
-		using ( var h = NextHandleForTwin() )
-		{
-			if ( MakesNativeTwin ) CSceneSystem.CreateLightProbeVolume( sceneWorld );
-			else
-			{
-				// As CLightProbeVolumeObjectDesc::Create: its flags, and no bounds until they're set
-				MakeWithoutTwin( sceneWorld, null, Rendering.SceneObjectFlags.IsLightVolume | Rendering.SceneObjectFlags.IsLight | Rendering.SceneObjectFlags.IsIndirectLight );
-				KeepFixedBounds( false );
-			}
-		}
+		// As native's CLightProbeVolumeObjectDesc::Create made it: its flags, and no bounds until they're set
+		MakeManaged( sceneWorld, null, Rendering.SceneObjectFlags.IsLightVolume | Rendering.SceneObjectFlags.IsLight | Rendering.SceneObjectFlags.IsIndirectLight );
+		KeepFixedBounds( false );
 
 		probeTexture = texture;
 		this.indicesTexture = indicesTexture;
 		this.scalarsTexture = scalarsTexture;
 		made = (bounds.Mins, bounds.Maxs, handshake, renderPriority);
-
-		// The native twin gets its settings and constants only if there is one: Borealis reads them from here
-		if ( !lightProbeVolume.IsNull )
-		{
-			lightProbeVolume.m_vBoxMins = bounds.Mins;
-			lightProbeVolume.m_vBoxMaxs = bounds.Maxs;
-			lightProbeVolume.m_nHandshake = handshake;
-			lightProbeVolume.m_nRenderPriority = renderPriority;
-
-			if ( texture != null )
-				lightProbeVolume.m_hLightProbeTexture = texture.native;
-
-			if ( indicesTexture != null )
-				lightProbeVolume.m_hLightProbeDirectLightIndicesTexture = indicesTexture.native;
-
-			if ( scalarsTexture != null )
-				lightProbeVolume.m_hLightProbeDirectLightScalarsTexture = scalarsTexture.native;
-		}
 
 		LocalBounds = bounds;
 		Transform = transform;

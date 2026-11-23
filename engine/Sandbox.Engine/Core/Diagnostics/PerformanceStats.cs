@@ -179,6 +179,9 @@ public static partial class PerformanceStats
 		_history.Clear();
 		secondTimer.Restart();
 
+		// A dedicated server loads no scene system and draws nothing: no frame stats
+		if ( Application.IsDedicatedServer ) return true;
+
 		// The drawing device's summary; Source 2's texture pool is the empty device's, which has none
 		ulong poolUsed = 0, poolLimit = 0, poolNonEvictable = 0;
 		FrameStats._current = new FrameStats(

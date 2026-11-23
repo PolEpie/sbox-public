@@ -288,16 +288,23 @@ public class SceneRenderingWidget : Frame
 
 				try
 				{
-					RenderScene();
+					try
+					{
+						RenderScene();
+					}
+					finally
+					{
+						borealis.EndFrame( play ? Graphics.RenderOverlay : NoOverlay, screenshots: play );
+					}
 				}
 				finally
 				{
-					borealis.EndFrame( play ? Graphics.RenderOverlay : NoOverlay, screenshots: play );
+					// The acquired image has to be presented whatever the scene threw, as the game window's is: left unpresented,
+					// every later frame fails to acquire and the widget keeps showing its last frame
+					borealis.PresentFrame();
 				}
 			}
 		}
-
-		borealis.PresentFrame();
 	}
 
 	static readonly Action NoOverlay = () => { };

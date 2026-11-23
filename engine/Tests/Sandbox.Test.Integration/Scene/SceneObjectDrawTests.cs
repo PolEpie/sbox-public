@@ -3,38 +3,47 @@
 /// <summary>
 /// A scene object's draws worked out in managed code (<c>SceneObject.GetDraws</c>: body groups, material groups, whole, per
 /// index and attribute material overrides, each draw's translucency and shadow fast path) are native's
-/// (<c>RenderTools::GetSceneObjectDraw</c>) after every change, and so are its flags and bounds.
+/// (<c>RenderTools::GetSceneObjectDraw</c>) after every change, and so are its flags and bounds: checked against native's
+/// values (<see cref="NativeGolden"/>).
 /// </summary>
 [TestClass]
 public class SceneObjectDrawTests
 {
-	static readonly System.Reflection.MethodInfo Compare = System.Type.GetType( "Sandbox.Rendering.Bridge.SceneNative, Sandbox.Rendering", true ).GetMethod( "CompareDraws" );
-
+	/// <summary>
+	/// The object's draws and flags are native's, and its bounds too, give or take native's quantising to whole units. A scene
+	/// model's bounds are its pose's (<c>SceneModelAnimationInstanceTests</c>).
+	/// </summary>
 	static void Same( SceneObject so, string after )
 	{
 		Assert.IsTrue( so.ResolvesDraws, "made by managed code" );
-		var differences = (System.Collections.Generic.List<string>)Compare.Invoke( null, [so] );
-		Assert.AreEqual( 0, differences.Count, $"after {after}:\n{string.Join( "\n", differences )}" );
-		Assert.AreEqual( "", so.CompareFlags(), $"flags after {after}" );
-		SameBounds( so, after );
+		var key = $"draws/{test}/{Index( so )}/{after}";
+		NativeGolden.CheckDraws( key, so );
+		NativeGolden.Check( key + "/flags", NativeGolden.Native( so, "flags", () => ((ulong)so.CurrentFlags).ToString( "X" ) ), 0 );
+		if ( so is not SceneModel ) NativeGolden.Check( key + "/bounds", NativeGolden.Native( so, "nativebounds", () => NativeGolden.B( so.WorldBounds ) ), 1.8f, absolute: true );
 	}
 
-	/// <summary>
-	/// Bounds kept in managed code are native's, give or take native's quantising to whole units. A scene model's are its
-	/// pose's (<c>SceneModelAnimationInstanceTests</c>): its twin is a plain object with its model's bounds at its transform.
-	/// </summary>
-	static void SameBounds( SceneObject so, string after )
-	{
-		if ( so is SceneModel ) return;
+	static string test;
+	static readonly System.Collections.Generic.List<SceneObject> made = new();
 
-		var mine = so.WorldBounds;
-		var native = so.native.GetBounds();
-		Assert.IsTrue( mine.Mins.Distance( native.Mins ) <= 1.8f && mine.Maxs.Distance( native.Maxs ) <= 1.8f, $"bounds after {after}: native {native}, managed {mine}" );
+	// Which object of the test it is, in the order it's first checked
+	static int Index( SceneObject so )
+	{
+		var i = made.IndexOf( so );
+		if ( i >= 0 ) return i;
+		made.Add( so );
+		return made.Count - 1;
+	}
+
+	static void Start( string name )
+	{
+		test = name;
+		made.Clear();
 	}
 
 	[TestMethod]
 	public void DrawsAreNativesAfterEveryChange()
 	{
+		Start( "every change" );
 		var world = new SceneWorld();
 		try
 		{
@@ -152,6 +161,7 @@ public class SceneObjectDrawTests
 	[TestMethod]
 	public void DrawsAreNativesAfterTheirModelReloads()
 	{
+		Start( "reload" );
 		var world = new SceneWorld();
 		try
 		{
@@ -167,9 +177,8 @@ public class SceneObjectDrawTests
 				Same( so, "a whole translucent override and a skin override" );
 			}
 
-			// What native's reload does to every object drawing the model, then what Model.OnReloaded does for its scene objects
-			// (the reload itself isn't sent: it drops the shared model's physics and other cached data that later tests use)
-			foreach ( var so in objects ) NativeEngine.MeshSystem.ChangeModel( so, human.native );
+			// What Model.OnReloaded does for its scene objects (the reload itself isn't sent: it drops the shared model's physics
+			// and other cached data that later tests use)
 			SceneObject.ModelReloaded( human );
 
 			foreach ( var so in objects )
@@ -192,19 +201,18 @@ public class SceneObjectDrawTests
 	[TestMethod]
 	public void BodyGroupsAreNatives()
 	{
+		Start( "body groups" );
 		var world = new SceneWorld();
 		try
 		{
 			var human = Model.Load( "models/citizen_human/human.vmdl" );
 			Assert.IsTrue( human.Parts.Count > 0, "the model has body parts" );
 			var managed = new SceneModel( world, human, Transform.Zero );
-			var reference = new SceneModel( world, human, Transform.Zero );
 
 			void Set( string part, int value )
 			{
 				managed.SetBodyGroup( part, value );
-				reference.native.SetBodyGroup( part, value );
-				Assert.AreEqual( reference.native.GetCurrentMeshGroupMask(), managed.MeshGroupMask, $"{part} = {value}" );
+				NativeGolden.Check( $"bodygroup/{part} = {value}", NativeGolden.Native( managed, "bodygroup", () => managed.MeshGroupMask.ToString( "X" ) ), 0 );
 				Same( managed, $"body group {part} = {value}" );
 			}
 
@@ -255,7 +263,7 @@ public class SceneObjectDrawTests
 
 			var mixed = new SceneObject( world, Model.Builder.AddMesh( Quad( white ) ).AddMesh( Quad( glass ) ).Create() );
 			Assert.IsTrue( mixed.Flags.IsOpaque && mixed.Flags.IsTranslucent, $"opaque and translucent meshes: {mixed.CurrentFlags}" );
-			Assert.AreEqual( "", mixed.CompareFlags(), "native's twin" );
+			NativeGolden.Check( "translucency/mixed", NativeGolden.Native( mixed, "flags", () => ((ulong)mixed.CurrentFlags).ToString( "X" ) ), 0 );
 
 			var ghost = new SceneObject( world, Model.Builder.AddMesh( Quad( glass ) ).Create() );
 			Assert.IsTrue( !ghost.Flags.IsOpaque && ghost.Flags.IsTranslucent, $"a translucent mesh: {ghost.CurrentFlags}" );
@@ -270,9 +278,8 @@ public class SceneObjectDrawTests
 	}
 
 	/// <summary>
-	/// A map's model (whose draws native's stand for) keeps native's flags, which without Source 2's device carry the meshes'
-	/// compiled translucency: they're worked out from the materials too. Construct's darkroom doors, glass panes in a frame,
-	/// drew no glass.
+	/// A map's model gets native's flags, translucency worked out from the materials (without Source 2's device native's
+	/// carried the meshes' compiled translucency). Construct's darkroom doors, glass panes in a frame, drew no glass.
 	/// </summary>
 	[TestMethod]
 	public void MapModelsTranslucencyComesFromTheMaterialsWithoutADevice()
@@ -300,13 +307,10 @@ public class SceneObjectDrawTests
 			var glass = Material.Load( "models/citizen_human/heads/citizen_human_femalehead01/eyelashes_01_opacity.vmat" );
 
 			var door = new SceneModel( world, Model.Builder.WithName( "maps/test/entities/door.vmdl" ).AddMesh( Quad( white ) ).AddMesh( Quad( glass ) ).Create(), Transform.Zero );
-			Assert.IsFalse( door.ResolvesDraws, $"a map's model: {door.Model.ResourcePath}" );
 			Assert.IsTrue( door.Flags.IsOpaque && door.Flags.IsTranslucent, $"opaque and translucent meshes: {door.CurrentFlags}" );
-			Assert.AreEqual( "", door.CompareFlags(), "native's twin" );
 
 			var pane = new SceneModel( world, Model.Builder.WithName( "maps/test/entities/pane.vmdl" ).AddMesh( Quad( glass ) ).Create(), Transform.Zero );
 			Assert.IsTrue( !pane.Flags.IsOpaque && pane.Flags.IsTranslucent, $"a translucent mesh: {pane.CurrentFlags}" );
-			Assert.AreEqual( "", pane.CompareFlags(), "native's twin" );
 		}
 		finally
 		{
@@ -323,14 +327,15 @@ public class SceneObjectDrawTests
 		{
 			foreach ( var so in new SceneObject[] { new SceneCustomObject( world ), new SceneDynamicObject( world ) } )
 			{
-				Assert.AreEqual( so.native.GetBounds(), so.WorldBounds, "infinite at first" );
+				var name = so.GetType().Name;
+				string Bounds() => NativeGolden.Native( so, "nativebounds", () => NativeGolden.B( so.WorldBounds ) );
+				NativeGolden.Check( $"bounds/{name} infinite at first", Bounds(), 0 );
 				so.Transform = new Transform( new Vector3( 50, 60, 70 ) );
-				Assert.AreEqual( so.native.GetBounds(), so.WorldBounds, "after a transform" );
+				NativeGolden.Check( $"bounds/{name} after a transform", Bounds(), 0 );
 				so.Bounds = new BBox( new Vector3( -3.5f, 2.25f, 0 ), new Vector3( 4.1f, 9, 12.5f ) );
-				SameBounds( so, "bounds set" );
-				Assert.AreEqual( so.native.GetBounds(), so.WorldBounds, "quantised as native's" );
+				NativeGolden.Check( $"bounds/{name} quantised as native's", Bounds(), 0 );
 				so.Bounds = new BBox( new Vector3( float.NaN ), new Vector3( 1 ) );
-				Assert.AreEqual( so.native.GetBounds(), so.WorldBounds, "invalid bounds ignored" );
+				NativeGolden.Check( $"bounds/{name} invalid bounds ignored", Bounds(), 0 );
 			}
 		}
 		finally

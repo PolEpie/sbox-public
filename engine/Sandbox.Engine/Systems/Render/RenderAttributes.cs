@@ -51,6 +51,16 @@ public partial class RenderAttributes
 		Set( attr );
 	}
 
+	/// <summary>
+	/// Remove a value: from the managed set (or the managed copy of a native one), and from the native set with
+	/// <paramref name="deleteNative"/> if there is one.
+	/// </summary>
+	internal void DeleteValue( StringToken name, Action<CRenderAttributes, StringToken> deleteNative )
+	{
+		ManagedValues?.SetObject( name, null );
+		if ( attributes.IsValid ) deleteNative( attributes, name );
+	}
+
 	~RenderAttributes()
 	{
 		TryFree();
@@ -467,11 +477,17 @@ public partial class RenderAttributes
 		if ( (Managed ?? Shadow) is { } values && renderAttributes.Shadow is { } copy ) values.MergeTo( copy );
 
 		if ( !attributes.IsValid || !renderAttributes.attributes.IsValid ) return;
-		attributes.MergeToPtr( renderAttributes.attributes );
+
+		lock ( renderAttributes.usedTexturesLock )
+		{
+			attributes.MergeToPtr( renderAttributes.attributes );
+			MergeUsedTexturesTo( renderAttributes );
+		}
+
 		MergeUsedBuffersTo( renderAttributes );
 	}
 
-	// For attributes that only live for one draw, the source keeps its buffers bound
+	// For attributes that only live for one draw, the source keeps its textures alive and its buffers bound
 	internal void MergeToUntracked( RenderAttributes renderAttributes )
 	{
 		if ( !attributes.IsValid || !renderAttributes.attributes.IsValid ) return;

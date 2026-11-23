@@ -80,7 +80,7 @@ internal sealed class ParticleLightingSystem : GameObjectSystem<ParticleLighting
 
 		shader ??= new ComputeShader( "shaders/particle_lighting_cs.shader" );
 
-		foreach ( var camera in Scene.GetAllComponents<CameraComponent>() )
+		foreach ( var camera in Scene.Query<CameraComponent>() )
 		{
 			if ( camera.SceneCamera is null ) continue;
 
@@ -105,7 +105,7 @@ internal sealed class ParticleLightingSystem : GameObjectSystem<ParticleLighting
 			drawn.Add( (owner, f) );
 		}
 
-		foreach ( var camera in Scene.GetAllComponents<CameraComponent>() )
+		foreach ( var camera in Scene.Query<CameraComponent>() )
 		{
 			if ( camera.SceneCamera is not { } sceneCamera ) continue;
 			var owner = camera.IsSceneEditorCamera ? Scene.Camera ?? camera : camera;

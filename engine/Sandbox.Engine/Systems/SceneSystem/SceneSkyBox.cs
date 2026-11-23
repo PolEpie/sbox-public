@@ -33,8 +33,7 @@ public class SceneSkyBox : SceneObject
 	}
 
 	// The settings, once managed code owns them: a sky it made, or one native code made (a tool's: Hammer's sky helper, a tool
-	// scene's sky) that it has changed since. Only a sky native code made is a native sky object; the native twin of one
-	// managed code made is a plain object, and its settings live here only
+	// scene's sky) that it has changed since. Only a sky native code made has a native sky object
 	bool managed;
 	Material material;
 	Vector3 skyTint;
@@ -54,17 +53,9 @@ public class SceneSkyBox : SceneObject
 		// Native's defaults (CSceneSkyBoxObject)
 		fogParams = new FogParamInfo { FogType = FogType.Distance, FogMinStart = -25, FogMinEnd = -35, FogMaxStart = 25, FogMaxEnd = 35 };
 
-		using ( var h = NextHandleForTwin() )
-		{
-			if ( MakesNativeTwin ) CManagedSceneObject.Create( world );
-			else
-			{
-				// Nothing reads the plain twin it would have: in its world and its world's skies without one
-				MakeWithoutTwin( world, null, SceneCustomObject.TwinlessFlags );
-				KeepFixedBounds( false );
-				AddToSkies();
-			}
-		}
+		MakeManaged( world, null, SceneCustomObject.ManagedFlags );
+		KeepFixedBounds( false );
+		AddToSkies();
 
 		ChangeFlags( Rendering.SceneObjectFlags.None, ~InternalFlags );
 	}
@@ -73,8 +64,8 @@ public class SceneSkyBox : SceneObject
 	{
 		base.OnNativeInit( ptr );
 
-		// A sky managed code made has a plain twin (managed is set before it's made)
-		skyboxNative = managed ? default : (CSceneSkyBoxObject)ptr;
+		// Only native code makes native skies
+		skyboxNative = (CSceneSkyBoxObject)ptr;
 
 		AddToSkies();
 	}
@@ -104,7 +95,7 @@ public class SceneSkyBox : SceneObject
 	}
 
 	/// <summary>
-	/// Managed code owns the settings from here: take what the native twin has (native's defaults, or what native code set
+	/// Managed code owns the settings from here: take what the native sky has (native's defaults, or what native code set
 	/// after making it) once.
 	/// </summary>
 	void TakeOver()
@@ -134,7 +125,6 @@ public class SceneSkyBox : SceneObject
 		{
 			TakeOver();
 			material = value;
-			if ( WritesNative && !skyboxNative.IsNull ) skyboxNative.SetMaterial( value?.native ?? default );
 			NotifyChanged( Rendering.SceneObjectChange.Settings );
 		}
 	}
@@ -154,7 +144,6 @@ public class SceneSkyBox : SceneObject
 		{
 			TakeOver();
 			skyTint = value;
-			if ( WritesNative && !skyboxNative.IsNull ) skyboxNative.SetSkyTint( skyTint );
 			NotifyChanged( Rendering.SceneObjectChange.Settings );
 		}
 	}
@@ -169,12 +158,6 @@ public class SceneSkyBox : SceneObject
 		{
 			TakeOver();
 			fogParams = value;
-			if ( WritesNative && !skyboxNative.IsNull )
-			{
-				skyboxNative.SetFogType( (int)value.FogType );
-				skyboxNative.SetAngularFogParams( value.FogMinStart, value.FogMinEnd, value.FogMaxStart, value.FogMaxEnd );
-			}
-
 			NotifyChanged( Rendering.SceneObjectChange.Settings );
 		}
 	}

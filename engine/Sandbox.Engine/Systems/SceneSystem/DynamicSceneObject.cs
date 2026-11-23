@@ -6,12 +6,7 @@ namespace Sandbox;
 
 public class SceneDynamicObject : SceneObject
 {
-	internal CDynamicSceneObject managedNative;
-
-	/// <summary>
-	/// The vertices as native holds them, kept in managed code when the process draws on a backend other than Source 2's
-	/// (Borealis.Gpu draws them from here). Null on Source 2.
-	/// </summary>
+	/// <summary>The vertices, which Borealis draws.</summary>
 	internal List<Vertex> ManagedVertices { get; }
 
 	/// <summary>What the vertices are, as last begun.</summary>
@@ -26,53 +21,29 @@ public class SceneDynamicObject : SceneObject
 
 		ManagedVertices = new List<Vertex>();
 
-		using ( var h = NextHandleForTwin() )
-		{
-			if ( MakesNativeTwin ) CDynamicSceneObject.Create( sceneWorld );
-			else MakeWithoutTwin( sceneWorld, null, SceneCustomObject.TwinlessFlags, batchable: false ); // as CDynamicSceneObject::Create
+		MakeManaged( sceneWorld, null, SceneCustomObject.ManagedFlags, batchable: false ); // as native's CDynamicSceneObject::Create made it
 
-			if ( this.IsValid() )
-			{
-				// Start off with infinite bounds so it will actually get rendered
-				// if the user forgets/doesn't need bounds.
-				if ( HasTwin ) native.SetBoundsInfinite();
-				KeepFixedBounds( infinite: true );
-			}
-		}
+		// Start off with infinite bounds so it will actually get rendered
+		// if the user forgets/doesn't need bounds.
+		KeepFixedBounds( infinite: true );
 	}
 
 	public Material Material
 	{
-		set
-		{
-			if ( HasTwin ) managedNative.Material = value?.native ?? default;
-			if ( ManagedVertices is not null ) ManagedMaterial = value;
-		}
-	}
-
-	internal unsafe override void OnNativeInit( CSceneObject ptr )
-	{
-		base.OnNativeInit( ptr );
-		managedNative = (CDynamicSceneObject)ptr;
-	}
-
-	internal override void OnNativeDestroy()
-	{
-		managedNative = default;
-		base.OnNativeDestroy();
+		set => ManagedMaterial = value;
 	}
 
 	public void Clear()
 	{
-		if ( WritesTwin( "Reset" ) ) managedNative.Reset();
-		ManagedVertices?.Clear();
+		WritesNativeObject( "Reset" );
+		ManagedVertices.Clear();
 	}
 
 	[MethodImpl( MethodImplOptions.AggressiveInlining )]
 	public void AddVertex( in Vertex v )
 	{
-		if ( WritesTwin( "AddVertex" ) ) managedNative.AddVertex( v );
-		ManagedVertices?.Add( v );
+		WritesNativeObject( "AddVertex" );
+		ManagedVertices.Add( v );
 	}
 
 	public unsafe void AddVertex( in Span<Vertex> v )
@@ -85,8 +56,8 @@ public class SceneDynamicObject : SceneObject
 
 	internal unsafe void AddVertex( in Vertex* ptr, int count )
 	{
-		if ( WritesTwin( "AddVertexRange" ) ) managedNative.AddVertexRange( (IntPtr)ptr, count );
-		ManagedVertices?.AddRange( new ReadOnlySpan<Vertex>( ptr, count ) );
+		WritesNativeObject( "AddVertexRange" );
+		ManagedVertices.AddRange( new ReadOnlySpan<Vertex>( ptr, count ) );
 	}
 
 	public IDisposable Write( Graphics.PrimitiveType type, int vertices, int indices )
@@ -101,8 +72,7 @@ public class SceneDynamicObject : SceneObject
 	void Begin( Graphics.PrimitiveType type, int vertices )
 	{
 		ThrowIfUndefined( type );
-		if ( WritesTwin( "Begin" ) ) managedNative.Begin( (RenderPrimitiveType)type, vertices );
-		if ( ManagedVertices is null ) return;
+		WritesNativeObject( "Begin" );
 		ManagedVertices.Clear();
 		ManagedPrimitiveType = type;
 	}

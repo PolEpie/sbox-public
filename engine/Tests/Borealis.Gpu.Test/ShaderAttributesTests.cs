@@ -1,4 +1,5 @@
 using Borealis.Backend;
+using Borealis.Gpu;
 using Borealis.Source2.Shaders;
 
 namespace BorealisGpuTests;
@@ -144,6 +145,54 @@ public class ShaderAttributesTests
 		attributes.Set( "TestAttributeOne", 4.0f );
 		CollectionAssert.AreEqual( new[] { 4.0f }, (float[])attributes.Get( "TestAttributeOne" ) );
 		CollectionAssert.AreEqual( new[] { "TestAttributeOne" }, attributes.Values.Select( v => v.Key ).ToArray() );
+	}
+
+	/// <summary>Sets compare by content, and the copy holds values apart from its source, so in-place changes to the source show.</summary>
+	[TestMethod]
+	public void ValuesCompareAndCopyByContent()
+	{
+		var source = new ShaderAttributes();
+		source.Set( "TestNumber", 1.0f );
+		source.SetData( "TestBytes", [1, 2, 3] );
+		source.Set( "TestTexture", new TextureHandle( 1, 1 ) );
+		var revision = source.Revision;
+
+		var copy = new ShaderAttributes();
+		copy.CopyValuesFrom( source );
+		Assert.IsTrue( source.SameValues( copy ) );
+		Assert.IsTrue( copy.SameValues( source ) );
+
+		source.Set( "TestNumber", 1.0f );
+		source.Set( "TestTexture", new TextureHandle( 1, 1 ) );
+		source.SetCombo( "D_TEST", 1 );
+		Assert.AreEqual( revision, source.Revision, "numbers and the same handle set again don't move it" );
+		Assert.IsTrue( source.SameValues( copy ), "combos aren't compared" );
+
+		source.Set( "TestNumber", 2.0f );
+		Assert.AreEqual( revision, source.Revision );
+		Assert.IsFalse( source.SameValues( copy ), "a number changed in place" );
+		CollectionAssert.AreEqual( new[] { 1.0f }, (float[])copy.Get( "TestNumber" ), "the copy keeps its own" );
+		source.Set( "TestNumber", 1.0f );
+		Assert.IsTrue( source.SameValues( copy ) );
+
+		((byte[])source.Get( "TestBytes" ))[1] = 9;
+		Assert.IsFalse( source.SameValues( copy ), "bytes changed in place" );
+		((byte[])source.Get( "TestBytes" ))[1] = 2;
+
+		source.Set( "TestTexture", new TextureHandle( 2, 1 ) );
+		Assert.AreNotEqual( revision, source.Revision, "a swapped handle" );
+		Assert.IsFalse( source.SameValues( copy ) );
+		source.Set( "TestTexture", new TextureHandle( 1, 1 ) );
+		Assert.IsTrue( source.SameValues( copy ), "the first handle back" );
+
+		source.Set( "TestMore", 1.0f );
+		Assert.IsFalse( source.SameValues( copy ), "a name more" );
+		Assert.IsFalse( copy.SameValues( source ), "a name fewer" );
+
+		source.Clear();
+		copy.CopyValuesFrom( source );
+		Assert.AreEqual( 0, copy.Values.Count() );
+		Assert.IsTrue( source.SameValues( copy ) );
 	}
 }
 

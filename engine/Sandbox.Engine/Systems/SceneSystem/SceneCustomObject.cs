@@ -7,31 +7,15 @@ namespace Sandbox;
 /// </summary>
 public class SceneCustomObject : SceneObject
 {
-	internal NativeEngine.CManagedSceneObject managedNative;
-
-	internal SceneCustomObject( HandleCreationData _ )
-	{
-		gameType = GetType().Assembly != typeof( SceneCustomObject ).Assembly;
-	}
-
-
 	public SceneCustomObject( SceneWorld sceneWorld )
 	{
 		Assert.IsValid( sceneWorld );
 
-		using ( var h = NextHandleForTwin() )
-		{
-			if ( MakesNativeTwin ) CManagedSceneObject.Create( sceneWorld );
-			else MakeWithoutTwin( sceneWorld, null, TwinlessFlags );
+		MakeManaged( sceneWorld, null, ManagedFlags );
 
-			if ( this.IsValid() )
-			{
-				// Start off with infinite bounds so it will actually get rendered
-				// if the user forgets/doesn't need bounds.
-				if ( HasTwin ) native.SetBoundsInfinite();
-				KeepFixedBounds( infinite: true );
-			}
-		}
+		// Start off with infinite bounds so it will actually get rendered
+		// if the user forgets/doesn't need bounds.
+		KeepFixedBounds( infinite: true );
 
 		gameType = GetType().Assembly != typeof( SceneCustomObject ).Assembly;
 		lock ( live ) live.Add( this );
@@ -86,21 +70,8 @@ public class SceneCustomObject : SceneObject
 	/// <summary>Its drawing's recordings in the extract, by camera and layer kind (<see cref="Rendering.GameDrawExtract"/>).</summary>
 	internal Rendering.GameDrawExtract.Slots DrawSlots;
 
-	/// <summary>What native's <c>CManagedSceneObject::Create</c> sets.</summary>
-	internal const Rendering.SceneObjectFlags TwinlessFlags = Rendering.SceneObjectFlags.IsTranslucent;
-
-	internal unsafe override void OnNativeInit( CSceneObject ptr )
-	{
-		base.OnNativeInit( ptr );
-
-		managedNative = (NativeEngine.CManagedSceneObject)ptr;
-	}
-
-	internal override void OnNativeDestroy()
-	{
-		managedNative = default;
-		base.OnNativeDestroy();
-	}
+	/// <summary>The flags a custom object starts with (what native's <c>CManagedSceneObject::Create</c> set).</summary>
+	internal const Rendering.SceneObjectFlags ManagedFlags = Rendering.SceneObjectFlags.IsTranslucent;
 
 	internal void RenderInternal()
 	{

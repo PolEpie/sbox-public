@@ -55,6 +55,13 @@ public sealed unsafe class CommandList
 	/// <summary>Its progress marker slot (<see cref="DeviceOptions.ProgressMarkers"/>), -1 without.</summary>
 	internal int MarkerSlot = -1;
 
+	// Its part of a GPU counter sample (Device.Counters), while one records: GPA's list, the sample's pass and session, and
+	// whether a scope is open in it
+	internal nint CounterList;
+	internal int CounterPass;
+	internal object CounterSession;
+	internal bool CounterSampleOpen;
+
 	// The labels open, for naming the markers that end them
 	readonly Stack<string> openLabels = new();
 
@@ -117,6 +124,26 @@ public sealed unsafe class CommandList
 	readonly ulong[] layouts = new ulong[2];
 	readonly (ulong, ulong, ulong, ulong)[] layoutSets = new (ulong, ulong, ulong, ulong)[2];
 	readonly int[] dirty = new int[2];
+	// Last pipeline bound: draws in a row often share one
+	readonly ulong[] boundPipelines = new ulong[2];
+
+	// Last dynamic state and buffers set; forgotten on begin and after native commands run, which leave unknown state
+	VkViewport lastViewport;
+	VkRect2D lastScissor;
+	(float, float, float) lastDepthBias;
+	bool viewportSet, scissorSet, depthBiasSet;
+	const int MaxCachedVertexSlots = 8;
+	readonly ulong[] boundVertexBuffers = new ulong[MaxCachedVertexSlots];
+	readonly ulong[] boundVertexOffsets = new ulong[MaxCachedVertexSlots];
+	ulong boundIndexBuffer, boundIndexOffset;
+	int boundIndexFormat;
+
+	void ForgetDynamicState()
+	{
+		viewportSet = scissorSet = depthBiasSet = false;
+		Array.Clear( boundVertexBuffers );
+		boundIndexBuffer = 0;
+	}
 	ulong lastLayout;
 	readonly ulong[] sets = new ulong[4];
 	readonly ulong[] setLayouts = new ulong[4];
@@ -181,6 +208,8 @@ public sealed unsafe class CommandList
 		recording = true;
 		rendering = false;
 		layouts[0] = layouts[1] = 0;
+		boundPipelines[0] = boundPipelines[1] = 0;
+		ForgetDynamicState();
 		lastLayout = 0;
 		dirty[0] = dirty[1] = 0;
 		Array.Clear( sets );
@@ -202,6 +231,7 @@ public sealed unsafe class CommandList
 		Marker( "begin" );
 		labelled = name is not null && device.Instance.vkCmdBeginDebugUtilsLabelEXT != null;
 		if ( labelled ) BeginLabel( name );
+		device.Counters?.ListBegan( this );
 	}
 
 	internal void End()
@@ -210,6 +240,7 @@ public sealed unsafe class CommandList
 		if ( rendering ) throw new InvalidOperationException( "Rendering wasn't ended" );
 
 		FlushBarriers( work: false );
+		device.Counters?.ListEnded( this );
 		if ( labelled ) EndLabel();
 		Marker( "end" );
 		EndsSuspended = suspended;
@@ -245,6 +276,7 @@ public sealed unsafe class CommandList
 		if ( recording )
 		{
 			// Recorded but never submitted
+			device.Counters?.ListEnded( this );
 			vk.vkEndCommandBuffer( Handle );
 			recording = false;
 			rendering = false;
@@ -502,6 +534,8 @@ public sealed unsafe class CommandList
 	{
 		Recording();
 		layouts[0] = layouts[1] = 0;
+		boundPipelines[0] = boundPipelines[1] = 0;
+		ForgetDynamicState();
 		dirty[0] = dirty[1] = 0x3F;
 		lastLayout = 0;
 		renderStateSet = false;
@@ -891,19 +925,33 @@ public sealed unsafe class CommandList
 	/// </summary>
 	public void SetViewport( float x, float y, float width, float height, float minDepth = 0, float maxDepth = 1 )
 	{
-		var viewport = new VkViewport { x = x, y = y, width = width, height = height, minDepth = minDepth, maxDepth = maxDepth };
-		vk.vkCmdSetViewport( Handle, 0, 1, &viewport );
+		if ( viewportSet && lastViewport.x == x && lastViewport.y == y && lastViewport.width == width && lastViewport.height == height && lastViewport.minDepth == minDepth && lastViewport.maxDepth == maxDepth ) return;
+
+		lastViewport = new VkViewport { x = x, y = y, width = width, height = height, minDepth = minDepth, maxDepth = maxDepth };
+		viewportSet = true;
+		fixed ( VkViewport* viewport = &lastViewport ) vk.vkCmdSetViewport( Handle, 0, 1, viewport );
 	}
 
 	/// <summary>Set the scissor rectangle.</summary>
 	public void SetScissor( int x, int y, int width, int height )
 	{
 		var rect = new VkRect2D { offset = new VkOffset2D { x = Math.Max( x, 0 ), y = Math.Max( y, 0 ) }, extent = new VkExtent2D { width = (uint)Math.Max( width, 0 ), height = (uint)Math.Max( height, 0 ) } };
+		if ( scissorSet && lastScissor.offset.x == rect.offset.x && lastScissor.offset.y == rect.offset.y && lastScissor.extent.width == rect.extent.width && lastScissor.extent.height == rect.extent.height ) return;
+
+		lastScissor = rect;
+		scissorSet = true;
 		vk.vkCmdSetScissor( Handle, 0, 1, &rect );
 	}
 
 	/// <summary>Set depth bias, for pipelines made with <see cref="GraphicsPipelineInfo.DepthBias"/>.</summary>
-	public void SetDepthBias( float constant, float slope, float clamp = 0 ) => vk.vkCmdSetDepthBias( Handle, constant, clamp, slope );
+	public void SetDepthBias( float constant, float slope, float clamp = 0 )
+	{
+		if ( depthBiasSet && lastDepthBias == (constant, slope, clamp) ) return;
+
+		lastDepthBias = (constant, slope, clamp);
+		depthBiasSet = true;
+		vk.vkCmdSetDepthBias( Handle, constant, clamp, slope );
+	}
 
 	/// <summary>Set the stencil reference, for pipelines that test stencil.</summary>
 	public void SetStencilReference( byte reference ) => vk.vkCmdSetStencilReference( Handle, 3, reference );
@@ -929,8 +977,12 @@ public sealed unsafe class CommandList
 		else
 		{
 			if ( record.BindPoint == Vulkan.Vk.BindPointGraphics ) skippingDraws = false;
-			vk.vkCmdBindPipeline( Handle, record.BindPoint, vkPipeline );
-			pipelines++;
+			if ( boundPipelines[record.BindPoint] != vkPipeline )
+			{
+				vk.vkCmdBindPipeline( Handle, record.BindPoint, vkPipeline );
+				boundPipelines[record.BindPoint] = vkPipeline;
+				pipelines++;
+			}
 			if ( record.BindPoint == Vulkan.Vk.BindPointGraphics && (!renderStateSet || record.RenderState != renderState) ) SetRenderState( record.RenderState );
 		}
 
@@ -970,11 +1022,24 @@ public sealed unsafe class CommandList
 	{
 		var vkBuffer = device.Get( buffer ).Buffer;
 		var vkOffset = (ulong)offset;
+		if ( (uint)slot < MaxCachedVertexSlots )
+		{
+			if ( boundVertexBuffers[slot] == vkBuffer && boundVertexOffsets[slot] == vkOffset ) return;
+			(boundVertexBuffers[slot], boundVertexOffsets[slot]) = (vkBuffer, vkOffset);
+		}
+
 		vk.vkCmdBindVertexBuffers( Handle, (uint)slot, 1, &vkBuffer, &vkOffset );
 	}
 
 	/// <summary>Bind the index buffer.</summary>
-	public void SetIndexBuffer( BufferHandle buffer, IndexFormat format, long offset = 0 ) => vk.vkCmdBindIndexBuffer( Handle, device.Get( buffer ).Buffer, (ulong)offset, (int)format );
+	public void SetIndexBuffer( BufferHandle buffer, IndexFormat format, long offset = 0 )
+	{
+		var vkBuffer = device.Get( buffer ).Buffer;
+		if ( boundIndexBuffer == vkBuffer && boundIndexOffset == (ulong)offset && boundIndexFormat == (int)format ) return;
+
+		(boundIndexBuffer, boundIndexOffset, boundIndexFormat) = (vkBuffer, (ulong)offset, (int)format);
+		vk.vkCmdBindIndexBuffer( Handle, vkBuffer, (ulong)offset, (int)format );
+	}
 
 	/// <summary>
 	/// Fill a transient descriptor set (0 to 3) with <paramref name="bindings"/> laid out as <paramref name="layout"/>, and

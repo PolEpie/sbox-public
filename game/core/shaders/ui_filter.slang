@@ -53,6 +53,9 @@ float FilterInvert< UiType( Slider ); Default( 0.0f ); Attribute( "FilterInvert"
 float FilterContrast< UiType( Slider ); Default( 1.0f ); Attribute( "FilterContrast" ); >;
 float4 FilterTint< UiType( Color ); Default4(1.0f, 1.0f, 1.0f, 1.0f); Attribute("FilterTint"); >;
 
+// Layer targets are rounded up in size; the content covers this much of them, from the top left
+float2 LayerUVScale < Default2( 1.0f, 1.0f ); Attribute( "LayerUVScale" ); >;
+
 //
 // Masking
 //
@@ -189,7 +192,8 @@ float4 SampleLayer( float2 uv, SamplerState sampler, float blur )
 
 	// filter: blur( r ) - r is the gaussian's standard deviation. Sampled with a border sampler so the blur fades
 	// to nothing past the layer's edge instead of wrapping its far side in
-	o.vColor = SampleLayer( uv, g_sTrilinearBorder, FilterBlur );
+	float2 layerUv = uv * LayerUVScale;
+	o.vColor = SampleLayer( layerUv, g_sTrilinearBorder, FilterBlur );
 	o.vColor = ApplyColorFilters( o.vColor );
 
 	//
@@ -232,7 +236,7 @@ float4 SampleLayer( float2 uv, SamplerState sampler, float blur )
 		{
 			// Sample from original texture, we're using a mask-scope value of "filter"
 			// so we use this for blending
-			float4 origColor = SampleLayer( uv, Bindless::GetSampler( BorderSamplerIndex ), 0 );
+			float4 origColor = SampleLayer( layerUv, Bindless::GetSampler( BorderSamplerIndex ), 0 );
 			o.vColor = lerp( origColor, o.vColor, mask );
 		}
 	}

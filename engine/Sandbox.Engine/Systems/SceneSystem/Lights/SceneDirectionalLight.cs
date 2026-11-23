@@ -26,11 +26,7 @@ public sealed class SceneDirectionalLight : SceneLight
 	{
 		Assert.IsValid( sceneWorld );
 
-		using ( var h = NextHandleForTwin() )
-		{
-			if ( MakesNativeTwin ) CSceneSystem.CreateDirectionalLight( sceneWorld, rotation.Backward );
-			else MakeLightWithoutTwin( sceneWorld, NewDescription( TypeDirectional, rotation.Backward ) );
-		}
+		MakeManagedLight( sceneWorld, NewDescription( TypeDirectional, rotation.Backward ) );
 
 		LightColor = color;
 	}
