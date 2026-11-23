@@ -227,6 +227,45 @@ public class PipelineLibraryTests : GpuTest
 		Assert.IsTrue( Device.WaitForOptimisedPipelines( TimeSpan.FromSeconds( 60 ) ) );
 	}
 
+	/// <summary>
+	/// Parts made on the builder threads, ahead or for a pipeline being linked, aren't pipelines a draw is waiting for: the
+	/// deferred pipelines' pending count leaves them out however far they've got (a test of a draw's deferred pipeline read
+	/// two while its fragment part was still being made).
+	/// </summary>
+	[TestMethod]
+	public void PartsBeingMadeArentPendingPipelines()
+	{
+		RequireLibraries();
+		var vs = Shader( "triangle.vs.spv" );
+		var ps = Shader( "triangle.ps.spv" );
+
+		// Output and fragment parts for each target: enough to keep the builders busy while it's read
+		Format[] formats = [Format.RGBA8Unorm, Format.BGRA8Unorm, Format.RGBA16Float, Format.R32Float, Format.RG16Float, Format.RGB10A2Unorm];
+		foreach ( var format in formats )
+		{
+			foreach ( var samples in new[] { 1, 2, 4 } )
+			{
+				var info = Triangle( vs, ps );
+				info.ColorFormats = [format];
+				info.Samples = samples;
+				Device.QueuePipelineParts( info );
+			}
+		}
+
+		var most = 0;
+		var reads = 0;
+		while ( !Device.WaitForPendingPipelines( TimeSpan.Zero ) )
+		{
+			most = Math.Max( most, Device.DeferredPipelines.Pending );
+			reads++;
+		}
+
+		Assert.IsTrue( Device.PipelineLibraryCreation.Parts > 0, "parts were made" );
+		Assert.AreEqual( 0, most, $"pending deferred pipelines while only parts were made ({reads} reads)" );
+		Device.Destroy( vs );
+		Device.Destroy( ps );
+	}
+
 	void RequireMeshShaders()
 	{
 		if ( !Device.Capabilities.MeshShaders ) Assert.Inconclusive( "The device has no mesh shaders" );
