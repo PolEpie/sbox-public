@@ -38,6 +38,9 @@ float4 g_vInvTextureDim < Source( InvTextureDim ); SourceArg( g_tColor ); >;
 float4 FilterBorderWrapColor< UiType( Color ); Default4( 1.0f, 1.0f, 1.0f, 1.0f ); Attribute( "FilterBorderWrapColor" ); >;
 float FilterBorderWrapWidth< UiType( Slider ); Default( 0.0f ); Attribute( "FilterBorderWrapWidth" ); >;
 
+// Layer targets are rounded up in size; the content covers this much of them, from the top left
+float2 LayerUVScale < Default2( 1.0f, 1.0f ); Attribute( "LayerUVScale" ); >;
+
 // Always write rgba
 RenderState( ColorWriteEnable0, RGBA );
 RenderState( FillMode, SOLID );
@@ -83,7 +86,7 @@ float GetBorder( float2 uv )
 	UI_CommonProcessing_Pre( i );
 
 	// The layer is padded by at least the border width, so the quad and the layer line up one to one
-	float edge = GetBorder( i.vTexCoord.xy );
+	float edge = GetBorder( i.vTexCoord.xy * LayerUVScale );
 
 	// For smooth edges, we want to blend nothing with the border color
 	float4 colorTransparent = FilterBorderWrapColor;
