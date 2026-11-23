@@ -81,6 +81,22 @@ public sealed class DeviceOptions
 		return long.TryParse( text, out var mebibytes ) && mebibytes > 0 ? mebibytes << 20 : 0;
 	}
 
+	/// <summary>
+	/// Hardware performance counters per GPU scope (<see cref="Device.Counters"/>, AMD's GPUPerfAPI on AMD GPUs): a preset
+	/// (<see cref="GpuCounters.Presets"/>), counter names, or both, separated by commas; <c>list</c> also lists every counter
+	/// the device has. Null leaves them off: no library is loaded and nothing is added to the device. From
+	/// <c>-gpucounters [selection]</c> or <c>BOREALIS_GPU_COUNTERS</c>. See docs/reference/gpu-counters.md.
+	/// </summary>
+	public string GpuCounters { get; init; } = GpuCountersSwitch();
+
+	static string GpuCountersSwitch()
+	{
+		var args = Environment.GetCommandLineArgs();
+		var at = Array.FindIndex( args, a => a.Equals( "-gpucounters", StringComparison.OrdinalIgnoreCase ) );
+		if ( at < 0 ) return Environment.GetEnvironmentVariable( "BOREALIS_GPU_COUNTERS" ) is { Length: > 0 } text && text != "0" ? text : null;
+		return at + 1 < args.Length && !args[at + 1].StartsWith( '-' ) && !args[at + 1].StartsWith( '+' ) ? args[at + 1] : "default";
+	}
+
 	/// <summary>Frames the CPU may record ahead of the GPU.</summary>
 	public int FramesInFlight { get; init; } = 2;
 

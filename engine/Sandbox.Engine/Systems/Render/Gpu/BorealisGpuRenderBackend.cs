@@ -405,6 +405,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 
 			GpuBusyMs = busy;
 			GpuBusyFrame = (ulong)done;
+			if ( counterTimeline is not null ) AddCounterTimeline( busyTimings );
 			(busyTimings, publishedTimings) = (publishedTimings, busyTimings);
 		}
 
