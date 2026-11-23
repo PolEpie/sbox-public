@@ -363,7 +363,15 @@ public partial class SceneObject : IHandle
 	public bool RenderingEnabled
 	{
 		get => _renderingEnabled ??= !HasTwin || native.IsRenderingEnabled();
-		set { if ( WritesTwin( "SetRenderingEnabled" ) ) native.SetRenderingEnabled( value ); _renderingEnabled = value; NotifyChanged( Rendering.SceneObjectChange.Visibility ); }
+		set
+		{
+			var twin = WritesTwin( "SetRenderingEnabled" );
+			// Components set it every frame: an unchanged value would rewrite the render object each time
+			if ( _renderingEnabled == value ) return;
+			if ( twin ) native.SetRenderingEnabled( value );
+			_renderingEnabled = value;
+			NotifyChanged( Rendering.SceneObjectChange.Visibility );
+		}
 	}
 
 	/// <summary>
