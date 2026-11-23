@@ -3,12 +3,6 @@
 public partial struct MeshTraceRequest
 {
 	/// <summary>
-	/// Trace a world's scene objects through their native twins (<c>ISceneWorld::MeshTrace</c>) instead of in managed code. Only
-	/// tests set it, to compare the two while twins exist.
-	/// </summary>
-	internal static bool TracesNativeTwins { get; set; }
-
-	/// <summary>
 	/// The world's objects a trace can hit: those with a model, as native's world adds an object with a model to its ray trace
 	/// environment.
 	/// </summary>
