@@ -208,6 +208,9 @@ public sealed unsafe partial class CommandList
 
 			setup.ViewSetup.Transform ??= transform;
 			setup.ViewSetup.FieldOfView ??= Graphics.FieldOfView;
+
+			// The oblique projection's plane, which the view's 3D skybox is clipped at too; a caller's own projection has none
+			if ( setup.ViewSetup.ProjectionMatrix is null ) setup.ViewSetup.ClipPlane = clipPlane;
 			setup.ViewSetup.ProjectionMatrix ??= oblique;
 
 			camera.RenderToTexture( rt.ColorTarget, rt.DepthTarget, setup.ViewSetup, out var result );

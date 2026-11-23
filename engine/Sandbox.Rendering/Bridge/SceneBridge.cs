@@ -789,6 +789,7 @@ internal sealed partial class SceneBridge : ISceneRenderer
 
 		// The projection: the view's or the camera's own, which replaces the clip-space bounds too
 		view.Projection = setup.ProjectionMatrix ?? camera.CustomProjectionMatrix;
+		view.ClipPlane = setup.ProjectionMatrix is null ? null : setup.ClipPlane;
 		view.ClipSpaceBounds = setup.ClipSpaceBounds ?? RenderView.FullClipSpace;
 
 		// The view's own ambient light, from the world's and the camera's, as CameraRenderer.Configure works it out: the world's
