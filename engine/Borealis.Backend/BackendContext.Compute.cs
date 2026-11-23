@@ -164,29 +164,53 @@ internal sealed partial class BackendContext
 	}
 
 	static readonly StringToken MipLevel0 = new( "MipLevel0" ), MipLevel1 = new( "MipLevel1" ), TextureSize = new( "TextureSize" ), InvTextureSize = new( "InvTextureSize" ), DownsampleMethod = new( "D_DOWNSAMPLE_METHOD" );
-	static readonly StringToken MaskOutput = new( "Output" ), MaskMip = new( "Mip" );
+	static readonly StringToken MaskOutput = new( "Output" ), MaskMip = new( "Mip" ), MaskSource = new( "MaskSource" ), MaskRegion = new( "MaskRegion" ), MaskCopies = new( "D_COPY" );
 
 	/// <summary>The frame buffer copy's mask and downsample parameters, kept between frames.</summary>
 	readonly BackendParameters maskParameters = new(), mipParameters = new();
 
 	/// <summary>
-	/// The frame buffer copy's mips, as native's <c>CSceneSystem::DownsampleTexture</c> makes them after the copy: first
-	/// <c>depthaware_mask_cs</c> over the copy (where something is nearer than the glass in <c>RefractionDepthTexture</c>,
-	/// the last frame's blurred copy reprojected, so nearer objects stay out of the refraction), then a gaussian
-	/// <c>downsample_cs</c> dispatch a mip, each from the one above, over the viewport's part.
+	/// The frame buffer copy made by its depth-aware mask (<c>depthaware_mask_cs</c>'s <c>D_COPY</c>): one pass writes the
+	/// last frame's blurred copy where the mask takes it and the frame everywhere else, so the frame is read only where it's
+	/// kept and the copy written once. The same texels as a copy then the mask; a multisampled frame (resolved by the copy)
+	/// or one of another format (converted by it) isn't made this way. False when it wasn't.
+	/// </summary>
+	bool CopyFrameBufferMasked( BackendTexture source, BackendTexture copy, Rect viewport )
+	{
+		if ( !device.FrameBufferCopyMasked || source is not { Samples: <= 1 } || source.Format != copy.Format ) return false;
+		if ( source.Width < copy.Width || source.Height < copy.Height ) return false;
+		return MaskFrameBufferCopy( copy, viewport, source );
+	}
+
+	/// <summary>
+	/// Native's depth-aware mask over the frame buffer copy (<c>CSceneSystem::DownsampleTexture</c> runs it before the mips):
+	/// <c>depthaware_mask_cs</c> writes, where something is nearer than the glass in <c>RefractionDepthTexture</c>, the last
+	/// frame's blurred copy reprojected, so nearer objects stay out of the refraction. With <paramref name="source"/>, it
+	/// copies the frame everywhere else. False when the shader isn't there.
+	/// </summary>
+	bool MaskFrameBufferCopy( BackendTexture copy, Rect viewport, BackendTexture source )
+	{
+		if ( device.MaterialFromShader( "shaders/depthaware_mask_cs.shader" ) is not BackendMaterial { Shader: not null } mask ) return false;
+
+		var scope = BeginGpuScope( "Frame Buffer Copy Mask" );
+		maskParameters.Set( MaskOutput, copy, 0 );
+		maskParameters.Set( MaskMip, copy, 1 );
+		maskParameters.Set( MaskRegion, new Vector4( 0, 0, Math.Min( copy.Width, (int)viewport.Width ), Math.Min( copy.Height, (int)viewport.Height ) ) );
+		maskParameters.SetCombo( MaskCopies, source is null ? 0 : 1 );
+		if ( source is not null ) maskParameters.Set( MaskSource, source, 0 );
+		Dispatch( mask, maskParameters, copy.Width, copy.Height, 1 );
+		List.Barrier( PipelineStage.ComputeShader, MemoryAccess.ShaderWrite, PipelineStage.ComputeShader, MemoryAccess.ShaderRead | MemoryAccess.ShaderWrite );
+		EndGpuScope( scope );
+		return true;
+	}
+
+	/// <summary>
+	/// The frame buffer copy's mips, as native's <c>CSceneSystem::DownsampleTexture</c> makes them after the copy and its
+	/// mask: a gaussian <c>downsample_cs</c> dispatch a mip, each from the one above, over the viewport's part.
 	/// </summary>
 	void GenerateFrameBufferCopyMips( BackendTexture copy, Rect viewport )
 	{
 		if ( copy.Mips <= 1 ) return;
-
-		if ( device.MaterialFromShader( "shaders/depthaware_mask_cs.shader" ) is BackendMaterial { Shader: not null } mask )
-		{
-			maskParameters.Set( MaskOutput, copy, 0 );
-			maskParameters.Set( MaskMip, copy, 1 );
-			Dispatch( mask, maskParameters, copy.Width, copy.Height, 1 );
-			List.Barrier( PipelineStage.ComputeShader, MemoryAccess.ShaderWrite, PipelineStage.ComputeShader, MemoryAccess.ShaderRead | MemoryAccess.ShaderWrite );
-		}
-
 		if ( device.MaterialFromShader( "shaders/downsample_cs.shader" ) is not BackendMaterial { Shader: not null } downsample ) return;
 
 		var parameters = mipParameters;

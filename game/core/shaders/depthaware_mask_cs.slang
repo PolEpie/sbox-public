@@ -32,6 +32,13 @@ Mode( Default );
 
     // Output texture
     RWTexture2D<float4> Output < Attribute("Output"); > ;
+
+    // D_COPY: the frame itself, copied into Output where the mask keeps it, so the copy and the mask are one pass
+    DynamicCombo( D_COPY, 0..1, Sys( ALL ) );
+    Texture2D Source < Attribute("MaskSource"); SrgbRead( false ); > ;
+
+    // The pixels this dispatch covers, in the viewport: x, y its first, z, w past its last (the readers' area)
+    float4 Region < Attribute("MaskRegion"); > ;
     
 
     float GetDepthMask(int2 vDispatchId)
@@ -84,9 +91,10 @@ Mode( Default );
     // Processes depth-aware masking at quarter resolution and writes results at full resolution
     //-----------------------------------------------------------------------------------------
     [numthreads(16, 16, 1)]
-    [shader( "compute" )] void MainCs(uint2 vDispatchId: SV_DispatchThreadID)
+    [shader( "compute" )] void MainCs(uint2 vThreadId: SV_DispatchThreadID)
     {
-        if( vDispatchId.x >= g_vViewportSize.x || vDispatchId.y >= g_vViewportSize.y )
+        const uint2 vDispatchId = vThreadId + (uint2)Region.xy;
+        if( vDispatchId.x >= Region.z || vDispatchId.y >= Region.w )
             return;
 
         float sceneDepth = g_tDepthChain.Load(int3(vDispatchId.xy, 0)).g;
@@ -106,6 +114,12 @@ Mode( Default );
             const int2 vWritePos = vDispatchId.xy;
             Output[vWritePos] = clamp( sourceColor, 0.0f, 4.0f );
         }
+#if ( D_COPY )
+        else
+        {
+            Output[vDispatchId.xy] = Source.Load( int3( vDispatchId.xy, 0 ) );
+        }
+#endif
 
     }
 
