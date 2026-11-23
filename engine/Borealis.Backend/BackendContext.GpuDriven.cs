@@ -2405,8 +2405,10 @@ internal sealed partial class BackendContext
 		}
 
 		r.List.SetIndexBuffer( page, format, 0 );
+		var scope = BeginBucketScope( bucket );
 		if ( countOffset >= 0 ) r.List.DrawIndexedIndirectCount( commands, offset, commands, countOffset, count, GpuDrivenTables.CommandStride );
 		else r.List.DrawIndexedIndirect( commands, offset, count, GpuDrivenTables.CommandStride );
+		device.PassTimer?.End( r.List, scope );
 		gpuDrivenRuns++;
 		if ( Census ) CensusMultiDraw( bucket, DrawCensus.Path.Bucket, censusBefore, commands, offset, count, countOffset );
 	}
