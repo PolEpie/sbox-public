@@ -164,6 +164,137 @@ public class GameDrawExtractTests
 	}
 
 	/// <summary>
+	/// Once warm, the extract records a game's custom objects every frame without allocating: its recordings, their copies of
+	/// the vertices and attribute sets, and the scope the drawing runs in are all reused. (The game's own drawing here
+	/// allocates nothing either.) In the allocation tests' category: run it with <c>DOTNET_TieredCompilation=0</c>.
+	/// </summary>
+	[TestMethod]
+	[TestCategory( Allocations.Category )]
+	public void TheExtractAllocatesNothingOnceWarm()
+	{
+		ThreadSafe.MarkMainThread();
+		var material = Material.Load( "materials/dev/primary_white.vmat" );
+		var world = new SceneWorld();
+		try
+		{
+			var vertices = new Vertex[3];
+			var customs = new List<DrawnByTheGame>();
+			for ( int i = 0; i < 4; i++ )
+			{
+				var custom = new DrawnByTheGame( world );
+				custom.Flags.IsOpaque = true;
+				custom.Flags.IsTranslucent = false;
+				custom.Flags.CastShadows = true;
+				var tint = i * 0.25f;
+				custom.Draw = () =>
+				{
+					Graphics.SetupLighting( custom );
+					Graphics.Attributes.Set( "Tint", tint );
+					Graphics.Draw( vertices.AsSpan(), 3, material );
+				};
+				customs.Add( custom );
+			}
+
+			using var camera = new SceneCamera( "extract allocations" ) { World = world, Position = new Vector3( -100, 0, 0 ) };
+			var cameras = new List<SceneCamera> { camera };
+
+			// New, then learned (no frame drew them here: their slots come from their flags), then warm
+			for ( int i = 0; i < 20; i++ ) GameDrawExtract.Extract( cameras, record: true );
+			Assert.IsNull( GameDrawExtract.NotCovered, "recorded" );
+			var recorded = GameDrawExtract.Recorded;
+
+			var before = GC.GetAllocatedBytesForCurrentThread();
+			for ( int i = 0; i < 50; i++ ) GameDrawExtract.Extract( cameras, record: true );
+			var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+			Assert.AreEqual( recorded + 50 * customs.Count * 2, GameDrawExtract.Recorded, "each object recorded opaque and for shadows every extract" );
+			Assert.AreEqual( 0, allocated, "nothing allocated once warm" );
+		}
+		finally
+		{
+			GameDrawExtract.Extract( new List<SceneCamera>(), record: false );
+			world.Delete();
+		}
+	}
+
+	/// <summary>
+	/// A renderer drawn from a camera's command list (<see cref="CommandList.DrawRenderer"/>) is the engine drawing the
+	/// renderer's scene object again, which the render thread does too (it no longer keeps a frame on the main thread): drawn
+	/// there, from its render object's transform, the picture is the one the main thread draws, and the list did draw.
+	/// </summary>
+	[TestMethod]
+	public void RenderersDrawnFromCommandListsDrawTheSameOnTheRenderThread()
+	{
+		TestGraphics.Require();
+		ThreadSafe.MarkMainThread();
+
+		var scene = new Scene();
+		using var sceneScope = scene.Push();
+		try
+		{
+			var light = scene.CreateObject();
+			light.WorldRotation = Rotation.From( 45, 30, 0 );
+			light.Components.Create<DirectionalLight>();
+
+			var drawn = scene.CreateObject();
+			drawn.WorldPosition = new Vector3( 0, 0, 0 );
+			var renderer = drawn.Components.Create<ModelRenderer>();
+			renderer.Model = Model.Load( "models/dev/box.vmdl" );
+
+			var eye = scene.CreateObject();
+			eye.WorldPosition = new Vector3( -200, 0, 20 );
+			var camera = eye.Components.Create<CameraComponent>();
+			camera.BackgroundColor = Color.Black;
+
+			using var bitmap = new Bitmap( 64, 64 );
+			Color32[] Frame( bool onRenderThread )
+			{
+				for ( int i = 0; i < 10; i++ )
+				{
+					System.Threading.Thread.Sleep( 20 );
+					RenderSync.MarkRenderThread( onRenderThread );
+					try
+					{
+						camera.RenderToBitmap( bitmap, false );
+					}
+					finally
+					{
+						RenderSync.MarkRenderThread( false );
+					}
+				}
+
+				return bitmap.GetPixels32();
+			}
+
+			var without = Frame( false );
+
+			// Drawn again in red after the opaque layer, at its own transform
+			var list = new CommandList( "draw renderer" );
+			list.DrawRenderer( renderer, new RendererSetup { Color = Color.Red } );
+			camera.AddCommandList( list, Stage.AfterOpaque );
+
+			var onMain = Frame( false );
+			var onRenderThread = Frame( true );
+			Assert.IsNull( RenderSync.GameDrawsInFrame, "no reason to draw on the main thread" );
+
+			var changed = 0;
+			var differing = 0;
+			for ( int i = 0; i < onMain.Length; i++ )
+			{
+				if ( !onMain[i].Equals( without[i] ) ) changed++;
+				if ( !onMain[i].Equals( onRenderThread[i] ) ) differing++;
+			}
+
+			Assert.IsTrue( changed > 20, $"the list drew ({changed} pixels changed)" );
+			Assert.AreEqual( 0, differing, "the same picture drawn on the render thread" );
+		}
+		finally
+		{
+			scene.Destroy();
+		}
+	}
+
+	/// <summary>
 	/// A synchronous readback in a recorded drawing reads on the main thread and is counted as the drawing's sync point.
 	/// </summary>
 	[TestMethod]

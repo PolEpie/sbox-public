@@ -67,6 +67,15 @@ internal static class GameDrawExtract
 
 		/// <summary>Whether a frame asked for it (not only predicted from the flags): recorded even when its world isn't the camera's.</summary>
 		public bool Asked;
+
+		/// <summary>The extract whose frame last asked for it.</summary>
+		public long LastAsked = -1;
+
+		/// <summary>
+		/// Whether a frame asked for it lately: then it's recorded though the object is outside the camera's frustum (a shadow
+		/// cast into view, a reflection), for longer for shadows, whose views come and go with the lights.
+		/// </summary>
+		public bool AskedLately( long now ) => LastAsked >= now - (Layer == SceneLayerType.Shadow ? 30 : 2);
 	}
 
 	/// <summary>A custom object's slots, kept on it (<see cref="SceneCustomObject.DrawSlots"/>).</summary>
@@ -318,7 +327,7 @@ internal static class GameDrawExtract
 			{
 				if ( slot.Camera != key || slot.RecordedFrame == frame ) continue;
 				if ( !drawn && !slot.Asked ) continue;
-				if ( !inView && slot.Layer != SceneLayerType.Shadow ) continue;
+				if ( !inView && !slot.AskedLately( frame ) ) continue;
 				Record( slot, custom, camera );
 			}
 		}
@@ -329,9 +338,19 @@ internal static class GameDrawExtract
 		SetCamera( view.Frustum, first );
 		foreach ( var custom in gathered )
 		{
-			foreach ( var slot in custom.DrawSlots.List )
+			var slots = custom.DrawSlots.List;
+			for ( int i = slots.Count - 1; i >= 0; i-- )
 			{
+				var slot = slots[i];
 				if ( slot.RecordedFrame == frame || drawnKeys.Contains( slot.Camera ) ) continue;
+
+				// A view no frame has asked for in a while (a camera gone) is forgotten
+				if ( slot.LastAsked < frame - 60 )
+				{
+					slots.RemoveAt( i );
+					continue;
+				}
+
 				Record( slot, custom, first );
 			}
 		}
@@ -468,6 +487,7 @@ internal static class GameDrawExtract
 		if ( exact is not null )
 		{
 			exact.Asked = true;
+			exact.LastAsked = frame;
 			Learn( ref exact.Facts );
 		}
 
