@@ -210,7 +210,7 @@ public partial class Model
 	public int GetBaseVertex( int drawcall ) => MeshGlue.GetModelBaseVertex( native, drawcall );
 
 	/// <summary>The vertices and indices of one draw call of the mesh drawn at a LOD; indices are relative to the returned vertices. False when the draw has no readable triangles.</summary>
-	public bool TryGetLodDrawCall( int lod, int drawCall, out Vertex[] vertices, out uint[] indices )
+	internal bool TryGetLodDrawCall( int lod, int drawCall, out Vertex[] vertices, out uint[] indices )
 	{
 		vertices = null;
 		indices = null;
