@@ -51,6 +51,16 @@ public partial class RenderAttributes
 		Set( attr );
 	}
 
+	/// <summary>
+	/// Remove a value: from the managed set (or the managed copy of a native one), and from the native set with
+	/// <paramref name="deleteNative"/> if there is one.
+	/// </summary>
+	internal void DeleteValue( StringToken name, Action<CRenderAttributes, StringToken> deleteNative )
+	{
+		ManagedValues?.SetObject( name, null );
+		if ( attributes.IsValid ) deleteNative( attributes, name );
+	}
+
 	~RenderAttributes()
 	{
 		TryFree();

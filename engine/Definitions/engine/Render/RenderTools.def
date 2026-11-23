@@ -4,7 +4,6 @@
 native static class RenderTools as NativeEngine.RenderTools
 {
 
-	bool PackSceneEnvMap( CSceneObject sceneObject, void* pOut );
 	void GetWorldWind( CastTo[Vector4D*] void* pStrengthFreq, CastTo[Vector4D*] void* pDir );
 	IMaterial GetSceneObjectDraw( CSceneObject sceneObject, int nIndex, CastTo[int*] void* pMeshIndex, CastTo[int*] void* pDrawCall, CastTo[int*] void* pFlags );
 	float GetTextureLodScale( bool bFallback );
@@ -20,7 +19,6 @@ native static class RenderTools as NativeEngine.RenderTools
 			texture.GetResourceName( &name );
 		return name.String();
 	}
-	int PackSceneLight( CSceneLightObject light, void* pOut, CastTo[int*] void* pBakeLightIndex );
 	bool ReadSceneLightDescription( CSceneLightObject light, void* pOut );
 
 	inline void SetDynamicConstantBufferData( CRenderAttributes attributes, StringToken nTokenID, void* data, int dataSize )

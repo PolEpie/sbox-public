@@ -37,11 +37,7 @@ public sealed class SceneSpotLight : SceneLight
 	{
 		Assert.IsValid( world );
 
-		using ( var h = NextHandleForTwin() )
-		{
-			if ( MakesNativeTwin ) CSceneSystem.CreateSpotLight( world );
-			else MakeLightWithoutTwin( world, NewDescription( TypeSpot ) );
-		}
+		MakeManagedLight( world, NewDescription( TypeSpot ) );
 
 		LightColor = color;
 		Position = position;

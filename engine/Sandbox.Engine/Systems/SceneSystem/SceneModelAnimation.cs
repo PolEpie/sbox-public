@@ -4,33 +4,33 @@ using System.Runtime.InteropServices;
 namespace Sandbox;
 
 /// <summary>
-/// A scene model's animation: the <see cref="ModelAnimationInstance"/> every scene model managed code makes animates on (its
-/// native twin is a plain scene object). A scene model native code made (a tool's preview) has none: native code animates its
-/// twin, a <see cref="CSceneAnimatableObject"/>, and managed code only reads the twin's pose, bounds and attachments.
+/// A scene model's animation: the <see cref="ModelAnimationInstance"/> every scene model managed code makes animates on. A
+/// scene model native code made (a tool's preview) has none: native code animates its <see cref="CSceneAnimatableObject"/>,
+/// and managed code only reads its pose, bounds and attachments.
 /// Deformation volumes are kept in managed code.
 /// </summary>
 internal readonly unsafe struct SceneModelAnimation
 {
 	/// <summary>
-	/// The animated native twin of a scene model native code made; null for one managed code made.
+	/// The animated native object of a scene model native code made; null for one managed code made.
 	/// </summary>
-	internal readonly CSceneAnimatableObject Twin;
+	internal readonly CSceneAnimatableObject Animatable;
 
 	/// <summary>
-	/// What animates the scene model, if not its twin.
+	/// What animates a scene model managed code made.
 	/// </summary>
 	internal readonly ModelAnimationInstance Instance;
 
 	readonly SceneModel owner;
 
-	internal SceneModelAnimation( CSceneAnimatableObject twin, ModelAnimationInstance instance, SceneModel owner )
+	internal SceneModelAnimation( CSceneAnimatableObject animatable, ModelAnimationInstance instance, SceneModel owner )
 	{
-		Twin = twin;
+		Animatable = animatable;
 		Instance = instance;
 		this.owner = owner;
 	}
 
-	internal bool IsNull => Twin.IsNull && Instance.IsNull;
+	internal bool IsNull => Animatable.IsNull && Instance.IsNull;
 	internal bool IsValid => !IsNull;
 	internal bool HasInstance => !Instance.IsNull;
 
@@ -40,8 +40,8 @@ internal readonly unsafe struct SceneModelAnimation
 	internal AnimationPose* Pose => HasInstance ? (AnimationPose*)Instance.GetPose() : null;
 
 	internal float m_flDeltaTime => HasInstance ? Instance.GetDeltaTime() : 0;
-	internal BBox m_worldBounds => HasInstance ? owner.AnimatedWorldBounds : Twin.m_worldBounds;
-	internal BBox m_localBounds => HasInstance ? owner.AnimatedLocalBounds : Twin.m_localBounds;
+	internal BBox m_worldBounds => HasInstance ? owner.AnimatedWorldBounds : Animatable.m_worldBounds;
+	internal BBox m_localBounds => HasInstance ? owner.AnimatedLocalBounds : Animatable.m_localBounds;
 
 	internal void InitAnimation() { if ( HasInstance ) Instance.InitAnimation(); }
 	internal void Update( float dt ) { if ( HasInstance ) Instance.Update( dt ); }
@@ -51,7 +51,7 @@ internal readonly unsafe struct SceneModelAnimation
 
 	/// <summary>
 	/// Merge from another scene model's bones. Both animate the same way (the switch is per process); an instance can't merge
-	/// from a twin.
+	/// from a native animatable object.
 	/// </summary>
 	internal void MergeFrom( SceneModel parent )
 	{
@@ -62,16 +62,16 @@ internal readonly unsafe struct SceneModelAnimation
 	}
 
 	internal void SetWorldSpaceRenderBoneTransform( int bone, Transform tx ) { if ( HasInstance ) Instance.SetWorldSpaceRenderBoneTransform( bone, tx ); }
-	internal Transform GetWorldSpaceRenderBoneTransform( int bone ) => HasInstance ? Instance.GetWorldSpaceRenderBoneTransform( bone ) : Twin.GetWorldSpaceRenderBoneTransform( bone );
-	internal Transform GetWorldSpaceRenderBoneTransform( string bone ) => HasInstance ? Instance.GetWorldSpaceRenderBoneTransform( bone ) : Twin.GetWorldSpaceRenderBoneTransform( bone );
-	internal Transform GetWorldSpaceRenderBonePreviousTransform( int bone ) => HasInstance ? Instance.GetWorldSpaceRenderBonePreviousTransform( bone ) : Twin.GetWorldSpaceRenderBonePreviousTransform( bone );
-	internal Transform GetWorldSpaceRenderBonePreviousTransform( string bone ) => HasInstance ? Instance.GetWorldSpaceRenderBonePreviousTransform( bone ) : Twin.GetWorldSpaceRenderBonePreviousTransform( bone );
-	internal Transform GetLocalSpaceRenderBoneTransform( int bone ) => HasInstance ? Instance.GetLocalSpaceRenderBoneTransform( bone ) : Twin.GetLocalSpaceRenderBoneTransform( bone );
-	internal Transform GetLocalSpaceRenderBoneTransform( string bone ) => HasInstance ? Instance.GetLocalSpaceRenderBoneTransform( bone ) : Twin.GetLocalSpaceRenderBoneTransform( bone );
-	internal Transform GetWorldSpaceAnimationTransform( int bone ) => HasInstance ? Instance.GetWorldSpaceAnimationTransform( bone ) : Twin.GetWorldSpaceAnimationTransform( bone );
-	internal void GetWorldSpaceRenderBoneTransforms( int count, IntPtr dest ) { if ( HasInstance ) Instance.GetWorldSpaceRenderBoneTransforms( count, dest ); else Twin.GetWorldSpaceRenderBoneTransforms( count, dest ); }
-	internal void GetWorldSpaceRenderBonePreviousTransforms( int count, IntPtr dest ) { if ( HasInstance ) Instance.GetWorldSpaceRenderBonePreviousTransforms( count, dest ); else Twin.GetWorldSpaceRenderBonePreviousTransforms( count, dest ); }
-	internal int GetClosestBoneIndex( Vector3 point ) => HasInstance ? Instance.GetClosestBoneIndex( point ) : Twin.GetClosestBoneIndex( point );
+	internal Transform GetWorldSpaceRenderBoneTransform( int bone ) => HasInstance ? Instance.GetWorldSpaceRenderBoneTransform( bone ) : Animatable.GetWorldSpaceRenderBoneTransform( bone );
+	internal Transform GetWorldSpaceRenderBoneTransform( string bone ) => HasInstance ? Instance.GetWorldSpaceRenderBoneTransform( bone ) : Animatable.GetWorldSpaceRenderBoneTransform( bone );
+	internal Transform GetWorldSpaceRenderBonePreviousTransform( int bone ) => HasInstance ? Instance.GetWorldSpaceRenderBonePreviousTransform( bone ) : Animatable.GetWorldSpaceRenderBonePreviousTransform( bone );
+	internal Transform GetWorldSpaceRenderBonePreviousTransform( string bone ) => HasInstance ? Instance.GetWorldSpaceRenderBonePreviousTransform( bone ) : Animatable.GetWorldSpaceRenderBonePreviousTransform( bone );
+	internal Transform GetLocalSpaceRenderBoneTransform( int bone ) => HasInstance ? Instance.GetLocalSpaceRenderBoneTransform( bone ) : Animatable.GetLocalSpaceRenderBoneTransform( bone );
+	internal Transform GetLocalSpaceRenderBoneTransform( string bone ) => HasInstance ? Instance.GetLocalSpaceRenderBoneTransform( bone ) : Animatable.GetLocalSpaceRenderBoneTransform( bone );
+	internal Transform GetWorldSpaceAnimationTransform( int bone ) => HasInstance ? Instance.GetWorldSpaceAnimationTransform( bone ) : Animatable.GetWorldSpaceAnimationTransform( bone );
+	internal void GetWorldSpaceRenderBoneTransforms( int count, IntPtr dest ) { if ( HasInstance ) Instance.GetWorldSpaceRenderBoneTransforms( count, dest ); else Animatable.GetWorldSpaceRenderBoneTransforms( count, dest ); }
+	internal void GetWorldSpaceRenderBonePreviousTransforms( int count, IntPtr dest ) { if ( HasInstance ) Instance.GetWorldSpaceRenderBonePreviousTransforms( count, dest ); else Animatable.GetWorldSpaceRenderBonePreviousTransforms( count, dest ); }
+	internal int GetClosestBoneIndex( Vector3 point ) => HasInstance ? Instance.GetClosestBoneIndex( point ) : Animatable.GetClosestBoneIndex( point );
 
 	/// <summary>
 	/// The world-space render bones as matrices, into <paramref name="count"/> at <paramref name="dest"/>; identity past the last.
@@ -80,7 +80,7 @@ internal readonly unsafe struct SceneModelAnimation
 	{
 		if ( !HasInstance )
 		{
-			Twin.GetWorldSpaceRenderBoneMatrices( count, dest );
+			Animatable.GetWorldSpaceRenderBoneMatrices( count, dest );
 			return;
 		}
 
@@ -96,7 +96,7 @@ internal readonly unsafe struct SceneModelAnimation
 	/// </summary>
 	internal int GetFlexControllerWeights( IntPtr dest, int max )
 	{
-		if ( !HasInstance ) return Twin.GetFlexControllerWeights( dest, max );
+		if ( !HasInstance ) return Animatable.GetFlexControllerWeights( dest, max );
 
 		var pose = Pose;
 		var copy = Math.Min( max, pose->FlexWeightCount );
@@ -106,8 +106,8 @@ internal readonly unsafe struct SceneModelAnimation
 		return pose->FlexWeightCount;
 	}
 
-	internal Transform GetParentSpaceBone( int index ) => HasInstance ? Instance.GetParentSpaceBone( index ) : Twin.GetParentSpaceBone( index );
-	internal void GetParentSpaceBones( int count, IntPtr dest ) { if ( HasInstance ) Instance.GetParentSpaceBones( count, dest ); else Twin.GetParentSpaceBones( count, dest ); }
+	internal Transform GetParentSpaceBone( int index ) => HasInstance ? Instance.GetParentSpaceBone( index ) : Animatable.GetParentSpaceBone( index );
+	internal void GetParentSpaceBones( int count, IntPtr dest ) { if ( HasInstance ) Instance.GetParentSpaceBones( count, dest ); else Animatable.GetParentSpaceBones( count, dest ); }
 	internal void SetParentSpaceBone( int index, Transform tx ) { if ( HasInstance ) Instance.SetParentSpaceBone( index, tx ); }
 
 	internal void ResetGraphParameters() { if ( HasInstance ) Instance.ResetGraphParameters(); }
@@ -138,7 +138,7 @@ internal readonly unsafe struct SceneModelAnimation
 	internal void DirectPlayback_SetSequenceStartTime( float time ) { if ( HasInstance ) Instance.DirectPlayback_SetSequenceStartTime( time ); }
 	internal float DirectPlayback_GetSequenceDuration() => HasInstance ? Instance.DirectPlayback_GetSequenceDuration() : 0;
 
-	internal bool SBox_GetAttachment( StringToken name, bool worldspace, out Transform tx ) => HasInstance ? Instance.SBox_GetAttachment( name, worldspace, out tx ) : Twin.SBox_GetAttachment( name, worldspace, out tx );
+	internal bool SBox_GetAttachment( StringToken name, bool worldspace, out Transform tx ) => HasInstance ? Instance.SBox_GetAttachment( name, worldspace, out tx ) : Animatable.SBox_GetAttachment( name, worldspace, out tx );
 
 	internal void SetShouldUseAnimGraph( bool enabled ) { if ( HasInstance ) Instance.SetShouldUseAnimGraph( enabled ); }
 	internal bool GetShouldUseAnimGraph() => HasInstance ? Instance.GetShouldUseAnimGraph() : false;
