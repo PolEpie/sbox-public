@@ -129,6 +129,9 @@ public static class Application
 		IsHeadless = headless;
 		IsEditor = toolsMode;
 		IsJoinLocal = CommandLine.HasSwitch( "-joinlocal" );
+
+		// The game window's render thread takes a core of its own: the job workers leave it one
+		if ( !dedicated && !testMode && !headless && !toolsMode && Graphics.BorealisGpuRequested && BorealisGpuFrameThread.Draws ) JobDispatcher.Workers.ReserveForRenderThread();
 		IsBenchmark = Environment.GetEnvironmentVariable( "SBOX_MODE" ) == "BENCHMARK";
 		LocalInstanceId = CommandLine.GetSwitchInt( "+instanceid", 1 );
 	}

@@ -186,6 +186,9 @@ public class AppSystem
 
 	public virtual void Shutdown()
 	{
+		// The render thread finishes the last frame handed to it and stops before anything it draws with is let go of
+		gameWindow?.StopRenderThread();
+
 		startupWindow?.Dispose();
 		startupWindow = null;
 

@@ -984,6 +984,29 @@ public sealed unsafe partial class Device
 	/// <summary>Whether the GPU has reached <paramref name="point"/>.</summary>
 	public bool IsComplete( SyncPoint point ) => QueueFor( point.Queue ).Completed >= point.Value;
 
+	/// <summary>The last point sent to the GPU on a queue: lists waiting to go with the next submission aren't in it.</summary>
+	public SyncPoint LastFlushed( QueueType queue ) => new( queue, Volatile.Read( ref QueueFor( queue ).Flushed ) );
+
+	/// <summary>
+	/// Wait on the CPU until the GPU reaches <paramref name="point"/>, which must have been sent to it (<see cref="LastFlushed"/>),
+	/// or until <paramref name="timeout"/> passes: true once it has (or the device is lost), false on the timeout. Unlike
+	/// <see cref="Wait(SyncPoint)"/> it never takes the device as lost: for watching the GPU, not for work that needs it.
+	/// </summary>
+	public bool TryWait( SyncPoint point, TimeSpan timeout )
+	{
+		var queue = QueueFor( point.Queue );
+		if ( IsLost || queue.Completed >= point.Value ) return true;
+		if ( point.Value > Volatile.Read( ref queue.Flushed ) ) throw new InvalidOperationException( $"{queue.Type} {point.Value} hasn't been sent to the GPU" );
+
+		var semaphore = queue.Timeline;
+		var value = point.Value;
+		var info = new VkSemaphoreWaitInfo { sType = VkStructureType.SemaphoreWaitInfo, semaphoreCount = 1, pSemaphores = &semaphore, pValues = &value };
+		var result = Vk.vkWaitSemaphores( Vk.Device, &info, (ulong)Math.Max( 0, timeout.Ticks ) * 100 );
+		if ( result == VkResult.Timeout ) return false;
+		Check( result, "vkWaitSemaphores" );
+		return true;
+	}
+
 	/// <summary>The last point submitted to a queue.</summary>
 	public SyncPoint LastSubmitted( QueueType queue ) => new( queue, QueueFor( queue ).Submitted );
 

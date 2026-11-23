@@ -87,6 +87,14 @@ internal sealed partial class BorealisGpuRenderBackend
 	/// <summary>Whether the render thread is drawing a frame handed over (<see cref="HandOverRenderFrame"/>).</summary>
 	internal bool Drawing => drawing;
 
+	/// <summary>For the tests: the device's recording state as if the render thread were drawing a frame, or done with it.</summary>
+	internal void DrawingForTests( bool on )
+	{
+		if ( on ) drawn.Reset();
+		drawing = on;
+		if ( !on ) drawn.Set();
+	}
+
 	/// <summary>Frames the render thread drew, and main-thread uses of the device that waited for one, for the tests and stats.</summary>
 	internal long FramesDrawnOnThread { get; private set; }
 
@@ -109,35 +117,140 @@ internal sealed partial class BorealisGpuRenderBackend
 		if ( staged.Count > 0 && ThreadSafe.IsMainThread ) WriteStaged();
 	}
 
-	// Buffer writes the main thread made while the render thread drew (SetBufferData), their bytes, and how many there were
-	readonly List<(GpuBuffer Buffer, int Offset, int Size, int At)> staged = new();
+	// Buffer writes, texture updates and painting into textures the main thread did while the render thread drew
+	// (SetBufferData, Texture.Update, TexturePaintContext), in order: their bytes, and where each goes
+	struct StagedWrite
+	{
+		public GpuBuffer Buffer;
+		public Texture Texture;
+		public Action Work;
+		public Color? Clear;
+		public int Offset, Size, At, X, Y, Z, Width, Height, Depth;
+	}
+
+	readonly List<StagedWrite> staged = new();
 	byte[] stagedBytes = [];
 	int stagedUsed;
+	bool writingStaged;
 
 	/// <summary>Buffer writes made on the main thread while the render thread drew, kept for after it, for the tests and stats.</summary>
 	internal long BufferWritesStaged { get; private set; }
 
-	void StageBufferData( GpuBuffer buffer, ReadOnlySpan<byte> bytes, int offset )
+	/// <summary>Texture updates and clears made on the main thread while the render thread drew, kept for after it, for the tests and stats.</summary>
+	internal long TextureUpdatesStaged { get; private set; }
+
+	/// <summary>Work painted into a texture on the main thread while the render thread drew, run after it, for the tests and stats.</summary>
+	internal long UpdateWorkDeferred { get; private set; }
+
+	/// <summary>Whether the main thread is using the device while the render thread draws a frame (never on the render thread).</summary>
+	bool Overlapping => drawing && ThreadSafe.IsMainThread && !ThreadSafe.IsRenderThread;
+
+	int Stage( ReadOnlySpan<byte> bytes )
 	{
 		if ( stagedUsed + bytes.Length > stagedBytes.Length ) Array.Resize( ref stagedBytes, Math.Max( stagedBytes.Length * 2, Math.Max( 64 << 10, stagedUsed + bytes.Length ) ) );
 		bytes.CopyTo( stagedBytes.AsSpan( stagedUsed ) );
-		staged.Add( (buffer, offset, bytes.Length, stagedUsed) );
+		var at = stagedUsed;
 		stagedUsed += bytes.Length;
+		return at;
+	}
+
+	void StageBufferData( GpuBuffer buffer, ReadOnlySpan<byte> bytes, int offset )
+	{
+		staged.Add( new StagedWrite { Buffer = buffer, Offset = offset, Size = bytes.Length, At = Stage( bytes ) } );
 		BufferWritesStaged++;
 	}
 
-	// The writes kept while the render thread drew, in the order they were made, now that it's done (the main thread's next
-	// use of the device, its join)
+	void StageTextureUpdate( Texture texture, ReadOnlySpan<byte> data, int x, int y, int z, int width, int height, int depth )
+	{
+		staged.Add( new StagedWrite { Texture = texture, Size = data.Length, At = Stage( data ), X = x, Y = y, Z = z, Width = width, Height = height, Depth = depth } );
+		TextureUpdatesStaged++;
+	}
+
+	void StageTextureClear( Texture texture, Color color )
+	{
+		staged.Add( new StagedWrite { Texture = texture, Clear = color } );
+		TextureUpdatesStaged++;
+	}
+
+	/// <inheritdoc/>
+	internal override void FinishDrawing()
+	{
+		if ( Overlapping ) FromMain();
+	}
+
+	/// <inheritdoc/>
+	internal override bool DefersUpdateWork => Overlapping;
+
+	/// <inheritdoc/>
+	internal override void DeferUpdateWork( Action work )
+	{
+		staged.Add( new StagedWrite { Work = work } );
+		UpdateWorkDeferred++;
+	}
+
+	/// <summary>
+	/// What the main thread did while the render thread drew, done now: at its join, before it next records, and at the start
+	/// of the frame's output (<c>GameWindow.JoinRenderThread</c>). Nothing while the render thread still draws.
+	/// </summary>
+	internal void WriteStagedNow()
+	{
+		if ( staged.Count > 0 && !drawing && ThreadSafe.IsMainThread && !ThreadSafe.IsRenderThread ) WriteStaged();
+	}
+
+	// The writes and work kept while the render thread drew, in the order they were made, now that it's done (the main
+	// thread's next use of the device, its join). Painting runs blocks of its own, so it and what came after it wait while a
+	// block records or is about to (a block lent to a frame, the list of uploads lent to update-time work)
 	void WriteStaged()
 	{
-		for ( int i = 0; i < staged.Count; i++ )
+		if ( writingStaged ) return;
+		writingStaged = true;
+		var done = 0;
+		try
 		{
-			var (buffer, offset, size, at) = staged[i];
-			if ( buffer.IsValid ) WriteBufferData( buffer, stagedBytes.AsSpan( at, size ), offset );
-		}
+			for ( ; done < staged.Count; done++ )
+			{
+				var write = staged[done];
+				if ( write.Work is { } work )
+				{
+					if ( list is not null || lendNext is not null || Graphics.IsActive ) break;
+					try
+					{
+						work();
+					}
+					catch ( Exception e )
+					{
+						Log.Error( e );
+					}
 
-		staged.Clear();
-		stagedUsed = 0;
+					continue;
+				}
+
+				var bytes = stagedBytes.AsSpan( write.At, write.Size );
+				if ( write.Buffer is { } buffer )
+				{
+					if ( buffer.IsValid ) WriteBufferData( buffer, bytes, write.Offset );
+				}
+				else if ( write.Clear is { } clear )
+				{
+					if ( write.Texture is { IsValid: true } cleared && !Cleared( cleared, clear ) ) Release( cleared );
+				}
+				else if ( write.Texture is { IsValid: true } texture && !Update( texture, bytes, write.X, write.Y, write.Z, write.Width, write.Height, write.Depth ) )
+				{
+					Release( texture );
+				}
+			}
+		}
+		finally
+		{
+			if ( done >= staged.Count )
+			{
+				staged.Clear();
+				stagedUsed = 0;
+			}
+			else staged.RemoveRange( 0, done );
+
+			writingStaged = false;
+		}
 	}
 
 	void WaitForDrawing()
@@ -155,6 +268,22 @@ internal sealed partial class BorealisGpuRenderBackend
 	// and the window's acquire. The frame start touches only the device and the window's swap chain, which the main thread
 	// leaves alone until it joins
 	void StartAhead()
+	{
+		var cpuAtStart = ThreadCpuTime.NowMs();
+		try
+		{
+			StartAheadTimed();
+		}
+		finally
+		{
+			// Its CPU time, besides the wall time it took (which includes the waits for the GPU and the swap chain)
+			RenderThreadCpuTiming.AddMillisecondsFromAnyThread( ThreadCpuTime.NowMs() - cpuAtStart );
+		}
+	}
+
+	static readonly Sandbox.Diagnostics.PerformanceStats.Timings RenderThreadCpuTiming = Sandbox.Diagnostics.PerformanceStats.Timings.Get( "Borealis render thread CPU" );
+
+	void StartAheadTimed()
 	{
 		if ( renderDraw is { } draw )
 		{
@@ -199,7 +328,9 @@ internal sealed partial class BorealisGpuRenderBackend
 		aheadWindow = null;
 		try
 		{
+			var joinStart = System.Diagnostics.Stopwatch.GetTimestamp();
 			thread.Join();
+			BorealisGpuFrameLatency.Joined( Application.FrameCount, System.Diagnostics.Stopwatch.GetElapsedTime( joinStart ).TotalMilliseconds );
 		}
 		catch ( Borealis.Gpu.GpuException e ) when ( e.IsDeviceLost )
 		{

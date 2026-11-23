@@ -206,6 +206,8 @@ public partial class Scene : GameObject
 
 	internal virtual void DestroyInternal()
 	{
+		// A frame the render thread draws may be this scene's: it's drawn before the scene goes
+		if ( ThreadSafe.IsMainThread && !ThreadSafe.IsRenderThread ) Sandbox.Engine.GameWindow.Current?.JoinRenderThread();
 		_all.Remove( this );
 
 		// Clearing the object index now means we can save time
@@ -365,6 +367,9 @@ public partial class Scene : GameObject
 		if ( IsSuspended ) return;
 
 		using var _extractScope = _extractTimer.Start();
+
+		// The post processing the update built for each camera is what this frame draws; the next builds into the other set
+		foreach ( var cc in Cameras ) cc.TakePostProcess();
 		PreCameraRender();
 
 		var cameras = RentSortedCameras();
