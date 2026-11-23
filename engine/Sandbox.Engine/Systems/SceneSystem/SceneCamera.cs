@@ -715,6 +715,10 @@ public sealed partial class SceneCamera : IDisposable, IManagedCamera
 		if ( renderStage == Rendering.Stage.AfterPostProcess )
 			OnAfterPostProcess?.Invoke();
 
+		// A visibility ids view with no ids to show says so, over the frame
+		if ( renderStage == Rendering.Stage.AfterUI )
+			DebugOverlay.ToolsVisualization.DrawIdsViewNotice();
+
 		if ( renderStage == Rendering.Stage.AfterUI && IsRecordingCamera && Application.IsEditor && !Game.IsPlaying )
 		{
 			ScreenCaptureUtility.CaptureFrame();
@@ -1005,4 +1009,10 @@ public enum SceneCameraDebugMode
 	MotionVectors = 102,
 	[Title( "Reactive Mask" ), Icon( "shield" )]
 	ReactiveMask = 103,
+	[Title( "Visibility Triangles" ), Icon( "change_history" )]
+	VisibilityTriangles = 110,
+	[Title( "Visibility Instances" ), Icon( "category" )]
+	VisibilityInstances = 111,
+	[Title( "Visibility Draws" ), Icon( "view_in_ar" )]
+	VisibilityDraws = 112,
 }

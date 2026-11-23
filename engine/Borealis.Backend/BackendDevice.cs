@@ -617,8 +617,49 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	/// <summary>Views resolved into normals from their ids, and asked for but left to depth, for reports and the tests.</summary>
 	public int IdsNormalsResolved, IdsNormalsSkipped;
 
-	/// <summary>The ids target's format: the vertex bit + 1, and with <see cref="IdsNormals"/> the instance record.</summary>
-	internal Format IdsFormat => IdsNormals ? Format.RG32Uint : Format.R32Uint;
+	/// <summary>
+	/// The ids target's format this frame: the vertex bit + 1, and with <see cref="IdsNormals"/> or while a tools view shows
+	/// the ids (<see cref="IdsWhole"/>) the instance record. A view's ids targets are made again when it changes
+	/// (<see cref="PrepareIdsTargets"/>), and ids pipelines are keyed by it.
+	/// </summary>
+	internal Format IdsFormat => IdsNormals || IdsWhole ? Format.RG32Uint : Format.R32Uint;
+
+	/// <summary>
+	/// Whether this frame's views keep their whole prepass's ids, cleared once a frame and loaded by every call that draws
+	/// them, rather than each call clearing them for its own: with <see cref="IdsNormals"/>, and while a tools view shows
+	/// them (<see cref="ShowIds"/>, docs/reference/borealis.md, "Visibility ids views"). Set at the frame's start, so every
+	/// call of a frame decides the same.
+	/// </summary>
+	internal bool IdsWhole { get; private set; }
+
+	uint idsShownFrame;
+
+	/// <summary>A tools view showed a view's ids this frame: the next frames keep each view's whole prepass in them (<see cref="IdsWhole"/>).</summary>
+	internal void ShowIds() => Volatile.Write( ref idsShownFrame, GpuDrivenFrame );
+
+	/// <summary>The visibility ids views' shader (<c>borealis_ids_view_cs</c>), or null when it isn't built.</summary>
+	internal ShaderFile IdsViewShader
+	{
+		get
+		{
+			if ( !SlangPasses ) return null;
+			if ( Volatile.Read( ref idsViewShaderLoaded ) ) return idsViewShader;
+			lock ( visibilityViews )
+			{
+				if ( !idsViewShaderLoaded )
+				{
+					var shader = Shaders.Load( "shaders/borealis_ids_view_cs.shader" );
+					idsViewShader = shader is not null && Passes.ModuleOf( shader ) is not null ? shader : null;
+					Volatile.Write( ref idsViewShaderLoaded, true );
+				}
+			}
+
+			return idsViewShader;
+		}
+	}
+
+	ShaderFile idsViewShader;
+	bool idsViewShaderLoaded;
 
 	/// <summary>
 	/// Fragments under which a prepass call draws in one phase with <see cref="HiZOcclusion"/>: a Hi-Z build and a second ids
@@ -1948,8 +1989,8 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 		}
 	}
 
-	/// <summary>The colour an ids pipeline is keyed by (<see cref="Pipeline"/>'s ids), which no other pipeline draws into.</summary>
-	internal const Format IdsColorKey = Format.R32Uint;
+	/// <summary>Whether <paramref name="format"/> is one an ids target is made in (<see cref="IdsFormat"/>).</summary>
+	internal static bool IsIdsFormat( Format format ) => format is Format.R32Uint or Format.RG32Uint;
 
 	/// <summary>
 	/// A pipeline for a variant drawing vertices laid out as <paramref name="layout"/> into targets of these formats,
@@ -1964,7 +2005,11 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	{
 		normals &= color != Format.Unknown && !ids;
 		if ( ids || color == Format.Unknown ) tools = ToolsPass.None;
-		var key = new PipelineKey( variant, layout, ids ? IdsColorKey : color, depth, samples, depthOnly, sets, materialPerDraw, stateFrom, normals, tools );
+
+		// An ids pipeline's colour is the ids target's format it was asked for (the frame's IdsFormat), so pipelines for either
+		// format live side by side and one made on a worker after the format changed is still the one asked for
+		if ( ids && !IsIdsFormat( color ) ) color = IdsFormat;
+		var key = new PipelineKey( variant, layout, color, depth, samples, depthOnly, sets, materialPerDraw, stateFrom, normals, tools );
 		lock ( pipelines )
 		{
 			if ( pipelines.TryGetValue( key, out var pipeline ) ) return pipeline;
@@ -1985,7 +2030,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 				: [new( layout.Stride ), new( 4, VertexStepRate.Instance ), new( 0 )];
 			// The visibility-driven forward pass's id prepass: target 0 takes the authored output (its alpha drives alpha to
 			// coverage) and goes nowhere, target 1 the ids (a GPU-driven pixel shader's id output)
-			Format[] colors = ids ? [Format.R8Unorm, IdsFormat] : color == Format.Unknown ? [] : [color];
+			Format[] colors = ids ? [Format.R8Unorm, color] : color == Format.Unknown ? [] : [color];
 			var name = $"{variant}{(depthOnly ? " depth" : ids ? " ids" : "")}";
 			var depthBias = depthOnly || color == Format.Unknown || ids;
 
@@ -3107,6 +3152,16 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	/// </summary>
 	internal void PrepareIdsTargets( VisibilityView state )
 	{
+		// Made for the other ids format (a tools view of the ids started or stopped): made again in this frame's format
+		if ( state.IdsReady && state.Ids.IsValid && Gpu.InfoOf( state.Ids ).Format != IdsFormat )
+		{
+			lock ( visibilityViews )
+			{
+				FreeIdsTargets( state );
+				state.IdsWanted = true;
+			}
+		}
+
 		if ( state.IdsReady || !state.IdsWanted && !state.PendingIds.IsValid || !state.Ready || state.Width == 0 ) return;
 		lock ( visibilityViews )
 		{
@@ -3114,7 +3169,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 			{
 				var (ids, scratch) = (state.PendingIds, state.PendingScratch);
 				state.PendingIds = state.PendingScratch = default;
-				if ( Gpu.InfoOf( ids ) is var info && (info.Width, info.Height, info.Samples) == (state.Width, state.Height, state.Samples) )
+				if ( Gpu.InfoOf( ids ) is var info && (info.Width, info.Height, info.Samples) == (state.Width, state.Height, state.Samples) && info.Format == IdsFormat )
 				{
 					(state.Ids, state.Scratch) = (ids, scratch);
 					(state.IdsWanted, state.IdsReady) = (false, true);
@@ -3233,7 +3288,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 			Samples = samples,
 			Dimension = TextureDimension.Texture2D,
 			Format = IdsFormat,
-			Usage = TextureUsage.ColorTarget | TextureUsage.Sampled | (IdsNormals ? TextureUsage.CopyDestination : 0) | (Figure is not null ? TextureUsage.CopySource : 0),
+			Usage = TextureUsage.ColorTarget | TextureUsage.Sampled | TextureUsage.CopyDestination | (Figure is not null ? TextureUsage.CopySource : 0),
 			Name = "Borealis visibility ids",
 		} );
 		return (scratch, ids);
@@ -3581,6 +3636,8 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 			lodStore?.BeginFrame();
 			GpuDrivenFrame++;
 			loadFrame++;
+			var shown = Volatile.Read( ref idsShownFrame );
+			IdsWhole = IdsNormals || shown != 0 && GpuDrivenFrame - shown <= 2;
 
 			// Resident culls forget last frame's assignments and stale calls here too, not only when a view culls: with nothing
 			// rendering (the menu) they kept a closed game's views, and those views' visibility resources

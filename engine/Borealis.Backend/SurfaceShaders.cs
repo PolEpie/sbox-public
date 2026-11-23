@@ -1058,6 +1058,9 @@ internal sealed class SurfaceProgram : IDisposable
 		// Only a pixel stage reads the features
 		if ( !pass.Pixel.IsValid ) specialized = null;
 		normals &= color != Format.Unknown && !ids;
+
+		// An ids pipeline is keyed by the ids target's format it draws into (BackendDevice.IdsFormat)
+		if ( ids && !BackendDevice.IsIdsFormat( color ) ) color = device.IdsFormat;
 		if ( tools != ToolsPass.None && color != Format.Unknown && !ids ) return ToolsPipeline( pass, layout, color, depth, samples, vertexConstants, constantsKey, state, opaqueFade, depthEqual, normals, tools );
 		var key = (pass, layout, color, depth, samples, constantsKey, ids, opaqueFade, state, depthEqual, specialized?.Key ?? 0, normals);
 
@@ -1344,7 +1347,7 @@ internal sealed class SurfaceProgram : IDisposable
 			// Alpha-tested passes write today's alpha-to-coverage alpha (S_ALPHA_TEST), with multisampling only, as the
 			// .shaders' AlphaToCoverageEnable render state does; so does a fading object's (D_OPAQUE_FADE), unless it blends
 			AlphaToCoverage = samples > 1 && !state.DrawsTranslucent && (opaqueFade || pass.Pass.Name.Contains( "AlphaTest", StringComparison.Ordinal )),
-			ColorFormats = ids ? [Format.R8Unorm, device.IdsFormat] : depthOnly ? [] : [color],
+			ColorFormats = ids ? [Format.R8Unorm, BackendDevice.IsIdsFormat( color ) ? color : device.IdsFormat] : depthOnly ? [] : [color],
 			DepthFormat = depth,
 			Samples = samples,
 			Name = $"{Compiled.Name} {pass.Pass.Name}",
