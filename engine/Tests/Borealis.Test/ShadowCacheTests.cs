@@ -1,4 +1,4 @@
-using Borealis;
+﻿using Borealis;
 using Borealis.Features;
 using Borealis.Gpu;
 using BorealisTests.Headless;
@@ -128,6 +128,120 @@ public class ShadowCacheTests
 		later.Prepare( world, view );
 		Assert.AreEqual( 0, later.ShadowMaps.Passes.Length, "submitted, it's reused" );
 	} );
+
+	/// <summary>
+	/// A custom object that renders a child view of its world the first time it draws in the opaque layer, after the frame's
+	/// shadow layers, as water renders its refraction from the translucent one.
+	/// </summary>
+	sealed class ChildViewCustom : CustomObject
+	{
+		public RenderSystem Child;
+		public RenderView View;
+		public ViewTarget Target;
+		public int Rendered;
+
+		public ChildViewCustom( Vector3 position )
+		{
+			LocalBounds = UnitBox;
+			Transform = new Transform( position );
+			IsOpaque = true;
+			CastShadows = false;
+		}
+
+		internal override void Render( GpuContext context, ViewPass view, MeshLayer layer )
+		{
+			if ( Rendered > 0 || layer is not OpaqueLayer ) return;
+			Rendered++;
+			Child.Render( World, View, Target );
+		}
+	}
+
+	/// <summary>
+	/// A child view rendered from the middle of its parent's recording (water's refraction) has the parent's frame submitted
+	/// through its shadow layers first, so it uses the maps the parent drew this frame rather than drawing them again.
+	/// A reflection doesn't: it keeps to its own.
+	/// </summary>
+	[TestMethod]
+	public void ChildViewUsesTheMapsItsParentDrew() => WithoutUpdates( () =>
+	{
+		foreach ( var reflection in new[] { false, true } )
+		{
+			Borealis.Shadows.ShadowMapper.ResetCache();
+			var world = new RenderWorld();
+			world.Lighting.SunColor = Color.Black;
+			for ( int i = 0; i < 200; i++ )
+				world.Add( new MeshObject( TestMesh( false ), new Transform( new Vector3( 300 + i % 20, i / 20 - 5, -20 ) ) ) );
+			world.Add( new LightObject( LightObject.LightKind.Point, new Transform( new Vector3( 300, 0, 0 ) ) ) { Radius = 50 } );
+
+			using var target = ViewTarget.Create( new Vector2Int( 320, 240 ) );
+			using var childTarget = ViewTarget.Create( new Vector2Int( 160, 120 ) );
+			using var parent = new RenderSystem { ParallelRecording = true };
+			using var child = new RenderSystem { ParallelRecording = true };
+			var childView = LookingDownX();
+			childView.Reflection = reflection;
+			childView.ReflectionShadows = reflection;
+			var custom = new ChildViewCustom( new Vector3( 280, 0, 0 ) ) { Child = child, View = childView, Target = childTarget };
+			world.Add( custom );
+
+			RenderHost.Current.NextFrame();
+			parent.Render( world, LookingDownX(), target );
+
+			Assert.AreEqual( 1, custom.Rendered, "the child rendered from the parent's recording" );
+			Assert.AreEqual( 6, parent.ShadowMaps.Passes.Length, "the parent draws the point light's map" );
+			if ( reflection ) Assert.AreEqual( 6, child.ShadowMaps.Passes.Length, "a reflection draws it again" );
+			else Assert.AreEqual( 0, child.ShadowMaps.Passes.Length, "the child uses the parent's" );
+		}
+	} );
+
+	/// <summary>
+	/// A planar refraction rendered from the middle of its parent's recording takes the sun cascades its parent drew, though it
+	/// leaves out a tag (the water surface) the parent draws and is smaller; a plain child view leaving the tag out draws its own.
+	/// </summary>
+	[TestMethod]
+	public void RefractionUsesItsParentsCascades()
+	{
+		foreach ( var refraction in new[] { true, false } )
+		{
+			Borealis.Shadows.ShadowMapper.ResetCache();
+			var world = new RenderWorld();
+			for ( int i = 0; i < 200; i++ )
+				world.Add( new MeshObject( TestMesh( false ), new Transform( new Vector3( 300 + i % 20, i / 20 - 5, -20 ) ) ) );
+
+			using var target = ViewTarget.Create( new Vector2Int( 320, 240 ) );
+			using var childTarget = ViewTarget.Create( new Vector2Int( 160, 120 ) );
+			using var parent = new RenderSystem { ParallelRecording = true };
+			using var child = new RenderSystem { ParallelRecording = true };
+
+			var childView = LookingDownX();
+			childView.Viewport = new Rect( 0, 0, 500, 500 );
+			childView.ExcludeTags = [new StringToken( "water-surface" ).Value];
+			if ( refraction )
+			{
+				var plane = new Plane( new Vector3( 0, 0, -10 ), Vector3.Down );
+				var projection = Matrix.CreateProjection( childView.ZNear, childView.ZFar, childView.FieldOfView, 1 );
+				childView.Projection = Matrix.CreateObliqueProjection( new Transform( childView.Position, childView.Rotation ), plane, projection );
+				childView.ClipPlane = plane;
+			}
+
+			var custom = new ChildViewCustom( new Vector3( 280, 0, 0 ) ) { Child = child, View = childView, Target = childTarget };
+			world.Add( custom );
+
+			RenderHost.Current.NextFrame();
+			parent.Render( world, LookingDownX(), target );
+
+			Assert.AreEqual( 1, custom.Rendered );
+			Assert.IsTrue( parent.ShadowMaps.Directional.CascadeCount > 0, "the parent draws cascades" );
+			if ( refraction )
+			{
+				Assert.AreEqual( 0, child.ShadowMaps.Passes.Length, "the refraction draws none" );
+				Assert.AreEqual( parent.ShadowMaps.Directional.CascadeCount, child.ShadowMaps.Directional.CascadeCount, "it takes the parent's" );
+			}
+			else
+			{
+				Assert.IsTrue( child.ShadowMaps.Passes.Length > 0, "a view leaving out what the parent drew draws its own" );
+			}
+		}
+	}
 
 	/// <summary>
 	/// A light's radius, cone and kind make its projection, so changing one draws its shadow again at once, as moving it does,

@@ -415,12 +415,15 @@ internal sealed partial class MapWorld
 			var normal = rotation.Up;
 			var height = Vector3.Dot( view.Position - origin, normal );
 			capture.Projection = null;
+			capture.ClipPlane = null;
 			if ( MathF.Abs( height ) > MathF.Max( 0.5f, rise ) + view.ZNear * 2 )
 			{
 				if ( height < 0 ) normal = -normal;
 				var eye = new Transform( view.Position, view.Rotation );
 				var projection = Matrix.CreateProjection( view.ZNear, view.ZFar, view.FieldOfView, size.x / (float)size.y );
-				capture.Projection = Matrix.CreateObliqueProjection( eye, new Plane( origin + normal * (rise + 0.125f), -normal ), projection );
+				var clip = new Plane( origin + normal * (rise + 0.125f), -normal );
+				capture.Projection = Matrix.CreateObliqueProjection( eye, clip, projection );
+				capture.ClipPlane = clip;
 			}
 
 			system.ParallelRecording = main.ParallelRecording;

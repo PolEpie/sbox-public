@@ -1,4 +1,4 @@
-namespace Borealis.Shadows;
+﻿namespace Borealis.Shadows;
 
 /// <summary>
 /// The kind of light a shadow is for - the values of native's <c>LightType_t</c>.
@@ -117,6 +117,13 @@ internal struct ShadowViewInfo
 	/// The view's tags, which shadow views filter casters by, as native's inherit their parent view's. Null for none.
 	/// </summary>
 	public uint[] RenderTags, ExcludeTags;
+
+	/// <summary>
+	/// A planar refraction's view (<see cref="RenderView.ClipPlane"/>): it takes the cascades another view drew this frame
+	/// whatever tags it leaves out and with fewer sub-worlds (the debug ones), as native's views do; what it leaves out is the
+	/// surface it looks through.
+	/// </summary>
+	public bool SharesCascades;
 
 	/// <summary>
 	/// The sub-worlds the view draws (<see cref="RenderView.SubWorlds"/>), whose casters its shadow views draw too.
