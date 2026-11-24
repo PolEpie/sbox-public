@@ -1348,7 +1348,7 @@ internal sealed class SurfaceProgram : IDisposable
 			DepthTest = depth != Format.Unknown,
 			DepthWrite = depth != Format.Unknown,
 			DepthCompare = CompareFunction.GreaterEqual,
-			Blend = ids ? [BlendState.Opaque, BlendState.Opaque] : [BlendState.Opaque],
+			Blend = ids ? [BackendDevice.IdsScratchBlend, BlendState.Opaque] : [BlendState.Opaque],
 
 			// Alpha-tested passes write today's alpha-to-coverage alpha (S_ALPHA_TEST), with multisampling only, as the
 			// .shaders' AlphaToCoverageEnable render state does; so does a fading object's (D_OPAQUE_FADE), unless it blends

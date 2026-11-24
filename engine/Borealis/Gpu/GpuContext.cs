@@ -569,6 +569,16 @@ internal abstract class GpuContext : IDisposable
 	/// <summary>Draw a material over the bound target's viewport, with its own parameters and a shader mode.</summary>
 	public abstract void DrawFullscreen( GpuMaterial material, ShaderParameters parameters, StringToken shaderMode );
 
+	/// <summary>
+	/// <see cref="DrawFullscreen"/>, saying whether it drew: false where it couldn't this time (its pipeline is still being
+	/// made, and its draws skipped), for a caller with another way to the same result.
+	/// </summary>
+	public virtual bool DrawFullscreenNow( GpuMaterial material, ShaderParameters parameters, StringToken shaderMode )
+	{
+		DrawFullscreen( material, parameters, shaderMode );
+		return true;
+	}
+
 	/// <summary>Order accesses to a texture, leaving it in <paramref name="layout"/>.</summary>
 	public abstract void TextureBarrier( GpuTexture texture, GpuStage srcStage, GpuAccess srcAccess, GpuStage dstStage, GpuAccess dstAccess, TextureLayout layout );
 

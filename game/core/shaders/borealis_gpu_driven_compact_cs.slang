@@ -92,6 +92,12 @@ uint TakeSlot( uint nRun )
 	return g_Frame.Load( g_nCullRuns + nRun * MultiDraw_Size + MultiDraw_FirstSlot ) + nIndex;
 }
 
+// Triangles a lane takes at once in each scan
+static const uint Batch = 8;
+
+// Threads a listed fragment gets: most fragments are a few hundred triangles
+static const uint GroupSize = 1024;
+
 groupshared uint gs_Owned;
 groupshared uint gs_Start;
 groupshared uint gs_Cursor;
@@ -114,7 +120,7 @@ uint TriangleIndex( ByteAddressBuffer page, uint nFirst, bool b32, bool bPrepass
 
 // A listed fragment: transform, draw record, its vertices' first bit (with the base vertex), its multi-draw and its
 // bucket's compacted multi-draw. A triangle owns a sample when its first vertex's bit is set (what the ids name).
-[numthreads( 256, 1, 1 )]
+[numthreads( GroupSize, 1, 1 )]
 [shader( "compute" )] void MainCs( uint3 vGroupId : SV_GroupID, uint nThread : SV_GroupIndex )
 {
 	uint nEntry = g_nCullListed + ListedArguments_Size + vGroupId.x * ListedFragment_Size;
@@ -169,19 +175,19 @@ uint TriangleIndex( ByteAddressBuffer page, uint nFirst, bool b32, bool bPrepass
 		}
 	}
 
-	// Four triangles a lane at a time, their index loads and then their mask loads issued together: the count waits on
-	// memory, not arithmetic
+	// Eight triangles a lane at a time, their index loads and then their mask loads issued together: the count waits on
+	// memory, not arithmetic, and a large fragment's one group would otherwise wait on its loads one batch after another
 	uint nMine = 0;
-	for ( uint t0 = nThread; t0 < nScan; t0 += 1024 )
+	for ( uint t0 = nThread; t0 < nScan; t0 += GroupSize * Batch )
 	{
-		uint4 vT = t0 + uint4( 0, 256, 512, 768 );
-		uint4 vIn = uint4( vT < nScan );
-		vT = min( vT, nScan - 1 );
-		uint4 vBit = nVertexBase + uint4( TriangleIndex( page, nFirst, b32, bPrepass, vT.x, 0, nListed ), TriangleIndex( page, nFirst, b32, bPrepass, vT.y, 0, nListed ),
-			TriangleIndex( page, nFirst, b32, bPrepass, vT.z, 0, nListed ), TriangleIndex( page, nFirst, b32, bPrepass, vT.w, 0, nListed ) );
-		uint4 vWords = uint4( g_Mask.Load( ( vBit.x >> 5 ) * 4 ), g_Mask.Load( ( vBit.y >> 5 ) * 4 ), g_Mask.Load( ( vBit.z >> 5 ) * 4 ), g_Mask.Load( ( vBit.w >> 5 ) * 4 ) );
-		uint4 vOwned = ( ( vWords >> ( vBit & 31 ) ) & 1 ) * vIn;
-		nMine += vOwned.x + vOwned.y + vOwned.z + vOwned.w;
+		uint vBit[Batch];
+		[unroll] for ( uint k = 0; k < Batch; k++ )
+			vBit[k] = nVertexBase + TriangleIndex( page, nFirst, b32, bPrepass, min( t0 + GroupSize * k, nScan - 1 ), 0, nListed );
+		uint vWord[Batch];
+		[unroll] for ( uint k = 0; k < Batch; k++ )
+			vWord[k] = g_Mask.Load( ( vBit[k] >> 5 ) * 4 );
+		[unroll] for ( uint k = 0; k < Batch; k++ )
+			nMine += t0 + GroupSize * k < nScan ? ( vWord[k] >> ( vBit[k] & 31 ) ) & 1 : 0;
 	}
 
 	nMine = WaveActiveSum( nMine );
@@ -222,20 +228,37 @@ uint TriangleIndex( ByteAddressBuffer page, uint nFirst, bool b32, bool bPrepass
 	if ( nStart == None )
 		return;
 
-	// Each owned triangle takes the next three indices (order within the fragment doesn't matter)
-	for ( uint t = nThread; t < nScan; t += 256 )
+	// Each owned triangle takes the next three indices (order within the fragment doesn't matter): eight a lane at a time,
+	// loads issued together as in the count, each wave taking its owned triangles' room with one atomic
+	for ( uint t0 = nThread; t0 < nScan; t0 += GroupSize * Batch )
 	{
-		uint i0 = TriangleIndex( page, nFirst, b32, bPrepass, t, 0, nListed );
-		uint nBit = nVertexBase + i0;
-		if ( ( ( g_Mask.Load( ( nBit >> 5 ) * 4 ) >> ( nBit & 31 ) ) & 1 ) == 0 )
-			continue;
+		uint vFirst[Batch];
+		[unroll] for ( uint k = 0; k < Batch; k++ )
+			vFirst[k] = TriangleIndex( page, nFirst, b32, bPrepass, min( t0 + GroupSize * k, nScan - 1 ), 0, nListed );
+		uint vWord[Batch];
+		[unroll] for ( uint k = 0; k < Batch; k++ )
+			vWord[k] = g_Mask.Load( ( ( nVertexBase + vFirst[k] ) >> 5 ) * 4 );
 
-		uint nAt;
-		InterlockedAdd( gs_Cursor, 3, nAt );
-		nAt += nStart;
-		g_Compacted.Store( ( nAt + 0 ) * 4, i0 );
-		g_Compacted.Store( ( nAt + 1 ) * 4, TriangleIndex( page, nFirst, b32, bPrepass, t, 1, nListed ) );
-		g_Compacted.Store( ( nAt + 2 ) * 4, TriangleIndex( page, nFirst, b32, bPrepass, t, 2, nListed ) );
+		[unroll] for ( uint k = 0; k < Batch; k++ )
+		{
+			uint t = t0 + GroupSize * k;
+			bool bOwned = t < nScan && ( ( vWord[k] >> ( ( nVertexBase + vFirst[k] ) & 31 ) ) & 1 ) != 0;
+			uint nWave = WaveActiveCountBits( bOwned );
+			if ( nWave == 0 )
+				continue;
+
+			uint nBase = 0;
+			if ( WaveIsFirstLane() )
+				InterlockedAdd( gs_Cursor, nWave * 3, nBase );
+			nBase = WaveReadLaneFirst( nBase );
+			if ( !bOwned )
+				continue;
+
+			uint nAt = nStart + nBase + WavePrefixCountBits( bOwned ) * 3;
+			g_Compacted.Store( ( nAt + 0 ) * 4, vFirst[k] );
+			g_Compacted.Store( ( nAt + 1 ) * 4, TriangleIndex( page, nFirst, b32, bPrepass, t, 1, nListed ) );
+			g_Compacted.Store( ( nAt + 2 ) * 4, TriangleIndex( page, nFirst, b32, bPrepass, t, 2, nListed ) );
+		}
 	}
 }
 
