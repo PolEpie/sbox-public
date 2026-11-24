@@ -148,6 +148,9 @@ internal sealed class ShadowSystem : IShadowRenderer, IDisposable
 	{
 		mapper.Abandon();
 
+		// Nor were the cache's tiles made
+		cacheTilesOf = null;
+
 		// Nor did its cascade views or tiles
 		Array.Clear( cascadeContents );
 	}
@@ -572,6 +575,7 @@ internal sealed class ShadowSystem : IShadowRenderer, IDisposable
 		}
 
 		MarkCascades();
+		PlanCacheTiles();
 
 		var attributes = context.Attributes;
 		attributes.Set( ProjectedShadowsName, projectedRing.Upload( context, mapper.ProjectedShadowData ) );
@@ -858,8 +862,10 @@ internal sealed class ShadowSystem : IShadowRenderer, IDisposable
 		if ( clear && cached is not null && pass.TargetSlice == 0 )
 		{
 			var scope = context.BeginGpuScope( "Shadow cache copy" );
-			var drawn = !cached.IsCube && cached.Texture.Width == pass.Target.Width && cached.Texture.Height == pass.Target.Height
-				&& DrawCache( context, cached.Texture, pass.Target, pass.CacheOffset );
+			var whole = !cached.IsCube && cached.Texture.Width == pass.Target.Width && cached.Texture.Height == pass.Target.Height;
+			var tiles = whole && cacheTiles is not null && cacheTilesOf == cached ? cacheTiles : null;
+			if ( tiles is not null && buildCacheTiles ) BuildCacheTiles( context, cached.Texture, tiles );
+			var drawn = whole && DrawCache( context, cached.Texture, pass.Target, pass.CacheOffset, tiles );
 			if ( !drawn && pass.CacheOffset == default ) context.CopyTexture( cached.Texture, pass.Target, cached.IsCube ? 6 : 1 );
 			else if ( !drawn ) CopyWrapped( context, cached.Texture, pass.Target, pass.CacheOffset );
 			context.EndGpuScope( scope );
@@ -913,6 +919,73 @@ internal sealed class ShadowSystem : IShadowRenderer, IDisposable
 
 	static readonly StringToken CacheDepthName = new( "ShadowCacheDepth" );
 	static readonly StringToken CacheWrapName = new( "ShadowCacheWrap" );
+	static readonly StringToken CacheTilesName = new( "ShadowCacheTiles" );
+	static readonly StringToken CacheSparseName = new( "ShadowCacheSparse" );
+
+	/// <summary>
+	/// The far cascade's cache is copied into its cascade only where it holds a caster (<see cref="DrawCache"/>): the map is
+	/// cleared, and each 32x32 tile of the cache whose depth is all clear, which <see cref="cacheTiles"/> says, is left so.
+	/// Off: every texel is copied.
+	/// </summary>
+	internal static bool SparseCacheCopy { get; set; } = true;
+
+	// Each 32x32 tile of the far cascade's cache: its min and max depth, made again when the cache is drawn
+	GpuTexture cacheTiles;
+	ShadowMap cacheTilesOf;
+	ulong cacheTilesVersion;
+	bool buildCacheTiles;
+
+	/// <summary>
+	/// Whether this frame's far cascade copies its cache sparsely, and whether the cache's tiles are made again first: when it's
+	/// a different cache or drawn since (its version moved on). After <see cref="KeepUnchangedCascades"/> has moved versions on.
+	/// </summary>
+	void PlanCacheTiles()
+	{
+		buildCacheTiles = false;
+		ShadowMap cache = null;
+		foreach ( var pass in Drawn )
+		{
+			if ( pass.CachedStatic is { } c && c == mapper.FarCacheMap ) cache = c;
+		}
+
+		if ( !SparseCacheCopy || cache is null )
+		{
+			cacheTilesOf = null;
+			return;
+		}
+
+		var side = Math.Max( cache.Resolution / TileTexels, 1 );
+		if ( cacheTiles is null || cacheTiles.Width != side )
+		{
+			cacheTiles?.Dispose();
+			cacheTiles = RenderHost.Current.Device.CreateTexture( TextureDesc.Target( side, side, TextureFormat.RG3232F ) with { Storage = true }, "Borealis far cascade cache tiles" );
+			cacheTilesOf = null;
+		}
+
+		if ( cacheTilesOf == cache && cacheTilesVersion == cache.Version ) return;
+		cacheTilesOf = cache;
+		cacheTilesVersion = cache.Version;
+		buildCacheTiles = true;
+		WarmUp();
+	}
+
+	/// <summary>
+	/// The min and max depth of each 32x32 tile of the cache, as the cascades' raw tiles are made (<see cref="BuildTiles"/>).
+	/// </summary>
+	internal static void BuildCacheTiles( GpuContext context, GpuTexture cache, GpuTexture tiles )
+	{
+		context.Invalidate();
+		context.TextureBarrier( cache, GpuStage.LateFragmentTests, GpuAccess.DepthStencilAttachmentWrite, GpuStage.ComputeShader | GpuStage.FragmentShader, GpuAccess.ShaderRead, TextureLayout.ShaderRead );
+		context.TextureBarrier( tiles, GpuStage.FragmentShader, GpuAccess.ShaderRead, GpuStage.ComputeShader, GpuAccess.ShaderWrite, TextureLayout.General );
+		var parameters = ParameterPool.Get();
+		parameters.Set( ShadowTilesOutName, tiles );
+		parameters.SetCombo( WidenCombo, false );
+		parameters.Set( ShadowTileDepthName, cache );
+		parameters.Set( ShadowTilesName, new Vector4( 0, tiles.Width, 0, 0 ) );
+		context.Dispatch( TilesCompute, parameters, tiles.Width * 8, tiles.Height * 8, 1 );
+		ParameterPool.Return( parameters );
+		context.TextureBarrier( tiles, GpuStage.ComputeShader, GpuAccess.ShaderWrite, GpuStage.FragmentShader, GpuAccess.ShaderRead, TextureLayout.ShaderRead );
+	}
 	static readonly StringToken DefaultMode = new( "Default" );
 
 	/// <summary>
@@ -920,7 +993,7 @@ internal sealed class ShadowSystem : IShadowRenderer, IDisposable
 	/// does: a full-screen draw that writes every texel's depth as the cache holds it, so the map stays a depth target.
 	/// False when it couldn't draw yet (its pipeline is still being made): the caller copies instead.
 	/// </summary>
-	internal static bool DrawCache( GpuContext context, GpuTexture source, GpuTexture destination, Vector2Int offset )
+	internal static bool DrawCache( GpuContext context, GpuTexture source, GpuTexture destination, Vector2Int offset, GpuTexture tiles = null )
 	{
 		int w = source.Width, h = source.Height;
 		int ox = ((offset.x % w) + w) % w, oy = ((offset.y % h) + h) % h;
@@ -937,10 +1010,29 @@ internal sealed class ShadowSystem : IShadowRenderer, IDisposable
 			Samples = 1,
 		} );
 
+		// With the cache's tiles: the map cleared, and only the tiles that hold a caster written
+		if ( tiles is not null ) context.Clear( Color.Black, clearColor: false );
+
 		var parameters = ParameterPool.Get();
 		parameters.Set( CacheDepthName, source );
 		parameters.Set( CacheWrapName, new Vector4( ox, oy, w, h ) );
-		var drew = context.DrawFullscreenNow( CacheCopy, parameters, DefaultMode );
+		if ( tiles is not null ) parameters.Set( CacheTilesName, tiles );
+
+		// A quad a tile, those without a caster collapsed, where the wrap is a whole number of tiles; else every texel drawn,
+		// those of tiles without a caster discarded
+		var drew = false;
+		if ( tiles is not null && ox % TileTexels == 0 && oy % TileTexels == 0 && w % TileTexels == 0 && h % TileTexels == 0 )
+		{
+			parameters.Set( CacheSparseName, 2.0f );
+			drew = context.DrawFullscreenInstances( CacheCopy, parameters, DefaultMode, (w / TileTexels) * (h / TileTexels) );
+		}
+
+		if ( !drew )
+		{
+			parameters.Set( CacheSparseName, tiles is not null ? 1.0f : 0.0f );
+			drew = context.DrawFullscreenNow( CacheCopy, parameters, DefaultMode );
+		}
+
 		ParameterPool.Return( parameters );
 		return drew;
 	}
@@ -965,6 +1057,9 @@ internal sealed class ShadowSystem : IShadowRenderer, IDisposable
 		tilesRaw?.Dispose();
 		tiles?.Dispose();
 		tilesRaw = tiles = null;
+		cacheTiles?.Dispose();
+		cacheTiles = null;
+		cacheTilesOf = null;
 		projectedRing.Dispose();
 		cubeRing.Dispose();
 

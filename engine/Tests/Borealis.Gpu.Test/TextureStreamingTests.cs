@@ -343,6 +343,32 @@ public class TextureStreamingTests : GpuTest
 		Device.WaitIdle();
 	}
 
+	/// <summary>
+	/// A disposed streamed texture is forgotten at the next frame's start, and frames with nothing of the device's disposed
+	/// don't walk the streamed textures looking for disposed ones.
+	/// </summary>
+	[TestMethod]
+	public void DisposedTexturesAreForgottenWithoutLookingEveryFrame()
+	{
+		var paths = StreamingTextures( 2 );
+		using var backend = new BackendDevice( Device ) { StreamTextures = true };
+		var kept = (BackendTexture)backend.MaterialTextureFile( paths[0] );
+		var gone = (BackendTexture)backend.MaterialTextureFile( paths[1] );
+		backend.BeginFrame();
+		Assert.AreEqual( 2, backend.Streamer.Count );
+
+		var scans = backend.Streamer.ForgetScans;
+		for ( int frame = 0; frame < 10; frame++ ) backend.BeginFrame();
+		Assert.AreEqual( scans, backend.Streamer.ForgetScans, "looked for disposed textures with none disposed" );
+
+		gone.Dispose();
+		backend.BeginFrame();
+		Assert.AreEqual( 1, backend.Streamer.Count );
+		Assert.AreEqual( scans + 1, backend.Streamer.ForgetScans );
+		Assert.IsTrue( kept.IsValid );
+		Device.WaitIdle();
+	}
+
 	/// <summary>A draw asking for a size wants the coarsest mip at least that large, and its tail for nothing.</summary>
 	[TestMethod]
 	public void AskedSizeWantsTheCoarsestMipThatCoversIt()

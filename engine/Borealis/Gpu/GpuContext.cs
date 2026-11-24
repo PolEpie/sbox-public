@@ -585,6 +585,12 @@ internal abstract class GpuContext : IDisposable
 		return true;
 	}
 
+	/// <summary>
+	/// <see cref="DrawFullscreenNow"/> drawn <paramref name="instances"/> times, the vertex shader telling them apart by
+	/// <c>SV_InstanceID</c> (and placing each where it wants). False where it couldn't draw, or can't draw instances at all.
+	/// </summary>
+	internal virtual bool DrawFullscreenInstances( GpuMaterial material, ShaderParameters parameters, StringToken shaderMode, int instances ) => false;
+
 	/// <summary>Order accesses to a texture, leaving it in <paramref name="layout"/>.</summary>
 	public abstract void TextureBarrier( GpuTexture texture, GpuStage srcStage, GpuAccess srcAccess, GpuStage dstStage, GpuAccess dstAccess, TextureLayout layout );
 
