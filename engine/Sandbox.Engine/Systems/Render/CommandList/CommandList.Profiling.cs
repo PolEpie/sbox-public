@@ -39,11 +39,13 @@ public sealed unsafe partial class CommandList
 	}
 
 	/// <summary>
-	/// A scope open during this execution: the Borealis.Gpu list a debug label was begun on, for graphics debuggers.
+	/// A scope open during this execution: the Borealis.Gpu list a debug label was begun on, for graphics debuggers, and its
+	/// GPU timer scope while GPU passes are shown (-1 when there's none).
 	/// </summary>
 	internal struct OpenScope
 	{
 		public Borealis.Gpu.CommandList Label;
+		public int Timer;
 	}
 
 	/// <summary>
@@ -52,10 +54,13 @@ public sealed unsafe partial class CommandList
 	internal static OpenScope OpenScopeFor( ProfilingSampler sampler )
 	{
 		// On Borealis.Gpu a debug label around the scope (its passes are timed by Borealis's own pass timer)
-		if ( Graphics.Backend is BorealisGpuRenderBackend { Context.List: { } list } )
+		if ( Graphics.Backend is BorealisGpuRenderBackend { Context.List: { } list } backend )
 		{
 			list.BeginLabel( sampler.Name );
-			return new OpenScope { Label = list };
+
+			// Timed as a scope of its own while something shows GPU passes, so effects inside the engine's blocks have rows
+			var timer = Diagnostics.GpuProfilerStats.Enabled ? backend.ScopeTimer : null;
+			return new OpenScope { Label = list, Timer = timer?.Begin( list, sampler.Name, Borealis.Backend.PassTimer.ScopeKind.Own, count: false ) ?? -1 };
 		}
 
 		return default;
@@ -79,7 +84,11 @@ public sealed unsafe partial class CommandList
 	static void CloseScope( OpenScope open )
 	{
 		// Ended on the list it began on, while that's still the one recording (a block that ended took its labels with it)
-		if ( open.Label is not null && Graphics.Backend is BorealisGpuRenderBackend { Context.List: { } list } && list == open.Label ) list.EndLabel();
+		if ( open.Label is not null && Graphics.Backend is BorealisGpuRenderBackend { Context.List: { } list } backend && list == open.Label )
+		{
+			if ( open.Timer >= 0 ) backend.ScopeTimer?.End( list, open.Timer );
+			list.EndLabel();
+		}
 	}
 
 	/// <summary>
