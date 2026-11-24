@@ -250,7 +250,7 @@ public sealed unsafe partial class Device
 			try
 			{
 				memory = Allocator.Allocate( requirements, info.Memory, image: false, content: info.Content );
-				Vk.vkBindBufferMemory( Vk.Device, buffer, memory.Memory, memory.Offset ).Check( "vkBindBufferMemory" );
+				using ( BindingMemory( VkObjectType.Buffer, info.Name, memory ) ) Vk.vkBindBufferMemory( Vk.Device, buffer, memory.Memory, memory.Offset ).Check( "vkBindBufferMemory" );
 			}
 			catch
 			{
@@ -349,7 +349,7 @@ public sealed unsafe partial class Device
 			{
 				var target = (desc.Usage & (TextureUsage.ColorTarget | TextureUsage.DepthTarget | TextureUsage.Storage)) != 0;
 				memory = Allocator.Allocate( requirements, MemoryLocation.Device, image: true, target, desc.Content );
-				Vk.vkBindImageMemory( Vk.Device, image, memory.Memory, memory.Offset ).Check( "vkBindImageMemory" );
+				using ( BindingMemory( VkObjectType.Image, desc.Name, memory ) ) Vk.vkBindImageMemory( Vk.Device, image, memory.Memory, memory.Offset ).Check( "vkBindImageMemory" );
 			}
 			catch
 			{
@@ -1237,7 +1237,7 @@ public sealed unsafe partial class Device
 		{
 			if ( record.BindlessSlot > 0 ) Bindless.RemoveBuffer( record.BindlessSlot - 1 );
 			Vk.vkDestroyBuffer( Vk.Device, record.Buffer, null );
-			Allocator.Free( record.Memory );
+			FreeMemory( record.Memory );
 		} );
 	}
 
@@ -1269,7 +1269,7 @@ public sealed unsafe partial class Device
 		if ( record.View != 0 ) Vk.vkDestroyImageView( Vk.Device, record.View, null );
 		if ( record.StorageView != 0 ) Vk.vkDestroyImageView( Vk.Device, record.StorageView, null );
 		Vk.vkDestroyImage( Vk.Device, record.Image, null );
-		Allocator.Free( record.Memory );
+		FreeMemory( record.Memory );
 	}
 
 	/// <summary>Destroy a view once the GPU is done with it.</summary>
@@ -1394,7 +1394,7 @@ public sealed unsafe partial class Device
 		foreach ( var record in Buffers.All() )
 		{
 			Vk.vkDestroyBuffer( Vk.Device, record.Buffer, null );
-			Allocator.Free( record.Memory );
+			FreeMemory( record.Memory );
 		}
 	}
 

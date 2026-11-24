@@ -997,6 +997,10 @@ public sealed unsafe partial class Device
 			var address = addresses[i];
 			var kind = address.addressType >= 0 && address.addressType < kinds.Length ? kinds[address.addressType] : address.addressType.ToString();
 			text.Append( $"\n  fault address {kind} 0x{address.reportedAddress:X} (precision 0x{address.addressPrecision:X})" );
+
+			// The address is anywhere in its precision's power-of-two block
+			var precision = Math.Max( address.addressPrecision, 1UL );
+			text.Append( $": {DescribeAddress( address.reportedAddress & ~(precision - 1), precision )}" );
 		}
 
 		for ( int i = 0; i < counts.vendorInfoCount; i++ )

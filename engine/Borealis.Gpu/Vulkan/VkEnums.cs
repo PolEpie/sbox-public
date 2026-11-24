@@ -114,6 +114,8 @@ internal enum VkStructureType
 	PhysicalDeviceFaultFeaturesExt = 1000341000,
 	DeviceFaultCountsExt = 1000341001,
 	DeviceFaultInfoExt = 1000341002,
+	PhysicalDeviceAddressBindingReportFeaturesExt = 1000354000,
+	DeviceAddressBindingCallbackDataExt = 1000354001,
 	MutableDescriptorTypeCreateInfoExt = 1000351002,
 	PhysicalDevicePresentModeFifoLatestReadyFeaturesExt = 1000361000,
 	LayerSettingsCreateInfoExt = 1000496000,
@@ -414,6 +416,7 @@ internal static class Vk
 	public const uint MessageGeneral = 0x1;
 	public const uint MessageValidation = 0x2;
 	public const uint MessagePerformance = 0x4;
+	public const uint MessageDeviceAddressBinding = 0x8;
 
 	// VkSurfaceTransformFlagBitsKHR, VkCompositeAlphaFlagBitsKHR, VkColorSpaceKHR
 	public const uint TransformIdentity = 0x1;
