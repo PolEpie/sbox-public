@@ -29,6 +29,9 @@ public sealed unsafe partial class Device
 	static readonly bool splitParts = Environment.GetEnvironmentVariable( "BOREALIS_SPLIT_PARTS" ) != "0";
 	Thread[] builders;
 	int building;
+
+	// Of those building, deferred pipelines (not parts made ahead or for one): what DeferredPipelines counts as pending
+	int buildingDeferred;
 	bool stopBuilding;
 	int deferredMade, deferredFailed;
 	long deferredTicks, deferredMaxTicks, deferredFrames;
@@ -45,7 +48,7 @@ public sealed unsafe partial class Device
 		get
 		{
 			int pending;
-			lock ( buildQueue ) pending = buildQueue.Count + building;
+			lock ( buildQueue ) pending = buildQueue.Count + buildingDeferred;
 			var made = Volatile.Read( ref deferredMade );
 			var ms = Interlocked.Read( ref deferredTicks ) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
 			return new DeferredPipelineStats( made, pending, Volatile.Read( ref deferredFailed ), made > 0 ? ms / made : 0,
@@ -494,6 +497,7 @@ public sealed unsafe partial class Device
 				}
 
 				building++;
+				if ( isJob ) buildingDeferred++;
 				if ( ahead ) buildingAhead++;
 			}
 
@@ -520,6 +524,7 @@ public sealed unsafe partial class Device
 				lock ( buildQueue )
 				{
 					building--;
+					if ( isJob ) buildingDeferred--;
 					if ( ahead ) buildingAhead--;
 					Monitor.PulseAll( buildQueue );
 				}

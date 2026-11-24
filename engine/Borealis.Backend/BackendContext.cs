@@ -1558,11 +1558,17 @@ internal sealed partial class BackendContext : GpuContext
 	/// (<see cref="BackendDevice.FullscreenQuad"/>) with <paramref name="parameters"/> over this context's, in
 	/// <paramref name="shaderMode"/> (else the material's first mode). A frame's flipped output is copied this way.
 	/// </summary>
-	public override void DrawFullscreen( GpuMaterial material, ShaderParameters parameters, StringToken shaderMode )
-	{
-		if ( recording is null || material is not BackendMaterial { Shader: { } shader } || shader.Modes.Count == 0 ) return;
+	public override void DrawFullscreen( GpuMaterial material, ShaderParameters parameters, StringToken shaderMode ) => Fullscreen( material, parameters, shaderMode );
 
-		var mode = ModeName( shader, shaderMode ) is null ? Token( shader.Modes[0].Name ) : shaderMode;
+	public override bool DrawFullscreenNow( GpuMaterial material, ShaderParameters parameters, StringToken shaderMode )
+		=> Fullscreen( material, parameters, shaderMode ) && recording is not null && !recording.List.SkippingDraws;
+
+	bool Fullscreen( GpuMaterial material, ShaderParameters parameters, StringToken shaderMode )
+	{
+		if ( recording is null || material is not BackendMaterial { Shader: { } shader } || shader.Modes.Count == 0 ) return false;
+
+		// The mode's name is looked up once per shader: the lookup walks the shader's modes, whose enumerator is an allocation
+		var mode = CachedModeName( shader, shaderMode ) is null ? Token( shader.Modes[0].Name ) : shaderMode;
 
 		// What it samples is read where it was drawn: a frame's colour, moved there first, as Source 2's blit does
 		if ( parameters is BackendParameters own )
@@ -1575,8 +1581,9 @@ internal sealed partial class BackendContext : GpuContext
 
 		var quad = device.FullscreenQuad;
 		SetObjectAttributes( parameters );
-		DrawModel( material, mode, quad, quad.DrawsForLod( 0 )[0], 0, 1 );
+		var drew = DrawModel( material, mode, quad, quad.DrawsForLod( 0 )[0], 0, 1 );
 		SetObjectAttributes( null );
+		return drew;
 	}
 
 	public override void DrawIndexedInstanced( in RenderMesh.Draw draw, int instanceCount ) { }

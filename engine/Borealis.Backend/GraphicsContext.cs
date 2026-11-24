@@ -735,6 +735,9 @@ public sealed class GraphicsContext
 
 	static readonly string[] MipNames = ["Mip0", "Mip1", "Mip2", "Mip3", "Mip4", "Mip5", "Mip6"];
 
+	// downsample_cs's D_DOWNSAMPLE_METHOD for the GGX kernel (Graphics.DownsampleMethod.GGX)
+	const int GgxMethod = 6;
+
 	/// <summary>
 	/// Fill mips 1 and down of <paramref name="texture"/> from mip 0 with <c>downsample_cs.shader</c>, one dispatch per mip,
 	/// as <c>Graphics.GenerateMipMaps</c> does for its gaussian methods (<paramref name="method"/> is
@@ -774,7 +777,9 @@ public sealed class GraphicsContext
 			attributes.Set( "MipLevel1", MipView( texture, i + 1 ) );
 			attributes.Set( "TextureSize", width, height );
 			attributes.Set( "InvTextureSize", 1f / width, 1f / height );
-			if ( !drawer.Dispatch( List, downsample, attributes, width, height, 1 ) ) throw new InvalidOperationException( $"{downsample.Name} didn't dispatch" );
+			// GGX's 8x8 groups each write a 16x16 tile, so a thread stands for 2x2 texels of the mip
+			int threadsX = method == GgxMethod ? (width + 1) / 2 : width, threadsY = method == GgxMethod ? (height + 1) / 2 : height;
+			if ( !drawer.Dispatch( List, downsample, attributes, threadsX, threadsY, 1 ) ) throw new InvalidOperationException( $"{downsample.Name} didn't dispatch" );
 
 			// Put mip i back in General so the whole texture is in one layout again
 			List.Barrier( new TextureBarrier

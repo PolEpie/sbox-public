@@ -83,6 +83,9 @@ public class TextureStreamingTests : GpuTest
 		var content = ContentFiles.FindGame();
 		var paths = StreamingTextures( 4 );
 
+		// From an empty pool: one that earlier work (other tests' streaming) left full gives this test's sizes up to make room
+		ContentBuffers.Clear();
+
 		// Once each first: the pool fills and the decoder's tables are made
 		foreach ( var path in paths ) TextureStreamer.ReadMips( content, path, 0 ).Release();
 
