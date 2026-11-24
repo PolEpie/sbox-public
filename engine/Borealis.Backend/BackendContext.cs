@@ -192,6 +192,7 @@ internal sealed partial class BackendContext : GpuContext
 		}
 
 		wait = signal = default;
+		drawScopes = -1;
 		boundValid = false;
 		bound = default;
 		clearColor = clearDepth = false;
@@ -983,6 +984,7 @@ internal sealed partial class BackendContext : GpuContext
 		if ( count ) CloseScope();
 		var timed = timer.Begin( List, name, PassTimer.ScopeKind.Pass, count );
 		if ( count && timer.Counts( timed ) ) recording.Counting = timed;
+		if ( timed >= 0 && drawScopes < 0 && BackendDevice.DrawScopesLayer is { } layer && name == layer ) drawScopes = timed;
 		return new GpuScope( timed + 2, false );
 	}
 
@@ -993,6 +995,7 @@ internal sealed partial class BackendContext : GpuContext
 		if ( scope.Marker > 1 && device.PassTimer is { } timer )
 		{
 			var timed = (int)scope.Marker - 2;
+			if ( timed == drawScopes ) drawScopes = -1;
 			if ( recording.Counting == timed )
 			{
 				CloseScope();
@@ -1457,16 +1460,26 @@ internal sealed partial class BackendContext : GpuContext
 		if ( frameBufferCopy is null || frameBufferCopied || bound.Color is null ) return;
 		frameBufferCopied = true;
 
-		// Made by an earlier part of the layer, in a list submitted before this one, which left it readable
+		// Made by an earlier part of the layer, in a list submitted before this one, which left it readable. Timed on its own,
+		// its mips (and mask) apart
+		var scope = frameBufferMadeBefore ? default : BeginGpuScope( "Frame Buffer Copy" );
 		if ( !frameBufferMadeBefore ) CopyTexture( bound.Color, frameBufferCopy, 1 );
 		var viewport = frameBufferCopyViewport;
 
 		// Its mips for blurred refraction, then readable by the draws after it: they bind only what's readable
 		if ( frameBufferCopy is BackendTexture copy )
 		{
-			if ( device.FrameBufferCopyMips && !frameBufferMadeBefore ) GenerateFrameBufferCopyMips( copy, viewport );
+			if ( device.FrameBufferCopyMips && !frameBufferMadeBefore )
+			{
+				var mips = BeginGpuScope( "Frame Buffer Copy Mips" );
+				GenerateFrameBufferCopyMips( copy, viewport );
+				EndGpuScope( mips );
+			}
+
 			Transition( copy, ImageLayout.ShaderRead );
 		}
+
+		EndGpuScope( scope );
 
 		attributes.Set( FrameBufferCopyTexture, frameBufferCopy );
 		attributes.Set( FrameBufferCopyRectangle, new Vector4( 0, 0, viewport.Width / frameBufferCopy.Width, viewport.Height / frameBufferCopy.Height ) );

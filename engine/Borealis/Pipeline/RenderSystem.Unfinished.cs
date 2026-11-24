@@ -27,9 +27,7 @@ public sealed partial class RenderSystem
 
 	Unfinished unfinished;
 
-	// Systems recording on this thread (their segments, where a draw's callback renders a child view), and the frames left
-	// to finish on it, oldest first
-	[ThreadStatic] static int recordingOnThread;
+	// The frames left to finish on this thread, oldest first
 	[ThreadStatic] static List<RenderSystem> unfinishedOnThread;
 
 	static List<RenderSystem> UnfinishedOnThread => unfinishedOnThread ??= new();
@@ -44,7 +42,7 @@ public sealed partial class RenderSystem
 	internal bool MayFinishLater { get; set; }
 
 	/// <summary>Whether the frame being recorded is left to finish after its workers: a child view's, not a window's.</summary>
-	bool LeavesUnfinished( in RenderOutput output ) => LeaveChildrenUnfinished && MayFinishLater && recordingOnThread > 0 && !output.Window;
+	bool LeavesUnfinished( in RenderOutput output ) => LeaveChildrenUnfinished && MayFinishLater && recordingHere is not null && !output.Window;
 
 	/// <summary>Whether this system's last frame is still waiting for its workers, for the tests.</summary>
 	internal bool IsUnfinished => unfinished.World is not null;

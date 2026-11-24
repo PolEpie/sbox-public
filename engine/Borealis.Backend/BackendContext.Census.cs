@@ -1,4 +1,5 @@
 using Borealis.Gpu;
+using Borealis.Source2.Shaders;
 
 namespace Borealis.Backend;
 
@@ -150,5 +151,34 @@ internal sealed partial class BackendContext
 
 		counted.Shader = bucket.CensusShader ?? counted.Shader;
 		census.Add( counted );
+	}
+
+	/// <summary>The timed scope of the layer whose draws get scopes of their own (<see cref="BackendDevice.DrawScopesLayer"/>), -1 outside it.</summary>
+	int drawScopes = -1;
+
+	/// <summary>Draw scopes' names by material, shader or surface program (<see cref="BackendDevice.DrawScopesLayer"/>).</summary>
+	static readonly System.Collections.Concurrent.ConcurrentDictionary<object, string> drawScopeNames = new( ReferenceEqualityComparer.Instance );
+
+	/// <summary>A model draw in a GPU scope of its own, named by its shader (<see cref="BackendDevice.DrawScopesLayer"/>).</summary>
+	bool DrawScoped( GpuMaterial material, StringToken shaderMode, RenderMesh mesh, in RenderMesh.Draw draw, int firstInstance, int instances, int depthBias, float slopeScaledDepthBias, bool stripPixelShader, bool skinned, in IndirectDraws indirect )
+	{
+		var timer = device.PassTimer;
+		var list = recording?.List;
+		var scope = timer is not null && list is not null && material is not null
+			? timer.Begin( list, drawScopeNames.GetOrAdd( material, static m => "classic " + (m is SurfaceMaterial s ? $"{DrawCensus.ShaderName( s.Shader )} (surface)" : DrawCensus.ShaderName( (m as BackendMaterial)?.Shader?.Name )) ), PassTimer.ScopeKind.Own, count: false )
+			: -1;
+		var drawn = DrawTimed( material, shaderMode, mesh, draw, firstInstance, instances, depthBias, slopeScaledDepthBias, stripPixelShader, skinned, indirect );
+		timer?.End( list, scope );
+		return drawn;
+	}
+
+	/// <summary>Start a GPU-driven multi-draw's own GPU scope, named by its bucket's shader (<see cref="BackendDevice.DrawScopesLayer"/>); -1 when off.</summary>
+	int BeginBucketScope( GpuDrivenBucket bucket )
+	{
+		if ( drawScopes < 0 || device.PassTimer is not { } timer || recording?.List is not { } list ) return -1;
+		var key = (object)bucket.Variant?.Shader ?? bucket.SurfaceProgram;
+		if ( key is null ) return -1;
+		var name = drawScopeNames.GetOrAdd( key, static k => "bucket " + (k is SurfaceProgram p ? $"{DrawCensus.ShaderName( p.Compiled?.Name )} (surface)" : DrawCensus.ShaderName( (k as ShaderFile)?.Name )) );
+		return timer.Begin( list, name, PassTimer.ScopeKind.Own, count: false );
 	}
 }

@@ -1,4 +1,5 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
+using System.Threading;
 
 namespace Borealis;
 
@@ -174,6 +175,21 @@ internal sealed partial class FrameRecorder : IDisposable
 	readonly List<GpuContext> contexts = new();
 	Segment[] segments = new Segment[16];
 	int segmentCount;
+
+	// Each segment's recording: 0 not begun, 1 claimed by a thread, 2 done (Interlocked), so a prefix submitted early
+	// (SubmitThrough) can record what no worker has claimed yet and wait for the rest
+	int[] segmentStates = new int[16];
+	const int Unclaimed = 0, Claimed = 1, Recorded = 2;
+
+	// A segment whose recording threw: nothing is submitted early after it
+	volatile bool segmentFailed;
+
+	// The segment the main thread is recording, -1 when none
+	int mainSlot = -1;
+
+	// Segments submitted before Submit (SubmitThrough), and whether the frames' setup went with them
+	int submittedSegments;
+	bool setupSubmitted;
 
 	PlannedLayer[] layers = new PlannedLayer[32];
 	int layerCount;
@@ -726,8 +742,12 @@ internal sealed partial class FrameRecorder : IDisposable
 			workerSegments[j + 1] = slot;
 		}
 
+		if ( segmentStates.Length < segmentCount ) segmentStates = new int[segments.Length];
+		Array.Clear( segmentStates, 0, segmentCount );
+		segmentFailed = false;
+
 		// Heaviest first, one at a time, on up to MaxRecordThreads workers beside this thread
-		recording = JobDispatcher.Begin( workers, this, static ( recorder, claim ) => recorder.RecordSegment( recorder.workerSegments[claim] ), itemsPerBatch: 1, maxDegreeOfParallelism: MaxRecordThreads + 1 );
+		recording = JobDispatcher.Begin( workers, this, static ( recorder, claim ) => recorder.RecordClaimed( recorder.workerSegments[claim] ), itemsPerBatch: 1, maxDegreeOfParallelism: MaxRecordThreads + 1 );
 		recordStart = start;
 		mainDone = start;
 		Recording = true;
@@ -740,16 +760,23 @@ internal sealed partial class FrameRecorder : IDisposable
 		{
 			for ( int i = 0; i < segmentCount; i++ )
 			{
-				if ( !Parallel || segments[i].OnMainThread ) RecordSegment( i );
+				if ( !Parallel || segments[i].OnMainThread )
+				{
+					mainSlot = i;
+					RecordClaimed( i );
+				}
 			}
 
 			mainDone = Stopwatch.GetTimestamp();
 		}
 		catch
 		{
+			mainSlot = -1;
 			Join();
 			throw;
 		}
+
+		mainSlot = -1;
 	}
 
 	// Joining records whatever workers haven't claimed yet on this thread
@@ -782,6 +809,70 @@ internal sealed partial class FrameRecorder : IDisposable
 
 		foreach ( var frame in frames )
 			stats.StagesMs += frame.StagesMs;
+	}
+
+	/// <summary>
+	/// Record a segment unless another thread has claimed it (a prefix submitted early records what no worker has yet).
+	/// </summary>
+	void RecordClaimed( int slot )
+	{
+		if ( Interlocked.CompareExchange( ref segmentStates[slot], Claimed, Unclaimed ) != Unclaimed ) return;
+
+		var recorded = false;
+		try
+		{
+			RecordSegment( slot );
+			recorded = true;
+		}
+		finally
+		{
+			if ( !recorded ) segmentFailed = true;
+			Volatile.Write( ref segmentStates[slot], Recorded );
+		}
+	}
+
+	/// <summary>
+	/// Submit the frames' setup and segments up to and including <paramref name="last"/> now, from the main thread while it
+	/// records a later segment (a child view rendered from it): what workers haven't claimed of them is recorded here, and
+	/// what they're recording is waited for. The rest go at <see cref="Submit"/>. False, submitting nothing, where they
+	/// can't go on their own: recording serially, from a segment at or before <paramref name="last"/>, or where the next
+	/// segment shares a list or a rendering scope with them.
+	/// </summary>
+	public bool SubmitThrough( int last )
+	{
+		if ( submittedSegments > 0 || last < 0 || last + 1 >= segmentCount || mainSlot <= last || !SeparateContexts ) return false;
+		if ( segments[last + 1].Borrows >= 0 || Carries( last + 1 ) || segmentFailed ) return false;
+
+		for ( int i = 0; i <= last; i++ )
+		{
+			RecordClaimed( i );
+
+			var spin = new SpinWait();
+			while ( Volatile.Read( ref segmentStates[i] ) != Recorded ) spin.SpinOnce();
+		}
+
+		if ( segmentFailed ) return false;
+
+		SubmitSetup();
+		SubmitSegments( 0, last + 1 );
+		submittedSegments = last + 1;
+		return true;
+	}
+
+	/// <summary>The last segment recording one of <paramref name="frame"/>'s non-mesh layers of type <typeparamref name="T"/>, or -1.</summary>
+	public int LastSegmentOf<T>( RenderFrame frame ) where T : RenderLayer
+	{
+		for ( int i = segmentCount - 1; i >= 0; i-- )
+		{
+			ref var segment = ref segments[i];
+			if ( segment.Kind != SegmentKind.Layers || segment.Frame != frame ) continue;
+			for ( int l = segment.Index; l < segment.Index + segment.Count; l++ )
+			{
+				if ( layers[l].Layer is T ) return i;
+			}
+		}
+
+		return -1;
 	}
 
 	void RecordSegment( int slot )
@@ -980,14 +1071,26 @@ internal sealed partial class FrameRecorder : IDisposable
 	/// </summary>
 	public void Submit()
 	{
-		// Each setup context, then the work its features left for workers (skinning), before anything draws
+		if ( !setupSubmitted ) SubmitSetup();
+		SubmitSegments( submittedSegments, segmentCount );
+		submittedSegments = segmentCount;
+	}
+
+	/// <summary>Each setup context, then the work its features left for workers (skinning), before anything draws.</summary>
+	void SubmitSetup()
+	{
 		foreach ( var f in frames )
 		{
 			f.System.FrameContext.Submit();
 			f.System.EndSetupWork( true );
 		}
 
-		for ( int i = 0; i < segmentCount; i++ )
+		setupSubmitted = true;
+	}
+
+	void SubmitSegments( int from, int to )
+	{
+		for ( int i = from; i < to; i++ )
 		{
 			ref var segment = ref segments[i];
 			if ( segment.HandOff >= 0 )
@@ -1015,14 +1118,30 @@ internal sealed partial class FrameRecorder : IDisposable
 	public void End()
 	{
 		Join();
-		for ( int i = 0; i < _computeBatchCount; i++ )
-			_computeBatches[i].Context.End();
 
-		for ( int i = 0; i < segmentCount; i++ )
+		// Not what was submitted early
+		for ( int i = 0; i < _computeBatchCount; i++ )
+		{
+			if ( !HandedOffBefore( i, submittedSegments ) ) _computeBatches[i].Context.End();
+		}
+
+		for ( int i = submittedSegments; i < segmentCount; i++ )
 			segments[i].Context.End();
 
+		if ( setupSubmitted ) return;
 		for ( int f = frames.Count - 1; f >= 0; f-- )
 			frames[f].System.FrameContext.End();
+	}
+
+	/// <summary>Whether compute batch <paramref name="batch"/> is handed off by one of the first <paramref name="count"/> segments.</summary>
+	bool HandedOffBefore( int batch, int count )
+	{
+		for ( int i = 0; i < count; i++ )
+		{
+			if ( segments[i].HandOff == batch ) return true;
+		}
+
+		return false;
 	}
 
 	/// <summary>
@@ -1030,6 +1149,8 @@ internal sealed partial class FrameRecorder : IDisposable
 	/// </summary>
 	public void Clear()
 	{
+		submittedSegments = 0;
+		setupSubmitted = false;
 		for ( int i = 0; i < segmentCount; i++ )
 			segments[i].Frame = null;
 		for ( int l = 0; l < layerCount; l++ )

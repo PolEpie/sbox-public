@@ -45,6 +45,13 @@ public sealed class RenderView
 	public Matrix? Projection { get; set; }
 
 	/// <summary>
+	/// The world-space plane an oblique <see cref="Projection"/> clips at, keeping the side its normal faces (a planar
+	/// refraction's surface, <c>ViewSetup.ClipPlane</c>). The view's 3D skybox is clipped at it too (<see cref="RenderSystem"/>'s
+	/// skybox view), as the world is; null leaves the skybox whole.
+	/// </summary>
+	internal Sandbox.Plane? ClipPlane { get; set; }
+
+	/// <summary>
 	/// The part of the projection drawn: a rectangle of clip space as left, bottom, right and top, (-1, -1, 1, 1) for all of it
 	/// (<c>CFrustum::SetClipSpaceBounds</c>), for posters and off-centre views.
 	/// </summary>
