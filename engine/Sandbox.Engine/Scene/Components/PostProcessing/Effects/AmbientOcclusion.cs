@@ -252,7 +252,8 @@ public sealed partial class AmbientOcclusion : BasePostProcess<AmbientOcclusion>
 			commands.Attributes.Set( "FullResAO", UpsampledAO.ColorTexture );
 
 			commands.Attributes.SetCombo( "D_PASS", GTAOPasses.BilateralUpsample );
-			commands.DispatchCompute( GtaoCs, UpsampledAO.Size );
+			// A thread for every 2x2 pixels: at exactly half resolution they share their coarse texels and depth
+			commands.DispatchCompute( GtaoCs, commands.ViewportSizeScaled( 2 ) );
 
 			commands.ResourceBarrierTransition( UpsampledAO, ResourceState.PixelShaderResource );
 
