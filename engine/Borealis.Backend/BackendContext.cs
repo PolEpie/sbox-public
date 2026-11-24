@@ -192,6 +192,7 @@ internal sealed partial class BackendContext : GpuContext
 		}
 
 		wait = signal = default;
+		drawScopes = -1;
 		boundValid = false;
 		bound = default;
 		clearColor = clearDepth = false;
@@ -983,6 +984,7 @@ internal sealed partial class BackendContext : GpuContext
 		if ( count ) CloseScope();
 		var timed = timer.Begin( List, name, PassTimer.ScopeKind.Pass, count );
 		if ( count && timer.Counts( timed ) ) recording.Counting = timed;
+		if ( timed >= 0 && drawScopes < 0 && BackendDevice.DrawScopesLayer is { } layer && name == layer ) drawScopes = timed;
 		return new GpuScope( timed + 2, false );
 	}
 
@@ -993,6 +995,7 @@ internal sealed partial class BackendContext : GpuContext
 		if ( scope.Marker > 1 && device.PassTimer is { } timer )
 		{
 			var timed = (int)scope.Marker - 2;
+			if ( timed == drawScopes ) drawScopes = -1;
 			if ( recording.Counting == timed )
 			{
 				CloseScope();

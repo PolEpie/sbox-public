@@ -400,6 +400,13 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 		return parameters;
 	} );
 
+	/// <summary>
+	/// Diagnostics (<c>BOREALIS_DRAW_SCOPES=&lt;layer name&gt;</c>): with a <see cref="PassTimer"/>, each classic model draw and
+	/// GPU-driven multi-draw inside that layer's GPU scope gets a scope of its own, named by its shader, to see where the
+	/// layer's time goes. Null (off) by default: the timestamps between draws keep them from overlapping, so the layer takes longer.
+	/// </summary>
+	internal static string DrawScopesLayer { get; set; } = Environment.GetEnvironmentVariable( "BOREALIS_DRAW_SCOPES" );
+
 	/// <summary>Time every model draw's binding and recording into <see cref="DrawTimes"/>, for benchmarks.</summary>
 	public bool TimeDraws { get; set; }
 
