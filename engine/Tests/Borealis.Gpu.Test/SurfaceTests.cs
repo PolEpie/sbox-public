@@ -313,6 +313,35 @@ public class SurfaceTests : GpuTest
 	}
 
 	/// <summary>
+	/// Colour after a prepass that wrote its triangles' depth (the visibility-driven forward pass) doesn't write it again: an
+	/// opaque surface tests greater-or-equal, an alpha-tested one equal, which keeps early depth testing. Without a prepass
+	/// both test greater-or-equal and write.
+	/// </summary>
+	[TestMethod]
+	public void ForwardAfterThePrepassDoesntWriteDepth()
+	{
+		var compiled = Compiler().CompileSurface( Path.Combine( Surfaces, "rock.slang" ) );
+		using var backend = new BackendDevice( Device );
+		using var program = new SurfaceProgram( backend, compiled );
+		var pass = program.Pass( ShaderPasses.Forward );
+		var opaque = SurfaceRenderState.Opaque;
+		var alphaTested = opaque with { AlphaTest = true };
+		GraphicsPipelineInfo Info( SurfaceRenderState state, bool prepassed ) => program.Info( pass, backend.PulledLayout, Format.RGBA16Float, Format.D32Float, 4, null, null, state, false, false, prepassed, false );
+
+		var plain = Info( opaque, false );
+		Assert.IsTrue( plain.DepthWrite );
+		Assert.AreEqual( CompareFunction.GreaterEqual, plain.DepthCompare );
+
+		var prepassed = Info( opaque, true );
+		Assert.IsFalse( prepassed.DepthWrite, "opaque after the prepass" );
+		Assert.AreEqual( CompareFunction.GreaterEqual, prepassed.DepthCompare, "its prepass may have pulled positions with another shader" );
+
+		var tested = Info( alphaTested, true );
+		Assert.IsFalse( tested.DepthWrite, "alpha-tested after the prepass" );
+		Assert.AreEqual( CompareFunction.Equal, tested.DepthCompare );
+	}
+
+	/// <summary>
 	/// The surface pipeline manifest (<see cref="SurfacePipelineManifest"/>): a pipeline a draw made is recorded by what asked
 	/// for it, saved, read back by the next run and made ahead on a worker once the program compiles, so the same request
 	/// finds it made without making another. Lines that don't read, or name a pass the program no longer has, are dropped,

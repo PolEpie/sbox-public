@@ -1044,7 +1044,8 @@ internal sealed class SurfaceProgram : IDisposable
 	/// constants (<c>SpecializedConstant()</c> globals) are per pipeline, <paramref name="constantsKey"/> their values.
 	/// With <paramref name="ids"/>, the visibility-driven forward pass's id prepass: target 0 an R8 scratch (its alpha drives
 	/// alpha to coverage), target 1 the ids, as BackendDevice.Pipeline makes them. With <paramref name="depthEqual"/>, a
-	/// colour pass whose depth a prepass already wrote with the same vertex stage: tested equal, not written.
+	/// colour pass whose depth a prepass already wrote: not written; tested equal when alpha-tested (the prepass drew it with
+	/// the same vertex stage), greater-or-equal otherwise.
 	/// With <paramref name="normals"/>, the opaque pass's normals target follows colour: an opaque forward pass of a surface
 	/// writes its normal and roughness there (<see cref="WritesNormals"/>), any other leaves it as it is.
 	/// With <paramref name="specialized"/>, the pipeline specialised for those feature values once a worker has made it; the
@@ -1304,7 +1305,7 @@ internal sealed class SurfaceProgram : IDisposable
 	public bool WritesNormals( PassObjects pass ) => Compiled.Tier == ShaderTier.Surface
 		&& pass.Pass.Pixel?.Entry is "ForwardPs" or "ForwardAlphaTestPs" or "ForwardPsGpuDriven" or "ForwardAlphaTestPsGpuDriven";
 
-	GraphicsPipelineInfo Info( PassObjects pass, VertexLayout layout, Format color, Format depth, int samples, SpecializationConstant[] vertexConstants, SpecializationConstant[] pixelConstants, SurfaceRenderState state, bool ids, bool opaqueFade, bool depthEqual, bool normals )
+	internal GraphicsPipelineInfo Info( PassObjects pass, VertexLayout layout, Format color, Format depth, int samples, SpecializationConstant[] vertexConstants, SpecializationConstant[] pixelConstants, SurfaceRenderState state, bool ids, bool opaqueFade, bool depthEqual, bool normals )
 	{
 		// A vertex-cache draw reads its vertex ids from streams 2 and 3, as floats, and the default stream from 4, as
 		// BackendDevice.Pipeline maps classic variants
@@ -1361,12 +1362,13 @@ internal sealed class SurfaceProgram : IDisposable
 			info.DepthTest = depth != Format.Unknown && state.DepthTest;
 			info.DepthWrite = depth != Format.Unknown && state.DepthWrite;
 
-			// Colour after a prepass that drew the same triangles with the same vertex stage: depth tested equal and not
-			// written, as foliage.shader's colour pass, so an alpha-tested pass keeps early depth testing
+			// Colour after a prepass that drew the same triangles: their depth isn't written again. An alpha-tested pass, whose
+			// prepass drew them with the same vertex stage, tests it equal, as foliage.shader's colour pass, so it keeps early
+			// depth testing; an opaque one keeps greater-or-equal, as its prepass may have pulled positions with another shader
 			if ( depthEqual )
 			{
 				info.DepthWrite = false;
-				info.DepthCompare = CompareFunction.Equal;
+				if ( state.AlphaTest ) info.DepthCompare = CompareFunction.Equal;
 			}
 
 			// The opaque pass's normals: written by an opaque surface (its pixel stage's output switched on), kept otherwise

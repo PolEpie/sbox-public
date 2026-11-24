@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 
 namespace Borealis.Shadows;
 
@@ -447,8 +447,8 @@ internal partial class ShadowMapper
 		if ( !View.IsReflection && LastCascades.Frame == FrameCount && LastCascades.Light == light.Key && viewportArea <= LastCascades.ViewportArea
 			&& !(LastCascades.Mapper is { InFlight: true } drawing && drawing != this)
 			&& LastCascades.StaticFilter == staticFilter
-			&& SameTags( LastCascades.RenderTags, View.RenderTags ?? [] ) && SameTags( LastCascades.ExcludeTags, View.ExcludeTags ?? [] )
-			&& LastCascades.SubWorlds == View.SubWorlds
+			&& SameTags( LastCascades.RenderTags, View.RenderTags ?? [] ) && (View.SharesCascades || SameTags( LastCascades.ExcludeTags, View.ExcludeTags ?? [] ))
+			&& (LastCascades.SubWorlds == View.SubWorlds || View.SharesCascades && (View.SubWorlds & ~LastCascades.SubWorlds) == 0)
 			&& cameraPosition.DistanceSquared( LastCascades.CameraPosition ) <= LastCascades.RadiusSquared )
 		{
 			gpuShadowData = LastCascades.Data;

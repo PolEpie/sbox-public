@@ -128,6 +128,7 @@ internal sealed class ShadowSystem : IShadowRenderer, IDisposable
 			ViewportSize = new Vector2( view.Viewport.Width, view.Viewport.Height ),
 			RenderTags = view.RenderTags,
 			ExcludeTags = view.ExcludeTags,
+			SharesCascades = view.ClipPlane is not null,
 			SubWorlds = view.SubWorlds,
 			IsSkybox = skybox,
 			IsReflection = view.Reflection,
