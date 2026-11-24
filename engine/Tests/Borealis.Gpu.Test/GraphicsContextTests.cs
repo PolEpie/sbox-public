@@ -310,6 +310,63 @@ public class GraphicsContextTests : GpuTest
 	}
 
 	/// <summary>
+	/// The GGX kernel's groups each write a 16x16 tile of a mip, so it dispatches a quarter of the threads the mip has
+	/// texels: every texel of every mip of an odd-sized texture is still written, a flat colour staying flat.
+	/// </summary>
+	[TestMethod]
+	public void GgxMipsCoverOddSizes()
+	{
+		const int Width = 37, Height = 23, Mips = 4;
+		var list = Device.BeginCommandList( QueueType.Graphics, "GGX mips" );
+		var context = new GraphicsContext( Device, drawer, list );
+		var texture = context.CreateTarget( Width, Height, Format.RGBA8Unorm, mips: Mips, name: "GGX mipped" );
+
+		list.Barrier( TextureBarrier.Transition( texture, ImageLayout.Undefined, ImageLayout.CopyDestination, PipelineStage.None, MemoryAccess.None, PipelineStage.Transfer, MemoryAccess.TransferWrite ) );
+		var readbacks = new BufferHandle[Mips];
+		for ( int mip = 0; mip < Mips; mip++ )
+		{
+			int w = Width >> mip, h = Height >> mip;
+			// Mip 0 flat grey, the rest red until the downsample writes them
+			var fill = new byte[w * h * 4];
+			for ( int i = 0; i < fill.Length; i += 4 )
+			{
+				if ( mip == 0 ) fill.AsSpan( i, 4 ).Fill( 128 );
+				else { fill[i] = 255; fill[i + 3] = 255; }
+			}
+			list.UpdateTexture( texture, fill, mip, 0, w, h );
+			readbacks[mip] = Device.CreateBuffer( new BufferInfo { Size = w * h * 4, Memory = MemoryLocation.Readback, Name = $"GGX mip {mip}" } );
+		}
+
+		context.Track( texture, ImageLayout.CopyDestination );
+		context.GenerateMips( texture, library.Load( "shaders/downsample_cs.shader" ), method: 6 );
+
+		list.Barrier( TextureBarrier.Transition( texture, ImageLayout.ShaderRead, ImageLayout.CopySource, PipelineStage.AllCommands, MemoryAccess.MemoryWrite, PipelineStage.Transfer, MemoryAccess.TransferRead ) );
+		for ( int mip = 1; mip < Mips; mip++ )
+		{
+			list.CopyTextureToBuffer( texture, mip, 0, readbacks[mip] );
+			list.Barrier( new BufferBarrier { Buffer = readbacks[mip], SourceStage = PipelineStage.Transfer, SourceAccess = MemoryAccess.TransferWrite, DestinationStage = PipelineStage.Host, DestinationAccess = MemoryAccess.HostRead } );
+		}
+		Device.Wait( Device.Submit( list ) );
+
+		for ( int mip = 1; mip < Mips; mip++ )
+		{
+			int w = Width >> mip, h = Height >> mip;
+			var pixels = Device.Map( readbacks[mip] ).ToArray();
+			for ( int y = 0; y < h; y++ )
+			{
+				for ( int x = 0; x < w; x++ )
+				{
+					var p = Pixel( pixels, w, x, y );
+					Assert.IsTrue( Math.Abs( p.R - 128 ) <= 2 && Math.Abs( p.G - 128 ) <= 2 && Math.Abs( p.B - 128 ) <= 2, $"mip {mip} ({w}x{h}) at {x},{y} is {p}, not the flat grey" );
+				}
+			}
+		}
+
+		foreach ( var readback in readbacks ) if ( readback.IsValid ) Device.Destroy( readback );
+		context.Release();
+	}
+
+	/// <summary>
 	/// A frame grab copies what's drawn so far into a texture of its own, which a later draw samples while the target
 	/// keeps being drawn to: the copy has the target's pixels, and drawing after the grab doesn't reach it.
 	/// </summary>
