@@ -108,6 +108,7 @@ internal sealed class BackendTexture : GpuTexture
 	{
 		if ( disposed ) return;
 		disposed = true;
+		Interlocked.Increment( ref device.TexturesDisposed );
 		BackendContext.ForgetMipViews( this, device.Gpu );
 		device.Gpu.Destroy( Handle );
 	}

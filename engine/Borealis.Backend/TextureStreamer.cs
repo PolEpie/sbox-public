@@ -322,16 +322,19 @@ internal sealed class TextureStreamer
 		Upload();
 		Measure( now );
 		GiveBack();
-		GiveBackIdle( updateTime );
+		GiveBackIdle( now, updateTime );
 		MoveOutOfSparseBlocks();
 		MoveOutOfDrainingBlocks();
 		Start();
 	}
 
-	// Textures unasked for IdleSeconds back to their tail, a few builds at a time
-	void GiveBackIdle( long now )
+	/// <summary>Frames between looks for textures idle for <see cref="IdleSeconds"/>: a look walks every streamed texture.</summary>
+	const uint IdleCheckFrames = 16;
+
+	// Textures unasked for IdleSeconds back to their tail, a few builds at a time, looked for every IdleCheckFrames frames
+	void GiveBackIdle( uint frame, long now )
 	{
-		if ( IdleSeconds <= 0 ) return;
+		if ( IdleSeconds <= 0 || frame % IdleCheckFrames != 0 ) return;
 		var idle = (long)(IdleSeconds * System.Diagnostics.Stopwatch.Frequency);
 		foreach ( var texture in textures )
 		{
@@ -435,9 +438,19 @@ internal sealed class TextureStreamer
 		}
 	}
 
-	// Textures disposed since
+	// The device's textures disposed at the last look for disposed ones
+	int disposedSeen = -1;
+
+	/// <summary>Looks for disposed textures so far, for the tests: one after each frame a texture of the device's was disposed in.</summary>
+	public int ForgetScans { get; private set; }
+
+	// Textures disposed since: looked for only once a texture of the device's has been disposed since the last look
 	void Forget()
 	{
+		var disposed = Volatile.Read( ref device.TexturesDisposed );
+		if ( disposed == disposedSeen ) return;
+		disposedSeen = disposed;
+		ForgetScans++;
 		kept.RemoveAll( static texture => !texture.IsValid );
 		for ( int i = textures.Count - 1; i >= 0; i-- )
 		{
