@@ -657,7 +657,7 @@ internal sealed class BackendMaterial : GpuMaterial, IStreamDependent
 	/// </summary>
 	public int LayoutVersion => Volatile.Read( ref layoutVersion );
 
-	/// <summary>Moves on whenever a value is set in code (<see cref="Set"/>).</summary>
+	/// <summary>Moves on whenever a value is set in code (<see cref="Set(string, float[])"/>).</summary>
 	public int ValuesVersion => Volatile.Read( ref valuesVersion );
 
 	int layoutVersion, valuesVersion;
@@ -676,6 +676,22 @@ internal sealed class BackendMaterial : GpuMaterial, IStreamDependent
 			// The same values again (code that sets a material's values every frame) keep its material objects
 			if ( values.TryGetValue( variable, out var current ) && !ReferenceEquals( current, value ) && current is not null && value is not null && current.AsSpan().SequenceEqual( value ) ) return;
 			values[variable] = value;
+		}
+
+		Interlocked.Increment( ref valuesVersion );
+		Interlocked.Increment( ref version );
+	}
+
+	/// <summary>
+	/// <see cref="Set(string, float[])"/> from a span: the same values again change nothing and allocate nothing; changed ones
+	/// are a new array, since what draws may still hold the old one.
+	/// </summary>
+	public void Set( string variable, ReadOnlySpan<float> value )
+	{
+		lock ( values )
+		{
+			if ( values.TryGetValue( variable, out var current ) && current is not null && current.AsSpan().SequenceEqual( value ) ) return;
+			values[variable] = value.ToArray();
 		}
 
 		Interlocked.Increment( ref valuesVersion );
