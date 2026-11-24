@@ -57,9 +57,14 @@ public partial class Material
 		var texture = Texture.FromNative( native.GetTexture( name ) );
 
 		// Remember where it came from, for devices that read it from the material's file: a material's own texture has no path,
-		// and one that has (the same file, once something loaded it by path) is still the material's
+		// and one that has (the same file, once something loaded it by path) is still the material's; one already noted with the same origin isn't noted again: fog asks for the sky's cubemap every frame, and each
+		// note boxed a new origin
 		if ( texture is not null && !string.IsNullOrEmpty( ResourcePath ) )
-			Texture.MaterialOrigins.AddOrUpdate( texture, new Texture.MaterialOrigin( ResourcePath, name ) );
+		{
+			var origin = new Texture.MaterialOrigin( ResourcePath, name );
+			if ( !Texture.MaterialOrigins.TryGetValue( texture, out var known ) || known is not Texture.MaterialOrigin same || same != origin )
+				Texture.MaterialOrigins.AddOrUpdate( texture, origin );
+		}
 
 		return texture;
 	}
