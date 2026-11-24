@@ -16,7 +16,7 @@ public abstract class SurfaceMaterial : GpuMaterial, IStreamDependent
 {
 	readonly byte[] record;
 	readonly Dictionary<int, (GpuTexture Texture, bool Srgb)> textures = new();
-	int version;
+	int version, stateVersion;
 
 	/// <summary>
 	/// A material of the shader in <paramref name="shader"/> (a file name the device's surface folders hold), with a
@@ -47,7 +47,7 @@ public abstract class SurfaceMaterial : GpuMaterial, IStreamDependent
 		set
 		{
 			alphaTest = value;
-			Interlocked.Increment( ref version );
+			Changed();
 		}
 	}
 
@@ -60,7 +60,7 @@ public abstract class SurfaceMaterial : GpuMaterial, IStreamDependent
 		set
 		{
 			twoSided = value;
-			Interlocked.Increment( ref version );
+			Changed();
 		}
 	}
 
@@ -78,7 +78,7 @@ public abstract class SurfaceMaterial : GpuMaterial, IStreamDependent
 	{
 		get
 		{
-			var v = Version;
+			var v = StateVersion;
 			var known = resolved;
 			if ( known is not null && known.Version == v ) return known.State;
 			SurfaceRenderState state;
@@ -138,7 +138,7 @@ public abstract class SurfaceMaterial : GpuMaterial, IStreamDependent
 	internal (ulong Key, int[] Values) Features( IReadOnlyList<Sandbox.ShaderCompiler.MaterialField> features )
 	{
 		if ( features.Count == 0 ) return (0, null);
-		var v = Version;
+		var v = StateVersion;
 		var known = featureValues;
 		if ( known is not null && known.Version == v ) return (known.Key, known.Values);
 
@@ -180,6 +180,20 @@ public abstract class SurfaceMaterial : GpuMaterial, IStreamDependent
 	/// <summary>Moves on whenever a field changes.</summary>
 	public int Version => Volatile.Read( ref version );
 
+	/// <summary>
+	/// Moves on when a field its render state or feature values read changes (<see cref="AffectsState"/>), a texture, or
+	/// <see cref="AlphaTest"/> and <see cref="TwoSided"/>; not when other values change. What's worked out from those
+	/// (<see cref="RenderState"/>, <see cref="Features"/>, <see cref="Specialization"/>) is kept by it, so code that sets a
+	/// value every frame (a weapon's glow) doesn't work them out again for every draw of every frame.
+	/// </summary>
+	public int StateVersion => Volatile.Read( ref stateVersion );
+
+	/// <summary>
+	/// Whether the field at <paramref name="offset"/> can change its render state or feature values: every field, unless the
+	/// material knows its layout.
+	/// </summary>
+	private protected virtual bool AffectsState( int offset ) => true;
+
 	/// <summary>The record as the shader reads it: texture slots resolved now, sRGB views for sRGB fields.</summary>
 	internal void WriteRecord( Span<byte> into, Func<GpuTexture, bool, int> slot )
 	{
@@ -194,7 +208,23 @@ public abstract class SurfaceMaterial : GpuMaterial, IStreamDependent
 	/// <summary>Bytes in the record.</summary>
 	internal int RecordSize => record.Length;
 
-	void Changed() => Interlocked.Increment( ref version );
+	void Changed()
+	{
+		Interlocked.Increment( ref stateVersion );
+		Interlocked.Increment( ref version );
+	}
+
+	void Changed( int offset, int words = 1 )
+	{
+		for ( int i = 0; i < words; i++ )
+		{
+			if ( !AffectsState( offset + i * 4 ) ) continue;
+			Interlocked.Increment( ref stateVersion );
+			break;
+		}
+
+		Interlocked.Increment( ref version );
+	}
 
 	/// <summary>A texture field.</summary>
 	protected GpuTexture GetTexture( int offset )
@@ -262,7 +292,7 @@ public abstract class SurfaceMaterial : GpuMaterial, IStreamDependent
 	protected void SetInt( int offset, int value )
 	{
 		lock ( record ) BinaryPrimitives.WriteInt32LittleEndian( record.AsSpan( offset ), value );
-		Changed();
+		Changed( offset );
 	}
 
 	void Write( int offset, params ReadOnlySpan<float> values )
@@ -272,7 +302,7 @@ public abstract class SurfaceMaterial : GpuMaterial, IStreamDependent
 			for ( int i = 0; i < values.Length; i++ ) BinaryPrimitives.WriteSingleLittleEndian( record.AsSpan( offset + i * 4 ), values[i] );
 		}
 
-		Changed();
+		Changed( offset, values.Length );
 	}
 
 	/// <inheritdoc/>

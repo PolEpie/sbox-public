@@ -18,7 +18,8 @@ internal readonly record struct Allocation( MemoryBlock Block, ulong Offset, ulo
 /// <c>bufferImageGranularity</c> never matters, large blocks for big allocations (<see cref="LargeBlockSize"/>), dedicated
 /// allocations for the biggest, and a spare block of a kind made ahead on a worker once the last is taken. An allocation goes into the
 /// fullest block it fits in, so lightly used blocks drain and go back to the driver once empty: at once while another
-/// empty block of their kind is kept, the last one after <see cref="SpareFrames"/> frames (<see cref="Trim"/>).
+/// empty block of their kind is kept, the last one after <see cref="SpareFrames"/> frames (<see cref="Trim"/>). The driver's
+/// free of a block (0.3 ms, up to 7 ms for a big one) is made on a worker: a map's unload freed 85 blocks in one frame.
 /// </summary>
 internal sealed unsafe class MemoryAllocator : IDisposable
 {
@@ -1118,7 +1119,18 @@ internal sealed unsafe class MemoryAllocator : IDisposable
 		var start = System.Diagnostics.Stopwatch.GetTimestamp();
 		using ( Owner is { } owner ? owner.AllocateMemoryZone() : default )
 		using ( Owner is { } watched ? watched.Enter( "vkAllocateMemory" ) : default )
-			vk.vkAllocateMemory( vk.Device, &info, null, &memory ).Check( "vkAllocateMemory" );
+		{
+			var result = vk.vkAllocateMemory( vk.Device, &info, null, &memory );
+
+			// Out of memory with blocks still waiting for the driver's free on the worker: once they're freed, again
+			if ( result is VkResult.ErrorOutOfDeviceMemory or VkResult.ErrorOutOfHostMemory && !releasing.IsEmpty )
+			{
+				FinishReleases();
+				result = vk.vkAllocateMemory( vk.Device, &info, null, &memory );
+			}
+
+			result.Check( "vkAllocateMemory" );
+		}
 		var ticks = System.Diagnostics.Stopwatch.GetTimestamp() - start;
 		System.Threading.Interlocked.Add( ref driverAllocationTicks, ticks );
 		long longest;
@@ -1206,19 +1218,80 @@ internal sealed unsafe class MemoryAllocator : IDisposable
 	{
 		System.Threading.Interlocked.Increment( ref driverFrees );
 
-		// Freeing memory unmaps it
-		using ( Owner is { } watched ? watched.Enter( "vkFreeMemory" ) : default )
-			vk.vkFreeMemory( vk.Device, block.Memory, null );
+		// Freeing memory unmaps it. The block is in no list any more, so nothing reads or maps it: the driver's free (slow, and
+		// made under the lock on whichever thread let the block go, the frame thread's frame start mostly) goes to a worker,
+		// but while disposing, which frees the rest at once
+		if ( disposed ) FreeMemory( block.Memory );
+		else
+		{
+			releasing.Enqueue( block.Memory );
+			if ( System.Threading.Interlocked.Exchange( ref releaserQueued, 1 ) == 0 ) System.Threading.ThreadPool.UnsafeQueueUserWorkItem( releaser ??= new Releaser( this ), preferLocal: false );
+		}
+
 		if ( AllocationTrace.Enabled ) AllocationTrace.Note( true, block.Size, block.TypeIndex, (byte)((block.Images ? AllocationTrace.Image : 0) | (block.Content ? AllocationTrace.Content : 0) | (block.Large ? AllocationTrace.Large : 0) | (block.Dedicated ? AllocationTrace.Dedicated : 0)), frame, System.Diagnostics.Stopwatch.GetTimestamp(), 0 );
 		if ( !counted ) return;
 		Reserved -= block.Size;
 		heapReserved[properties.Type( block.TypeIndex ).heapIndex] -= (long)block.Size;
 	}
 
+	void FreeMemory( ulong memory )
+	{
+		using ( Owner is { } watched ? watched.Enter( "vkFreeMemory" ) : default )
+			vk.vkFreeMemory( vk.Device, memory, null );
+	}
+
+	// Blocks' memory waiting for the driver's free on a worker (FreeBlock), and whether the worker is queued
+	readonly System.Collections.Concurrent.ConcurrentQueue<ulong> releasing = new();
+	int releaserQueued, releasesRunning;
+	Releaser releaser;
+	long freesOnWorker;
+
+	/// <summary>Driver frees the worker made (<see cref="FreeBlock"/>), for the tests.</summary>
+	internal long DriverFreesOnWorker => System.Threading.Interlocked.Read( ref freesOnWorker );
+
+	sealed class Releaser( MemoryAllocator allocator ) : System.Threading.IThreadPoolWorkItem
+	{
+		public void Execute() => allocator.ReleaseQueued();
+	}
+
+	void ReleaseQueued()
+	{
+		System.Threading.Interlocked.Increment( ref releasesRunning );
+		try
+		{
+			while ( true )
+			{
+				while ( releasing.TryDequeue( out var memory ) )
+				{
+					FreeMemory( memory );
+					System.Threading.Interlocked.Increment( ref freesOnWorker );
+				}
+
+				System.Threading.Volatile.Write( ref releaserQueued, 0 );
+
+				// One queued after the last dequeue and before the flag cleared found it set: take it here
+				if ( releasing.IsEmpty || System.Threading.Interlocked.Exchange( ref releaserQueued, 1 ) != 0 ) return;
+			}
+		}
+		finally
+		{
+			System.Threading.Interlocked.Decrement( ref releasesRunning );
+		}
+	}
+
+	/// <summary>Wait for the driver's frees handed to the worker; any still queued are freed here. For disposing and the tests.</summary>
+	internal void FinishReleases()
+	{
+		while ( releasing.TryDequeue( out var memory ) ) FreeMemory( memory );
+		while ( System.Threading.Volatile.Read( ref releasesRunning ) > 0 || System.Threading.Volatile.Read( ref releaserQueued ) != 0 && !releasing.IsEmpty ) System.Threading.Thread.Sleep( 1 );
+		while ( releasing.TryDequeue( out var memory ) ) FreeMemory( memory );
+	}
+
 	public void Dispose()
 	{
 		// Blocks being made ahead finish first: the device must outlive their allocations
 		lock ( allocationLock ) disposed = true;
+		FinishReleases();
 		while ( true )
 		{
 			lock ( allocationLock )

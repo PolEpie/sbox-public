@@ -1914,6 +1914,24 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	}
 
 	/// <summary>
+	/// Set one value on a material as <see cref="SetOnMaterial"/> does, without the dictionaries: code that sets a value
+	/// every frame. Allocates only when a material made from a <c>.shader</c> takes a value it didn't hold.
+	/// </summary>
+	public void SetValueOnMaterial( GpuMaterial material, string variable, ReadOnlySpan<float> value )
+	{
+		if ( material is BackendMaterial own ) own.Set( variable, value );
+		else if ( material is ConvertedMaterial surface ) surface.Set( variable, value );
+	}
+
+	/// <summary>Set one texture on a material as <see cref="SetOnMaterial"/> does.</summary>
+	public void SetTextureOnMaterial( GpuMaterial material, string variable, GpuTexture texture )
+	{
+		if ( texture is null ) return;
+		if ( material is BackendMaterial own ) { if ( texture is BackendTexture backing ) own.SetTexture( variable, backing ); }
+		else if ( material is ConvertedMaterial surface ) surface.Set( variable, texture );
+	}
+
+	/// <summary>
 	/// Set feature values (<c>F_*</c>) in code on a material made by <see cref="CreateMaterial(string, string)"/> or
 	/// <see cref="LoadMaterial(string, IReadOnlyDictionary{string, float[]}, IReadOnlyDictionary{string, GpuTexture}, string)"/>,
 	/// over its file's, as <c>Material.SetFeature</c> does: every feature code set, so one no longer set goes back to the

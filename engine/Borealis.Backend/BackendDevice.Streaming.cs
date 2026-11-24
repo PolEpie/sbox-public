@@ -64,6 +64,9 @@ public sealed partial class BackendDevice
 
 	TextureStreamer streamer;
 
+	/// <summary>Textures of this device disposed so far (<see cref="BackendTexture.Dispose"/>, any thread): the streamer looks for disposed ones when it moves.</summary>
+	internal int TexturesDisposed;
+
 	internal TextureStreamer Streamer => streamer ??= new TextureStreamer( this ) { Loading = loading };
 
 	internal override bool StreamsTextures => StreamTextures;

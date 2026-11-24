@@ -21,9 +21,21 @@ internal sealed class ConvertedMaterial : SurfaceMaterial
 	ConvertedMaterial( string shader, Sandbox.ShaderCompiler.MaterialLayout layout ) : base( shader, layout.Size, MaterialClassWriter.Hash( layout ), layout.States() )
 	{
 		this.layout = layout;
+
+		// The words of fields its render state or pipelines' features read
+		stateWords = new bool[(layout.Size + 3) / 4];
+		for ( int f = 0; f < layout.Fields.Count; f++ )
+		{
+			var field = layout.Fields[f];
+			if ( !field.IsFeature && field.RenderStates is not { Count: > 0 } ) continue;
+			for ( int at = field.Offset / 4; at < (field.Offset + field.Size + 3) / 4 && at < stateWords.Length; at++ ) stateWords[at] = true;
+		}
 	}
 
 	readonly Sandbox.ShaderCompiler.MaterialLayout layout;
+	readonly bool[] stateWords;
+
+	private protected override bool AffectsState( int offset ) => offset < 0 || offset / 4 >= stateWords.Length || stateWords[offset / 4];
 
 	/// <summary>
 	/// Set the fields a shader variable fills (<c>g_vColorTint</c>: a field whose <c>[Source]</c> it is, or named for it with
@@ -32,8 +44,9 @@ internal sealed class ConvertedMaterial : SurfaceMaterial
 	public bool Set( string variable, ReadOnlySpan<float> value )
 	{
 		var found = false;
-		foreach ( var field in layout.Fields )
+		for ( int f = 0; f < layout.Fields.Count; f++ )
 		{
+			var field = layout.Fields[f];
 			if ( field.Kind == MaterialFieldKind.Texture2D || !Fills( field, variable ) ) continue;
 			found = true;
 			for ( int i = 0; i < field.Components && i < value.Length; i++ )
@@ -50,8 +63,9 @@ internal sealed class ConvertedMaterial : SurfaceMaterial
 	public bool Set( string variable, GpuTexture texture )
 	{
 		var found = false;
-		foreach ( var field in layout.Fields )
+		for ( int f = 0; f < layout.Fields.Count; f++ )
 		{
+			var field = layout.Fields[f];
 			if ( field.Kind != MaterialFieldKind.Texture2D || !Fills( field, variable ) ) continue;
 			found = true;
 			SetTexture( field.Offset, texture, field.Srgb );
@@ -63,8 +77,9 @@ internal sealed class ConvertedMaterial : SurfaceMaterial
 	/// <summary>The texture of the first texture field a shader variable (<c>g_tColor</c>) fills, or null.</summary>
 	public GpuTexture Texture( string variable )
 	{
-		foreach ( var field in layout.Fields )
+		for ( int f = 0; f < layout.Fields.Count; f++ )
 		{
+			var field = layout.Fields[f];
 			if ( field.Kind == MaterialFieldKind.Texture2D && Fills( field, variable ) ) return GetTexture( field.Offset );
 		}
 
@@ -74,8 +89,9 @@ internal sealed class ConvertedMaterial : SurfaceMaterial
 	/// <summary>The value of the field a feature (<c>F_ALPHA_TEST</c>) fills, as the material draws with it; null when the surface has none.</summary>
 	internal int? FeatureValue( string feature )
 	{
-		foreach ( var field in layout.Fields )
+		for ( int f = 0; f < layout.Fields.Count; f++ )
 		{
+			var field = layout.Fields[f];
 			if ( field.Kind != MaterialFieldKind.Texture2D && field.Kind != MaterialFieldKind.Float && string.Equals( field.Source, feature, StringComparison.OrdinalIgnoreCase ) ) return GetInt( field.Offset );
 		}
 
@@ -85,8 +101,9 @@ internal sealed class ConvertedMaterial : SurfaceMaterial
 	/// <summary>Every texture field nothing has set takes <paramref name="texture"/>: a material made in code, as native makes one.</summary>
 	public void FillUnsetTextures( GpuTexture texture )
 	{
-		foreach ( var field in layout.Fields )
+		for ( int f = 0; f < layout.Fields.Count; f++ )
 		{
+			var field = layout.Fields[f];
 			if ( field.Kind == MaterialFieldKind.Texture2D && GetTexture( field.Offset ) is null ) SetTexture( field.Offset, texture, field.Srgb );
 		}
 	}

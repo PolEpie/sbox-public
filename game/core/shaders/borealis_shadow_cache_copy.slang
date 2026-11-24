@@ -49,6 +49,11 @@ struct VS_OUTPUT
 	// The texel of the cache each texel of the map starts at (xy, in [0, size)) and the cache's size (zw)
 	float4 g_vShadowCacheWrap < Attribute( "ShadowCacheWrap" ); >;
 
+	// Each 32x32 tile of the cache's min and max depth, and whether to read them: the map was cleared, and a tile whose
+	// farthest depth is the clear's holds no caster, so its texels are left as cleared
+	Texture2D<float2> g_tShadowCacheTiles < Attribute( "ShadowCacheTiles" ); >;
+	float g_flShadowCacheSparse < Attribute( "ShadowCacheSparse" ); Default( 0 ); >;
+
 	// Every texel written with the cache's depth as it is: no test, no colour
 	RenderState( ColorWriteEnable0, false );
 	RenderState( DepthEnable, true );
@@ -61,6 +66,8 @@ struct VS_OUTPUT
 	{
 		uint2 vSize = uint2( g_vShadowCacheWrap.zw );
 		uint2 vTexel = ( uint2( vPositionPs.xy ) + uint2( g_vShadowCacheWrap.xy ) ) % vSize;
+		if ( g_flShadowCacheSparse > 0 && g_tShadowCacheTiles.Load( int3( vTexel / 32, 0 ) ).y <= 0 )
+			discard;
 		return g_tShadowCache.Load( int3( vTexel, 0 ) );
 	}
 
