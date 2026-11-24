@@ -23,7 +23,7 @@ Mode( Forward );
     //  MainPass          GTAO at AO resolution. Writes visibility; the passes after it read depth from the chain's MIP 0
     //  DenoiseSpatial    edge-aware 3x3 À-Trous, run 1-3 times with dilated steps, stopping on depth and normal
     //  BilateralUpsample to full resolution when AO runs reduced: bilinear weights times each coarse texel's distance
-    //                    to the full resolution pixel's tangent plane
+    //                    to the full resolution pixel's tangent plane, 2x2 pixels a thread
     //
     // AO texel p stands for the full resolution texel AoToFullRes( p ): its depth and normal are that texel's, exactly,
     // so the main pass, the denoiser and the upsampler all agree where a coarse sample sits.
@@ -38,7 +38,15 @@ Mode( Forward );
     // Normals come from the ids' triangles where there are any, else from depth, not a G-buffer: geometric, without the
     // materials' normal maps. A world-space normal from the depth around a full resolution pixel. On each axis it takes
     // the neighbour nearer the pixel, so the normal doesn't bend across a silhouette onto whatever is behind it, and the
-    // one inside at the edges
+    // one inside at the edges. c is the pixel's world position, l r u d its neighbours'
+    float3 NormalFromNeighbours( int2 screenPos, int2 limit, float3 c, float3 l, float3 r, float3 u, float3 d )
+    {
+        const bool left = screenPos.x == limit.x || ( screenPos.x > 0 && dot( c - l, c - l ) < dot( r - c, r - c ) );
+        const bool up = screenPos.y == limit.y || ( screenPos.y > 0 && dot( c - u, c - u ) < dot( d - c, d - c ) );
+        const float3 n = cross( left ? c - l : r - c, up ? c - u : d - c );
+        return -n * rsqrt( max( dot( n, n ), 1e-20 ) );
+    }
+
     float3 ReconstructNormal( int2 screenPos )
     {
         const int2 limit = int2( g_vViewportSize.xy ) - 1;
@@ -56,11 +64,35 @@ Mode( Forward );
         const float3 r = Depth::GetWorldPosition( min( screenPos + int2( 1, 0 ), limit ) );
         const float3 u = Depth::GetWorldPosition( max( screenPos - int2( 0, 1 ), 0 ) );
         const float3 d = Depth::GetWorldPosition( min( screenPos + int2( 0, 1 ), limit ) );
+        return NormalFromNeighbours( screenPos, limit, c, l, r, u, d );
+    }
 
-        const bool left = screenPos.x == limit.x || ( screenPos.x > 0 && dot( c - l, c - l ) < dot( r - c, r - c ) );
-        const bool up = screenPos.y == limit.y || ( screenPos.y > 0 && dot( c - u, c - u ) < dot( d - c, d - c ) );
-        const float3 n = cross( left ? c - l : r - c, up ? c - u : d - c );
-        return -n * rsqrt( max( dot( n, n ), 1e-20 ) );
+    // ReconstructNormal for the 2x2 full resolution pixels from p0 (even, inside the viewport) when there are no ids
+    // normals: they share their neighbours' depth, 12 positions rather than 20. n0..n3 are ( 0, 0 ), ( 1, 0 ), ( 0, 1 ), ( 1, 1 ).
+    // Clamped as each pixel's own neighbours are, so every normal inside the viewport is ReconstructNormal's
+    void ReconstructNormalsQuad( int2 p0, out float3 n0, out float3 n1, out float3 n2, out float3 n3 )
+    {
+        const int2 limit = int2( g_vViewportSize.xy ) - 1;
+        const int x0 = max( p0.x - 1, 0 ), x1 = min( p0.x, limit.x ), x2 = min( p0.x + 1, limit.x ), x3 = min( p0.x + 2, limit.x );
+        const int y0 = max( p0.y - 1, 0 ), y1 = min( p0.y, limit.y ), y2 = min( p0.y + 1, limit.y ), y3 = min( p0.y + 2, limit.y );
+
+        const float3 p10 = Depth::GetWorldPosition( int2( x1, y0 ) );
+        const float3 p20 = Depth::GetWorldPosition( int2( x2, y0 ) );
+        const float3 p01 = Depth::GetWorldPosition( int2( x0, y1 ) );
+        const float3 p11 = Depth::GetWorldPosition( int2( x1, y1 ) );
+        const float3 p21 = Depth::GetWorldPosition( int2( x2, y1 ) );
+        const float3 p31 = Depth::GetWorldPosition( int2( x3, y1 ) );
+        const float3 p02 = Depth::GetWorldPosition( int2( x0, y2 ) );
+        const float3 p12 = Depth::GetWorldPosition( int2( x1, y2 ) );
+        const float3 p22 = Depth::GetWorldPosition( int2( x2, y2 ) );
+        const float3 p32 = Depth::GetWorldPosition( int2( x3, y2 ) );
+        const float3 p13 = Depth::GetWorldPosition( int2( x1, y3 ) );
+        const float3 p23 = Depth::GetWorldPosition( int2( x2, y3 ) );
+
+        n0 = NormalFromNeighbours( int2( x1, y1 ), limit, p11, p01, p21, p10, p12 );
+        n1 = NormalFromNeighbours( int2( x2, y1 ), limit, p21, p11, p31, p20, p22 );
+        n2 = NormalFromNeighbours( int2( x1, y2 ), limit, p12, p02, p22, p11, p13 );
+        n3 = NormalFromNeighbours( int2( x2, y2 ), limit, p22, p12, p32, p21, p23 );
     }
 
     // The normal of each AO texel's full resolution pixel, rebuilt once (D_PASS ReconstructNormals) and read by the main
@@ -598,7 +630,17 @@ Mode( Forward );
     //
     //-------------------------------------------------------------------------------------------------------------------
 
-    float BilateralUpsampleAO( int2 fullResPixel, GTAOConstants consts )
+    // The 2x2 coarse texels around a full resolution pixel: where they sit, their visibility, view depth and normals
+    struct CoarseTaps
+    {
+        float2 Center0;
+        float2 Center1;
+        float4 AO;
+        float4 Z;
+        float3 N0, N1, N2, N3;
+    };
+
+    CoarseTaps LoadCoarseTaps( int2 fullResPixel, GTAOConstants consts )
     {
         const float2 fullPerAo = FullResPerAo();
         const int2 aoMax = int2( consts.ViewportSize ) - 1;
@@ -608,39 +650,48 @@ Mode( Forward );
         // the same at odd and even scales
         const float2 aoCoord = ( (float2)fullResPixel + 1.0 ) / fullPerAo - 0.5;
         const int2 aoBase = clamp( int2( floor( aoCoord ) ), int2( 0, 0 ), max( aoMax - 1, int2( 0, 0 ) ) );
-        const float2 center0 = AoToFullResCenter( aoBase );
-        const float2 center1 = AoToFullResCenter( aoBase + 1 );
-        const float2 f = saturate( ( (float2)fullResPixel + 0.5 - center0 ) / max( center1 - center0, 1.0 ) );
+
+        CoarseTaps taps;
+        taps.Center0 = AoToFullResCenter( aoBase );
+        taps.Center1 = AoToFullResCenter( aoBase + 1 );
 
         float2 textureSize;
         g_tAOZ.GetDimensions( textureSize.x, textureSize.y );
         const float2 gatherUV = ( (float2)aoBase + 1.0 ) / textureSize;
 
         // Gathers return ( 0, 1 ), ( 1, 1 ), ( 1, 0 ), ( 0, 0 ); swizzled to ( 0, 0 ), ( 1, 0 ), ( 0, 1 ), ( 1, 1 )
-        const float4 tapAO = g_tAOZ.GatherRed( PointClamp, gatherUV ).wzxy;
-        const float4 tapZ = g_srcWorkingDepth.GatherRed( PointClamp, gatherUV ).wzxy;
+        taps.AO = g_tAOZ.GatherRed( PointClamp, gatherUV ).wzxy;
+        taps.Z = g_srcWorkingDepth.GatherRed( PointClamp, gatherUV ).wzxy;
+
+        taps.N0 = LoadCoarseNormal( aoBase );
+        taps.N1 = LoadCoarseNormal( min( aoBase + int2( 1, 0 ), aoMax ) );
+        taps.N2 = LoadCoarseNormal( min( aoBase + int2( 0, 1 ), aoMax ) );
+        taps.N3 = LoadCoarseNormal( min( aoBase + int2( 1, 1 ), aoMax ) );
+        return taps;
+    }
+
+    // A full resolution pixel's visibility from its coarse texels, given its own normal (hiN): bilinear weights times each
+    // coarse texel's distance to the pixel's tangent plane. The pixel's own depth and normal are the only full resolution reads
+    float BilateralUpsampleAO( int2 fullResPixel, float3 hiN, CoarseTaps taps, GTAOConstants consts )
+    {
+        const float2 f = saturate( ( (float2)fullResPixel + 0.5 - taps.Center0 ) / max( taps.Center1 - taps.Center0, 1.0 ) );
         const float4 bilinear = float4( ( 1 - f.x ) * ( 1 - f.y ), f.x * ( 1 - f.y ), ( 1 - f.x ) * f.y, f.x * f.y );
 
         const float hiZ = LoadViewDepth( fullResPixel, consts );
-        const float3 hiN = ReconstructNormal( fullResPixel );
         const float3 n = ToViewNormal( hiN );
 
         // A view position is ( A z, z ) with A linear in the pixel, so its distance along n is z ( A . n.xy + n.z ). The
         // taps are an AO pixel apart, which moves A by NDCToViewMul_x_PixelSize
         const float2 hiA = consts.NDCToViewMul * ( ( (float2)fullResPixel + 0.5 ) / g_vViewportSize.xy ) + consts.NDCToViewAdd;
-        const float2 baseA = consts.NDCToViewMul * ( center0 / g_vViewportSize.xy ) + consts.NDCToViewAdd;
+        const float2 baseA = consts.NDCToViewMul * ( taps.Center0 / g_vViewportSize.xy ) + consts.NDCToViewAdd;
         const float2 stepK = consts.NDCToViewMul_x_PixelSize * n.xy;
         const float baseK = dot( baseA, n.xy ) + n.z;
         const float4 tapK = baseK + float4( 0, stepK.x, stepK.y, stepK.x + stepK.y );
-        const float4 planeDistance = abs( tapZ * tapK - hiZ * ( dot( hiA, n.xy ) + n.z ) );
+        const float4 planeDistance = abs( taps.Z * tapK - hiZ * ( dot( hiA, n.xy ) + n.z ) );
 
         // A crease has no depth step and the tolerance grows with the AO scale, so the taps' own normals keep faces
         // apart as in the denoiser (dot^24)
-        const float4 nDot = saturate( float4(
-            dot( LoadCoarseNormal( aoBase ), hiN ),
-            dot( LoadCoarseNormal( min( aoBase + int2( 1, 0 ), aoMax ) ), hiN ),
-            dot( LoadCoarseNormal( min( aoBase + int2( 0, 1 ), aoMax ) ), hiN ),
-            dot( LoadCoarseNormal( min( aoBase + int2( 1, 1 ), aoMax ) ), hiN ) ) );
+        const float4 nDot = saturate( float4( dot( taps.N0, hiN ), dot( taps.N1, hiN ), dot( taps.N2, hiN ), dot( taps.N3, hiN ) ) );
         const float4 n2 = nDot * nDot;
         const float4 n4 = n2 * n2;
         const float4 n8 = n4 * n4;
@@ -652,11 +703,45 @@ Mode( Forward );
 
         // Every coarse texel is on another surface (thin features): take the closest rather than smear
         if ( sumW > 1e-4 )
-            return dot( w, tapAO ) / sumW;
+            return dot( w, taps.AO ) / sumW;
 
-        const float2 nearest01 = planeDistance.x < planeDistance.y ? float2( planeDistance.x, tapAO.x ) : float2( planeDistance.y, tapAO.y );
-        const float2 nearest23 = planeDistance.z < planeDistance.w ? float2( planeDistance.z, tapAO.z ) : float2( planeDistance.w, tapAO.w );
+        const float2 nearest01 = planeDistance.x < planeDistance.y ? float2( planeDistance.x, taps.AO.x ) : float2( planeDistance.y, taps.AO.y );
+        const float2 nearest23 = planeDistance.z < planeDistance.w ? float2( planeDistance.z, taps.AO.z ) : float2( planeDistance.w, taps.AO.w );
         return nearest01.x < nearest23.x ? nearest01.y : nearest23.y;
+    }
+
+    // The upsample of the 2x2 full resolution pixels from p0 (even). At exactly twice the AO resolution they have the same
+    // coarse texels (each AO texel stands for the first of its 2x2), and without ids normals they share the depth around
+    // them too, so those are fetched once for the four. Otherwise each pixel fetches its own
+    void BilateralUpsampleQuad( int2 p0, uint2 target, GTAOConstants consts )
+    {
+        const int2 offsets[4] = { int2( 0, 0 ), int2( 1, 0 ), int2( 0, 1 ), int2( 1, 1 ) };
+
+        [branch]
+        if ( all( AoViewportSize() * 2 == g_vViewportSize.xy ) && g_nIdsNormals == 0 )
+        {
+            const CoarseTaps taps = LoadCoarseTaps( p0, consts );
+            float3 n[4];
+            ReconstructNormalsQuad( p0, n[0], n[1], n[2], n[3] );
+
+            [unroll]
+            for ( int i = 0; i < 4; i++ )
+            {
+                const int2 p = p0 + offsets[i];
+                if ( InBounds( uint2( p ), g_vViewportSize.xy, target ) )
+                    g_outFullResAO[p] = BilateralUpsampleAO( p, n[i], taps, consts );
+            }
+        }
+        else
+        {
+            [unroll]
+            for ( int i = 0; i < 4; i++ )
+            {
+                const int2 p = p0 + offsets[i];
+                if ( InBounds( uint2( p ), g_vViewportSize.xy, target ) )
+                    g_outFullResAO[p] = BilateralUpsampleAO( p, ReconstructNormal( p ), LoadCoarseTaps( p, consts ), consts );
+            }
+        }
     }
 
     //-------------------------------------------------------------------------------------------------------------------
@@ -726,10 +811,9 @@ Mode( Forward );
         {
             uint2 target;
             g_outFullResAO.GetDimensions( target.x, target.y );
-            if ( !InBounds( vDispatchId, g_vViewportSize.xy, target ) )
-                return;
 
-            g_outFullResAO[vDispatchId] = BilateralUpsampleAO( int2( vDispatchId ), sGTAOConsts );
+            // A thread for every 2x2 full resolution pixels
+            BilateralUpsampleQuad( int2( vDispatchId ) * 2, target, sGTAOConsts );
         }
     }
 
