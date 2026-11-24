@@ -52,6 +52,13 @@ public abstract class GpuMaterial : IDisposable
 	public virtual bool? PlacesVertices => false;
 
 	/// <summary>
+	/// Whether it's known to draw nothing in depth-only passes (shadow maps, the depth prepass), so their draws of it are left
+	/// out rather than tried: a translucent surface that casts no shadow of its own (no translucent depth pass, once its
+	/// program has compiled) and has no <c>.shader</c> to draw it instead. Read as draws are recorded.
+	/// </summary>
+	public virtual bool DrawsNoDepth => false;
+
+	/// <summary>
 	/// Whether it's lit from a light probe when its object isn't lightmapped.
 	/// </summary>
 	public abstract bool NeedsLightProbe { get; }

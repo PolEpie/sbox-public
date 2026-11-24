@@ -62,7 +62,8 @@ internal sealed partial class MapWorld : IDisposable
 	/// <param name="bakedLighting">Light lightmapped draws from the map's lightmaps and the rest from its probe volumes.</param>
 	/// <param name="entities">Read the entity lump: lights, the sun, fog, the sky, probe volume boxes and the 3D skybox.</param>
 	/// <param name="gpuDriven">Keep static geometry in GPU-driven pages too, so aggregates can draw GPU-driven (<see cref="BackendDevice.GpuDriven"/>).</param>
-	public MapWorld( GpuDevice gpu, string folder, ContentFiles core, bool castShadows, bool aggregatesAsMeshes = false, bool bakedLighting = true, bool entities = true, bool gpuDriven = false )
+	/// <param name="made">Called with the backend as soon as it's made, before anything loads (to hear its errors from the start).</param>
+	public MapWorld( GpuDevice gpu, string folder, ContentFiles core, bool castShadows, bool aggregatesAsMeshes = false, bool bakedLighting = true, bool entities = true, bool gpuDriven = false, Action<BackendDevice> made = null )
 	{
 		this.gpu = gpu;
 		timer = Stopwatch.StartNew();
@@ -82,6 +83,7 @@ internal sealed partial class MapWorld : IDisposable
 		content.AddPackage( mapPackage );
 
 		Backend = new BackendDevice( gpu, content ) { GpuDrivenGeometry = gpuDriven };
+		made?.Invoke( Backend );
 
 		// -surface-convert blendable,...: those .shaders' materials drawn with the surfaces beside them (blendable.slang)
 		foreach ( var shader in (Args.String( "-surface-convert" ) ?? "").Split( ',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries ) )

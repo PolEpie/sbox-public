@@ -383,6 +383,9 @@ internal sealed partial class AggregateRenderFeature : RenderFeature
 	}
 
 	/// <summary>Whether any of the mesh draws reads the frame buffer copy (<see cref="MeshRenderFeature.ReadersTaken"/>).</summary>
+	/// <summary>Whether a prepared view's resident list draws a frame-buffer reader, which may be anywhere on its screen.</summary>
+	internal bool ResidentReadsFrameBuffer( ViewPass view ) => view.State<Batches>( this ).Resident is { ReadsFrameBuffer: true };
+
 	bool ReadsFrameBuffer( ViewPass view, ReadOnlySpan<MeshRenderFeature.DrawItem> meshDraws )
 	{
 		if ( meshDraws.IsEmpty || !Meshes.ReadersTaken( view ) ) return false;

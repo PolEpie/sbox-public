@@ -534,6 +534,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 		services.Passes.Error = message => Log.Warning( $"Borealis.Gpu: {message}" );
 		services.Passes.Info = message => Log.Info( message );
 		services.Surfaces.Info = message => Log.Info( message );
+		services.Surfaces.Error = message => Log.Warning( $"Borealis.Gpu: {message}" );
 		services.Warn = message => Log.Warning( message );
 		drawer = new ShaderDrawer( services );
 		context = new GraphicsContext( gpu, drawer, null ) { Warn = message => Log.Warning( message ) };

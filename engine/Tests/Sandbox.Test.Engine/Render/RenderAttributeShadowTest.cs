@@ -175,8 +175,12 @@ public class RenderAttributeShadowTest
 		CollectionAssert.AreEqual( new[] { 2.5f }, target.Managed.GetFloats( "Height" ) );
 		CollectionAssert.AreEqual( new[] { 1f, 2, 3, 4 }, System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>( (byte[])target.Managed.Get( "Block" ) ).ToArray() );
 
+		// The same value again changes nothing: readers keep what they made at the version
 		var version = target.Managed.Version;
 		target.Set( "Height", 2.5f );
+		Assert.AreEqual( version, target.Managed.Version, "setting the value it holds changes nothing" );
+
+		target.Set( "Height", 3.5f );
 		target.SetCombo( "D_GRID", 1 );
 		var changed = new System.Collections.Generic.List<uint>();
 		foreach ( var (token, _) in target.Managed.ValuesSince( version ) ) changed.Add( token );

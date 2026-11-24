@@ -310,6 +310,144 @@ public class GraphicsContextTests : GpuTest
 	}
 
 	/// <summary>
+	/// The GGX kernel's groups each write a 16x16 tile of a mip, so it dispatches a quarter of the threads the mip has
+	/// texels: every texel of every mip of an odd-sized texture is still written, a flat colour staying flat.
+	/// </summary>
+	[TestMethod]
+	public void GgxMipsCoverOddSizes()
+	{
+		const int Width = 37, Height = 23, Mips = 4;
+		var list = Device.BeginCommandList( QueueType.Graphics, "GGX mips" );
+		var context = new GraphicsContext( Device, drawer, list );
+		var texture = context.CreateTarget( Width, Height, Format.RGBA8Unorm, mips: Mips, name: "GGX mipped" );
+
+		list.Barrier( TextureBarrier.Transition( texture, ImageLayout.Undefined, ImageLayout.CopyDestination, PipelineStage.None, MemoryAccess.None, PipelineStage.Transfer, MemoryAccess.TransferWrite ) );
+		var readbacks = new BufferHandle[Mips];
+		for ( int mip = 0; mip < Mips; mip++ )
+		{
+			int w = Width >> mip, h = Height >> mip;
+			// Mip 0 flat grey, the rest red until the downsample writes them
+			var fill = new byte[w * h * 4];
+			for ( int i = 0; i < fill.Length; i += 4 )
+			{
+				if ( mip == 0 ) fill.AsSpan( i, 4 ).Fill( 128 );
+				else { fill[i] = 255; fill[i + 3] = 255; }
+			}
+			list.UpdateTexture( texture, fill, mip, 0, w, h );
+			readbacks[mip] = Device.CreateBuffer( new BufferInfo { Size = w * h * 4, Memory = MemoryLocation.Readback, Name = $"GGX mip {mip}" } );
+		}
+
+		context.Track( texture, ImageLayout.CopyDestination );
+		context.GenerateMips( texture, library.Load( "shaders/downsample_cs.shader" ), method: 6 );
+
+		list.Barrier( TextureBarrier.Transition( texture, ImageLayout.ShaderRead, ImageLayout.CopySource, PipelineStage.AllCommands, MemoryAccess.MemoryWrite, PipelineStage.Transfer, MemoryAccess.TransferRead ) );
+		for ( int mip = 1; mip < Mips; mip++ )
+		{
+			list.CopyTextureToBuffer( texture, mip, 0, readbacks[mip] );
+			list.Barrier( new BufferBarrier { Buffer = readbacks[mip], SourceStage = PipelineStage.Transfer, SourceAccess = MemoryAccess.TransferWrite, DestinationStage = PipelineStage.Host, DestinationAccess = MemoryAccess.HostRead } );
+		}
+		Device.Wait( Device.Submit( list ) );
+
+		for ( int mip = 1; mip < Mips; mip++ )
+		{
+			int w = Width >> mip, h = Height >> mip;
+			var pixels = Device.Map( readbacks[mip] ).ToArray();
+			for ( int y = 0; y < h; y++ )
+			{
+				for ( int x = 0; x < w; x++ )
+				{
+					var p = Pixel( pixels, w, x, y );
+					Assert.IsTrue( Math.Abs( p.R - 128 ) <= 2 && Math.Abs( p.G - 128 ) <= 2 && Math.Abs( p.B - 128 ) <= 2, $"mip {mip} ({w}x{h}) at {x},{y} is {p}, not the flat grey" );
+				}
+			}
+		}
+
+		foreach ( var readback in readbacks ) if ( readback.IsValid ) Device.Destroy( readback );
+		context.Release();
+	}
+
+	/// <summary>
+	/// <c>borealis_shadow_tiles_cs</c> reduces a cascade's depth to the min and max of each 32x32 texel tile, written at
+	/// the cascade's column of the tile atlas, then widens each over its eight neighbours: both match the depths on the CPU.
+	/// </summary>
+	[TestMethod]
+	public void ShadowTilesHoldEachTilesDepthRange()
+	{
+		var shader = library.Load( "shaders/borealis_shadow_tiles_cs.shader" );
+		if ( shader is null ) Assert.Inconclusive( "borealis_shadow_tiles_cs isn't compiled" );
+
+		const int Side = 4, Resolution = Side * 32;
+		var random = new Random( 7 );
+		var depths = new float[Resolution * Resolution];
+		for ( int i = 0; i < depths.Length; i++ ) depths[i] = 0.25f + 0.5f * (float)random.NextDouble();
+
+		var list = Device.BeginCommandList( QueueType.Graphics, "Shadow tiles" );
+		var context = new GraphicsContext( Device, drawer, list );
+		var depth = Device.CreateTexture( TextureInfo.RenderTarget( Resolution, Resolution, Format.D32Float, name: "Cascade" ) );
+		list.Barrier( TextureBarrier.Transition( depth, ImageLayout.Undefined, ImageLayout.CopyDestination, PipelineStage.None, MemoryAccess.None, PipelineStage.Transfer, MemoryAccess.TransferWrite ) );
+		list.UpdateTexture( depth, System.Runtime.InteropServices.MemoryMarshal.AsBytes( depths.AsSpan() ), 0, 0, Resolution, Resolution );
+		context.Track( depth, ImageLayout.CopyDestination );
+
+		// The second cascade's column of a two-cascade atlas
+		var raw = context.CreateTarget( Side * 2, Side, Format.RG32Float, name: "Raw tiles" );
+		var widened = context.CreateTarget( Side * 2, Side, Format.RG32Float, name: "Tiles" );
+		var attributes = new ShaderAttributes();
+		attributes.SetCombo( "D_WIDEN", 0 );
+		attributes.Set( "ShadowTileDepth", depth );
+		attributes.Set( "ShadowTilesOut", raw );
+		attributes.Set( "ShadowTiles", Side, Side, 0, 0 );
+		Assert.IsTrue( context.Dispatch( shader, attributes, Side * 8, Side * 8, 1 ) );
+
+		attributes = new ShaderAttributes();
+		attributes.SetCombo( "D_WIDEN", 1 );
+		attributes.Set( "ShadowTilesIn", raw );
+		attributes.Set( "ShadowTilesOut", widened );
+		attributes.Set( "ShadowTiles", Side, Side, 0, 0 );
+		Assert.IsTrue( context.Dispatch( shader, attributes, Side, Side, 1 ) );
+
+		var rawReadback = Device.CreateBuffer( new BufferInfo { Size = Side * 2 * Side * 8, Memory = MemoryLocation.Readback, Name = "Raw tiles" } );
+		var readback = Device.CreateBuffer( new BufferInfo { Size = Side * 2 * Side * 8, Memory = MemoryLocation.Readback, Name = "Tiles" } );
+		context.CopyToBuffer( raw, rawReadback );
+		context.CopyToBuffer( widened, readback );
+		context.Finish();
+		Device.Wait( Device.Submit( list ) );
+
+		var expected = new (float Min, float Max)[Side, Side];
+		for ( int ty = 0; ty < Side; ty++ )
+		{
+			for ( int tx = 0; tx < Side; tx++ )
+			{
+				var range = (Min: 1f, Max: 0f);
+				for ( int y = ty * 32; y < ty * 32 + 32; y++ )
+					for ( int x = tx * 32; x < tx * 32 + 32; x++ )
+						range = (Math.Min( range.Min, depths[y * Resolution + x] ), Math.Max( range.Max, depths[y * Resolution + x] ));
+				expected[tx, ty] = range;
+			}
+		}
+
+		var rawTiles = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>( Device.Map( rawReadback )[..(Side * 2 * Side * 8)] ).ToArray();
+		var tiles = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>( Device.Map( readback )[..(Side * 2 * Side * 8)] ).ToArray();
+		for ( int ty = 0; ty < Side; ty++ )
+		{
+			for ( int tx = 0; tx < Side; tx++ )
+			{
+				int at = (ty * Side * 2 + Side + tx) * 2;
+				Assert.AreEqual( expected[tx, ty], (rawTiles[at], rawTiles[at + 1]), $"tile {tx},{ty}'s own range" );
+
+				var wide = (Min: 1f, Max: 0f);
+				for ( int y = Math.Max( ty - 1, 0 ); y <= Math.Min( ty + 1, Side - 1 ); y++ )
+					for ( int x = Math.Max( tx - 1, 0 ); x <= Math.Min( tx + 1, Side - 1 ); x++ )
+						wide = (Math.Min( wide.Min, expected[x, y].Min ), Math.Max( wide.Max, expected[x, y].Max ));
+				Assert.AreEqual( wide, (tiles[at], tiles[at + 1]), $"tile {tx},{ty} over its neighbours" );
+			}
+		}
+
+		context.Release();
+		Device.Destroy( rawReadback );
+		Device.Destroy( readback );
+		Device.Destroy( depth );
+	}
+	/// <summary>
 	/// A frame grab copies what's drawn so far into a texture of its own, which a later draw samples while the target
 	/// keeps being drawn to: the copy has the target's pixels, and drawing after the grab doesn't reach it.
 	/// </summary>

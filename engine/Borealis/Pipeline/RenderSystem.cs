@@ -291,16 +291,22 @@ public sealed partial class RenderSystem : IDisposable
 	{
 		ArgumentNullException.ThrowIfNull( world );
 
+		// A render of this system's still waiting for its workers (a child view's, RenderSystem.Unfinished.cs) is finished
+		// before it renders again
+		if ( unfinished.World is not null ) Finish();
+
 		// Not while another render of the world is under way (a child view's): its frame reads them
 		if ( world.Rendering == 0 ) world.RefreshDrawnVolumes();
 		world.Rendering++;
+		var left = false;
 		try
 		{
-			Record( world, view, output, stages );
+			left = Record( world, view, output, stages );
 		}
 		finally
 		{
-			world.Rendering--;
+			// A render left to finish keeps its world rendering until it's finished
+			if ( !left ) world.Rendering--;
 		}
 	}
 
@@ -322,7 +328,11 @@ public sealed partial class RenderSystem : IDisposable
 		if ( shadows.Drawn.Length == 0 || recorder.SubmitThrough( recorder.LastSegmentOf<ShadowsReadyLayer>( frame ) ) ) shadows.Submitted();
 	}
 
-	void Record( RenderWorld world, RenderView view, in RenderOutput output, IRenderStages stages )
+	/// <summary>
+	/// Render a frame: true if it was left to finish after its workers (<see cref="LeavesUnfinished"/>), false if it's
+	/// submitted.
+	/// </summary>
+	bool Record( RenderWorld world, RenderView view, in RenderOutput output, IRenderStages stages )
 	{
 		using var rendererAllocations = Borealis.RendererAllocations.Measure();
 		ArgumentNullException.ThrowIfNull( world );
@@ -400,7 +410,8 @@ public sealed partial class RenderSystem : IDisposable
 		// stops setting mustn't keep its last value. Native makes a view's attributes again every frame.
 		context.Attributes?.Clear();
 		context.Begin();
-		var submitted = false;
+		var started = false;
+		var childrenFrom = UnfinishedOnThread.Count;
 		try
 		{
 			// Skinning can be recorded on a worker only when the frame's draws aren't on the setup context it must precede
@@ -420,17 +431,60 @@ public sealed partial class RenderSystem : IDisposable
 			}
 			stats.SetupMs = Lap();
 
-			// Frame attributes are read-only during recording.
-			var outer = recordingHere;
-			recordingHere = this;
-			try
+			// Frame attributes are read-only during recording. A child view rendered meanwhile (a draw's callback) may leave
+			// its workers recording until this one's done (RenderSystem.Unfinished.cs)
+			using ( Zones.Record.Start() )
 			{
-				using ( Zones.Record.Start() ) recorder.Record( ref stats );
+				var outer = recordingHere;
+				recordingHere = this;
+				try
+				{
+					recorder.BeginRecording();
+				}
+				finally
+				{
+					recordingHere = outer;
+				}
 			}
-			finally
-			{
-				recordingHere = outer;
-			}
+
+			started = true;
+		}
+		finally
+		{
+			if ( !started ) Abandon( skyFrame, childrenFrom );
+		}
+
+		unfinished = new Unfinished { World = world, View = view, Stats = stats, Start = start, Collected = collected, Prepared = prepared, AllocStart = allocStart, AllocCollected = allocCollected, AllocPrepared = allocPrepared, Plan = plan, SkyFrame = skyFrame, Window = output.Window, ChildrenFrom = childrenFrom };
+		if ( LeavesUnfinished( output ) )
+		{
+			UnfinishedOnThread.Add( this );
+			return true;
+		}
+
+		Finish();
+		return false;
+	}
+
+	/// <summary>
+	/// The rest of a frame <see cref="Record"/> began: wait for its workers, finish the child views rendered meanwhile, submit,
+	/// and count.
+	/// </summary>
+	void Finish()
+	{
+		using var rendererAllocations = Borealis.RendererAllocations.Measure();
+		var (world, view, stats, start, collected, prepared, skyFrame, plan) = (unfinished.World, unfinished.View, unfinished.Stats, unfinished.Start, unfinished.Collected, unfinished.Prepared, unfinished.SkyFrame, unfinished.Plan);
+		var (allocStart, allocCollected, allocPrepared, window, childrenFrom) = (unfinished.AllocStart, unfinished.AllocCollected, unfinished.AllocPrepared, unfinished.Window, unfinished.ChildrenFrom);
+		unfinished = default;
+		var left = UnfinishedOnThread.IndexOf( this );
+		if ( left >= 0 ) UnfinishedOnThread.RemoveAt( left );
+		if ( left >= 0 ) world.Rendering--;
+
+		var host = RenderHost.Current;
+		var submitted = false;
+		try
+		{
+			using ( Zones.Record.Start() ) recorder.EndRecording( ref stats );
+			FinishChildren( childrenFrom );
 			if ( plan is not null ) recorder.FillTimes( plan );
 			RenderStats.AddCounts( ref stats, frame.Recorded );
 			if ( skyFrame is not null )
@@ -446,7 +500,7 @@ public sealed partial class RenderSystem : IDisposable
 			var handedOver = Stopwatch.GetTimestamp();
 
 			// When the window's frame was handed over, so the dev tools can place its plan on their timeline
-			var tag = output.Window ? host.Submitting( handedOver, view ) : 0;
+			var tag = window ? host.Submitting( handedOver, view ) : 0;
 			if ( plan is not null ) { plan.SubmitTicks = handedOver; plan.SubmitTag = tag; plan.View = view; }
 			recorder.Submit();
 			submitted = true;
@@ -458,23 +512,8 @@ public sealed partial class RenderSystem : IDisposable
 		}
 		finally
 		{
-			if ( !submitted )
-			{
-				EndSetupWork( false );
-				skybox?.EndSetupWork( false );
-				recorder.End();
-				context.End();
-
-				// The cache mustn't claim maps that were never drawn
-				shadows.Abandon();
-			}
-
-			recorder.Clear();
-			frame.End();
-			skyFrame?.End();
-			Transients.EndRender();
-			skybox?.Transients.EndRender();
-			RenderHost.Current.Device.EndSubmitting();
+			if ( !submitted ) Abandon( skyFrame, childrenFrom );
+			else EndFrame( skyFrame );
 		}
 		stats.SubmitMs = Lap();
 
@@ -509,11 +548,44 @@ public sealed partial class RenderSystem : IDisposable
 		host.Rendered( stats );
 
 		// Copied, so the frames this system renders into textures don't change what the host shows
-		if ( frame.DebugViews != DebugViews.None && output.Window )
+		if ( frame.DebugViews != DebugViews.None && window )
 		{
 			DebugReport.CopyTo( publishedReport );
 			host.PublishDebugViews( publishedReport );
 		}
+
+		RunAfterSubmit();
+	}
+
+	/// <summary>A frame that failed: what it recorded is dropped, child views rendered meanwhile are finished.</summary>
+	void Abandon( RenderFrame skyFrame, int childrenFrom )
+	{
+		try
+		{
+			FinishChildren( childrenFrom );
+		}
+		finally
+		{
+			EndSetupWork( false );
+			skybox?.EndSetupWork( false );
+			recorder.End();
+			context.End();
+
+			// The cache mustn't claim maps that were never drawn
+			shadows.Abandon();
+			EndFrame( skyFrame );
+			afterSubmit.Clear();
+		}
+	}
+
+	void EndFrame( RenderFrame skyFrame )
+	{
+		recorder.Clear();
+		frame.End();
+		skyFrame?.End();
+		Transients.EndRender();
+		skybox?.Transients.EndRender();
+		RenderHost.Current.Device.EndSubmitting();
 	}
 
 	/// <summary>
@@ -758,6 +830,7 @@ public sealed partial class RenderSystem : IDisposable
 	}
 
 	GpuTexture frameBufferCopy, otherFrameBufferCopy;
+	bool frameBufferCopyNew;
 
 	/// <summary>
 	/// Persistent mipmapped RGBA16F copy (<c>FindOrCreateFrameBufferScratchTexture</c>).
@@ -783,6 +856,7 @@ public sealed partial class RenderSystem : IDisposable
 		var device = RenderHost.Current.Device;
 		frameBufferCopy = device.CreateTexture( desc, "Borealis frame buffer copy" );
 		device.Clear( frameBufferCopy, Color.Transparent );
+		frameBufferCopyNew = true;
 		return frameBufferCopy;
 	}
 
@@ -873,6 +947,11 @@ public sealed partial class RenderSystem : IDisposable
 		// Here on the main thread: the translucent layer's parts copy into it on their workers
 		frame.FrameBufferCopy = ReadsFrameBuffer( MeshRenderFeature.FrameBufferCopyingLists ) ? FrameBufferCopy( view.Viewport ) : null;
 
+		// A 3D skybox's glass reads the copy where it is (it doesn't refract there), so the copy need only be made there; a
+		// new copy is made whole, so what's around that is a frame's and not the cleared texture's
+		frame.FrameBufferReadArea = frame.FrameBufferCopy is null || !isSkybox || frameBufferCopyNew || aggregates.ResidentReadsFrameBuffer( mainPass ) ? FrameBufferReadArea.All : meshes.ReadArea( mainPass );
+		frameBufferCopyNew = false;
+
 		// Skyboxes use their own system and view.
 		using ( Zones.SkyboxPrepare.Start() ) PrepareSkybox( world, view );
 	}
@@ -896,6 +975,7 @@ public sealed partial class RenderSystem : IDisposable
 	/// </summary>
 	public void Dispose()
 	{
+		if ( unfinished.World is not null ) Finish();
 		RenderHost.Current?.Device?.ReleaseView( mainPass );
 		Transients.Dispose();
 		skybox?.Dispose();

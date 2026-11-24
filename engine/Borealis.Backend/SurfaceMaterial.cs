@@ -307,6 +307,14 @@ public abstract class SurfaceMaterial : GpuMaterial, IStreamDependent
 	public override bool? PlacesVertices => Program is { Stale: false } program ? program.PlacesVertices : null;
 
 	/// <summary>
+	/// Once its program has compiled: drawing translucent (or without depth writes) with no translucent depth pass in its
+	/// program (the surface draw has nothing to draw its depth with) and no <c>.shader</c> to fall
+	/// back to.
+	/// </summary>
+	public override bool DrawsNoDepth => fallback is null && Program is { Stale: false } program && (RenderState.Translucent || !RenderState.DepthWrite)
+		&& program.Pass( BackendContext.DepthTranslucentPass ) is null;
+
+	/// <summary>
 	/// Always: a surface lights through the engine's lighting, which reads a probe volume's baked light and occlusion
 	/// when its object isn't lightmapped, as today's lit shaders declare (<c>NeedsLightProbe</c>,
 	/// <c>UsesBakedLightingFromProbe</c>).

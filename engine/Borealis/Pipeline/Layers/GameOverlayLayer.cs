@@ -1,8 +1,10 @@
 namespace Borealis;
 
 /// <summary>
-/// Redraws unfaded opaque viewmodels at the front of the depth range (<c>CRenderingPipelineStandard::AddLayersToView</c>).
-/// Runs before <c>AfterTransparent</c> so depth of field reads their remapped depth.
+/// Draws unfaded opaque viewmodels at the front of the depth range (<c>CRenderingPipelineStandard::AddLayersToView</c>), where
+/// they're shaded: the world's forward pass leaves them out (<see cref="OpaqueLayer"/>), and <see cref="GameOverlayDepthLayer"/>
+/// gives the range their depth first, so each pixel shades once. Runs before <c>AfterTransparent</c> so depth of field reads
+/// their remapped depth.
 /// </summary>
 internal class GameOverlayLayer : MeshLayer
 {
@@ -33,6 +35,28 @@ internal class GameOverlayLayer : MeshLayer
 	public override void Begin( RenderFrame frame, GpuContext rc, ViewPass view, bool start )
 	{
 		frame.BeginPass( rc, frame.Target( rc, color: true, final: false ) with { MinZ = 1 - DepthRange, MaxZ = 1 } );
+	}
+}
+
+/// <summary>
+/// The opaque overlays' depth alone, in the overlay's range, before <see cref="GameOverlayLayer"/> draws them in colour
+/// (depth tested greater-or-equal), so its colour shades each pixel once: a viewmodel overlaps itself, and nothing else gives
+/// that range depth first.
+/// </summary>
+internal sealed class GameOverlayDepthLayer : GameOverlayLayer
+{
+	static readonly StringToken DepthMode = new( "Depth" );
+
+	public GameOverlayDepthLayer() : base( "GameOverlay Depth", MeshRuns.OverlayOpaque, MeshLayerType.DepthPrepass )
+	{
+		ShaderMode = DepthMode;
+		Depth = true;
+		TakesToolsPass = false;
+	}
+
+	public override void Begin( RenderFrame frame, GpuContext rc, ViewPass view, bool start )
+	{
+		frame.BeginPass( rc, frame.Target( rc, color: false, final: false ) with { MinZ = 1 - DepthRange, MaxZ = 1 } );
 	}
 }
 

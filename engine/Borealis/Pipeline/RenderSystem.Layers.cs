@@ -71,6 +71,7 @@ public sealed partial class RenderSystem
 			new ToolsUtilLayer( translucent: true ),
 
 			// Depth effects need opaque viewmodel depth; translucent viewmodels draw afterward.
+			new GameOverlayDepthLayer(),
 			new GameOverlayLayer(),
 			new StageLayer( RenderStage.AfterTransparent ),
 			new StageLayer( RenderStage.AfterViewmodel ),

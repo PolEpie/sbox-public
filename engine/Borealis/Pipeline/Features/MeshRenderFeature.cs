@@ -140,6 +140,9 @@ internal sealed partial class MeshRenderFeature : RenderFeature
 		/// </summary>
 		public MeshRuns FrameBufferReads;
 
+		/// <summary>Where the readers of <see cref="FrameBufferReads"/> are on the view's screen.</summary>
+		public FrameBufferReadArea ReadArea = FrameBufferReadArea.Empty;
+
 		/// <summary>
 		/// Whether anything the view draws needs a stencil in its depth (<see cref="GpuMaterial.NeedsStencil"/>).
 		/// </summary>
@@ -189,6 +192,7 @@ internal sealed partial class MeshRenderFeature : RenderFeature
 			Custom = 0;
 			Callbacks = 0;
 			FrameBufferReads = 0;
+			ReadArea = FrameBufferReadArea.Empty;
 			Stencil = false;
 		}
 	}
@@ -503,6 +507,8 @@ internal sealed partial class MeshRenderFeature : RenderFeature
 		var kept = KeptFor( pass );
 		var opaque = buckets[0];
 		MeshRuns frameBufferReads = 0;
+		var readArea = FrameBufferReadArea.Empty;
+		var worldToProjection = pass.View.WorldToProjection;
 		MeshRuns callbacks = 0;
 		var stencil = false;
 		for ( int k = 0; k < visibleSpan.Length; k++ )
@@ -523,7 +529,13 @@ internal sealed partial class MeshRenderFeature : RenderFeature
 				var customDistance = (customRuns & DistanceSortedLists) != 0 ? TranslucentSortDistance( centers[index], extents[index], sortCamera ) : 0;
 				AddToLists( customRuns, k, index, c.Bin.Key, customDistance, !custom.IsOpaque, custom.RenderOrder );
 				layers.Custom |= customRuns;
-				if ( custom.WantsFrameBufferCopy && !pass.IsShadow ) layers.FrameBufferReads |= customRuns & FrameBufferCopyingLists;
+				if ( custom.WantsFrameBufferCopy && !pass.IsShadow && (customRuns & FrameBufferCopyingLists) != 0 )
+				{
+					// Its shader may read anywhere
+					layers.FrameBufferReads |= customRuns & FrameBufferCopyingLists;
+					readArea = FrameBufferReadArea.All;
+				}
+
 				if ( custom.NeedsStencil && !pass.IsShadow ) layers.Stencil = true;
 				continue;
 			}
@@ -538,6 +550,7 @@ internal sealed partial class MeshRenderFeature : RenderFeature
 			}
 
 			frameBufferReads |= c.FrameBufferReads;
+			if ( c.FrameBufferReads != 0 ) readArea.Add( centers[index], extents[index], worldToProjection );
 			stencil |= c.Stencil;
 			if ( c.Callbacks ) callbacks |= c.Runs;
 
@@ -547,6 +560,7 @@ internal sealed partial class MeshRenderFeature : RenderFeature
 		}
 
 		layers.FrameBufferReads |= frameBufferReads;
+		layers.ReadArea.Union( readArea );
 		layers.Callbacks |= callbacks;
 		layers.Stencil |= stencil;
 
@@ -1362,6 +1376,9 @@ internal sealed partial class MeshRenderFeature : RenderFeature
 
 	internal override bool ReadsFrameBuffer( ViewPass view, MeshRuns runs ) => (view.State<RunLists>( this ).FrameBufferReads & runs) != 0;
 
+	/// <summary>Where a prepared view's frame-buffer readers are on its screen.</summary>
+	internal FrameBufferReadArea ReadArea( ViewPass view ) => view.State<RunLists>( this ).ReadArea;
+
 	/// <summary>
 	/// The first run that copies the frame where <see cref="Draw"/> draws it (a reader drawn in colour), in its run order.
 	/// </summary>
@@ -1539,6 +1556,10 @@ internal sealed partial class MeshRenderFeature : RenderFeature
 			// Shared attributes preserve material binds between draws.
 
 			var material = MaterialFor( run, draw, depth, layer.ForceDepthFastPath, out var stripPixelShader );
+
+			// A translucent surface that casts no shadow has nothing to draw in a depth-only pass
+			if ( depth && material is { DrawsNoDepth: true } ) continue;
+
 			var probe = depth || run.Probe is null || !RenderMesh.NeedsLightProbe( material ) ? null : run.Probe;
 			context.SetObjectAttributes( run.Attributes, draw.Lightmapped ? (depth ? null : run.Lightmap) : probe );
 

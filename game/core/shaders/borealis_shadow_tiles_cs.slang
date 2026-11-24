@@ -57,42 +57,44 @@ Mode( Default );
 			g_tTilesOut[ int2( nFirst + vTile.x, vTile.y ) ] = vMinMax;
 		}
 	#else
-		groupshared float2 s_vMinMax[ 64 ];
+		SamplerState g_sPoint < Filter( POINT ); AddressU( CLAMP ); AddressV( CLAMP ); >;
 
-		// A group per tile, each thread 4x4 of its texels
+		// The min and max of each wave, for the first lane to fold together
+		groupshared float2 s_vWaveMinMax[ 64 ];
+
+		// A group per tile. Each thread gathers four 2x2 quads, one from each 16x16 quarter of the tile, so each gather
+		// instruction reads a contiguous block across the group rather than texels four apart
 		[numthreads( 8, 8, 1 )]
 		[shader( "compute" )] void MainCs( uint3 vGroupId : SV_GroupID, uint3 vGroupThreadId : SV_GroupThreadID, uint nIndex : SV_GroupIndex )
 		{
-			int2 vBase = int2( vGroupId.xy ) * 32 + int2( vGroupThreadId.xy ) * 4;
+			uint nWidth, nHeight;
+			g_tShadowDepth.GetDimensions( nWidth, nHeight );
+			float2 vInvSize = 1.0 / float2( nWidth, nHeight );
+			int2 vBase = int2( vGroupId.xy ) * 32 + int2( vGroupThreadId.xy ) * 2;
 
 			float2 vMinMax = float2( 1, 0 );
 			[unroll]
-			for ( int y = 0; y < 4; y++ )
+			for ( int q = 0; q < 4; q++ )
 			{
-				[unroll]
-				for ( int x = 0; x < 4; x++ )
-				{
-					float d = g_tShadowDepth.Load( int3( vBase + int2( x, y ), 0 ) );
-					vMinMax = float2( min( vMinMax.x, d ), max( vMinMax.y, d ) );
-				}
+				// The quad's shared corner: a gather there returns its four texels
+				int2 vQuad = vBase + int2( q & 1, q >> 1 ) * 16;
+				float4 d = g_tShadowDepth.GatherRed( g_sPoint, float2( vQuad + 1 ) * vInvSize );
+				vMinMax = float2( min( vMinMax.x, min( min( d.x, d.y ), min( d.z, d.w ) ) ), max( vMinMax.y, max( max( d.x, d.y ), max( d.z, d.w ) ) ) );
 			}
 
-			s_vMinMax[ nIndex ] = vMinMax;
+			vMinMax = float2( WaveActiveMin( vMinMax.x ), WaveActiveMax( vMinMax.y ) );
+			uint nLanes = WaveGetLaneCount();
+			if ( WaveIsFirstLane() )
+				s_vWaveMinMax[ nIndex / nLanes ] = vMinMax;
 			GroupMemoryBarrierWithGroupSync();
 
-			[unroll]
-			for ( uint s = 32; s > 0; s >>= 1 )
-			{
-				if ( nIndex < s )
-				{
-					float2 o = s_vMinMax[ nIndex + s ];
-					s_vMinMax[ nIndex ] = float2( min( s_vMinMax[ nIndex ].x, o.x ), max( s_vMinMax[ nIndex ].y, o.y ) );
-				}
-				GroupMemoryBarrierWithGroupSync();
-			}
-
 			if ( nIndex == 0 )
-				g_tTilesOut[ int2( (int)g_vShadowTiles.x + (int)vGroupId.x, vGroupId.y ) ] = s_vMinMax[ 0 ];
+			{
+				uint nWaves = ( 64 + nLanes - 1 ) / nLanes;
+				for ( uint w = 1; w < nWaves; w++ )
+					vMinMax = float2( min( vMinMax.x, s_vWaveMinMax[ w ].x ), max( vMinMax.y, s_vWaveMinMax[ w ].y ) );
+				g_tTilesOut[ int2( (int)g_vShadowTiles.x + (int)vGroupId.x, vGroupId.y ) ] = vMinMax;
+			}
 		}
 	#endif
 #endif // CS

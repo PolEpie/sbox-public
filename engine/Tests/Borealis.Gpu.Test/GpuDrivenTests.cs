@@ -2070,6 +2070,192 @@ public class GpuDrivenTests : GpuTest
 	}
 
 	/// <summary>
+	/// <see cref="GlassDrawsGpuDrivenInOrder"/>'s scene: opaque boxes behind; rows of translucent red boxes, clear glass
+	/// (refraction 1.05), tinted blurred glass (1.02, blur 0.6) and red again in front of them, back to front, offset to show
+	/// what's behind; and its view.
+	/// </summary>
+	internal static (RenderWorld World, RenderView View) GlassScene( BackendDevice backend )
+	{
+		const string glassPath = "materials/sbox/glass/glass_a.vmat";
+		const string translucentPath = "materials/dev/primary_white_trans.vmat";
+		if ( backend.Content.Find( glassPath ) is null || backend.Content.Find( translucentPath ) is null ) Assert.Inconclusive( $"{glassPath} or {translucentPath} isn't built" );
+		var clear = backend.LoadMaterial( glassPath, new Dictionary<string, float[]> { ["g_flRefractionStrength"] = [1.05f] }, "Glass clear" );
+		var tinted = backend.LoadMaterial( glassPath, new Dictionary<string, float[]> { ["g_flRefractionStrength"] = [1.02f], ["g_flBlurAmount"] = [0.6f], ["g_flTintColor"] = [0.6f, 0.9f, 0.7f] }, "Glass tinted" );
+		Assert.IsTrue( clear is SurfaceMaterial { IsTranslucent: true } glass && glass.Attribute( "bWantsFBCopyTexture", false ), $"{glassPath} draws translucent from the frame buffer copy" );
+		var red = backend.LoadMaterial( translucentPath, new Dictionary<string, float[]> { ["g_vColorTint"] = [0.9f, 0.2f, 0.1f, 0] }, "Glass test red" );
+
+		var world = new RenderWorld();
+		world.Lighting.SunDirection = new Vector3( 0.5f, 0.35f, -0.8f ).Normal;
+		world.Lighting.SunColor = new Color( 1.25f, 1.15f, 1.0f );
+		world.Lighting.AmbientColor = new Color( 0.12f, 0.15f, 0.2f, 1 );
+		world.Lighting.SunShadowCascades = 0;
+
+		var (far, _) = Boxes( backend, backend.CreateMaterial( "Glass test far", new Color( 0.8f, 0.6f, 0.4f ) ), 150 );
+		world.Add( new MeshObject( far, Transform.Zero ) );
+		foreach ( var (material, y) in new[] { (red, 90f), (clear, 30f), (tinted, -30f), (red, -90f) } )
+		{
+			var (boxes, _) = Boxes( backend, backend.CreateMaterial( "Glass test boxes", Color.White ), y );
+			var reads = material != red;
+			world.Add( new MeshObject( boxes, new Transform( new Vector3( 20, 0, 0 ) ) ) { MaterialOverride = material, Tint = new Color( 1, 1, 1, reads ? 1 : 0.5f ), WantsFrameBufferCopy = reads } );
+		}
+
+		var view = new RenderView { Name = "Glass", FieldOfView = 70, ZNear = 4, ZFar = 4000, ClearColor = new Color( 0.3f, 0.4f, 0.5f ), Viewport = new Rect( 0, 0, Width, Height ) };
+		view.Position = new Vector3( -500, -300, 300 );
+		view.Rotation = Rotation.LookAt( -view.Position.WithZ( view.Position.z - 40 ) );
+		return (world, view);
+	}
+
+	/// <summary>
+	/// Four frames of <paramref name="world"/> in a renderer of its own (so from a new, cleared frame copy), the last's
+	/// pixels returned and counted in <paramref name="census"/>.
+	/// </summary>
+	byte[] GlassFrames( BackendDevice backend, RenderWorld world, RenderView view, ViewTarget target, bool gpuDriven, DrawCensus census )
+	{
+		using var system = new RenderSystem { ParallelRecording = false };
+		backend.GpuDriven = gpuDriven;
+		byte[] pixels = null;
+		for ( int i = 0; i < 4; i++ )
+		{
+			backend.BeginFrame();
+			RenderHost.Current.NextFrame();
+			backend.Census = i == 3 ? census : null;
+			try
+			{
+				system.Render( world, view, target );
+			}
+			finally
+			{
+				backend.Census = null;
+			}
+
+			Device.WaitIdle();
+			var color = target.Samples > 1 ? target.Resolved : target.Color;
+			var (texture, layout) = BackendDevice.Unwrap( color );
+			pixels = ReadBack( texture, layout );
+			BackendDevice.SetLayout( color, ImageLayout.CopySource );
+		}
+
+		return pixels;
+	}
+
+	/// <summary>
+	/// The frame buffer copy made with its depth-aware mask in one pass (<see cref="BackendDevice.FrameBufferCopyMasked"/>)
+	/// holds what a transfer copy (or a resolve) and then the mask over it hold: the glass scene's frames are the same pixels
+	/// either way, classic and GPU-driven, and multisampled.
+	/// </summary>
+	[TestMethod]
+	public void GlassFrameCopyMadeWithItsMaskInOnePass()
+	{
+		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDriven = false, GpuDrivenMeshes = true };
+		var (world, view) = GlassScene( backend );
+
+		var previousHost = RenderHost.Current;
+		RenderHost.Current = new BackendRenderHost( backend );
+		try
+		{
+			// Multisampled, the pass resolves the frame where it keeps it
+			using var single = ViewTarget.Create( new Vector2Int( Width, Height ), 1, TextureFormat.RGBA16161616F, TextureFormat.D32FS8, "Glass frame copy test" );
+			using var multi = ViewTarget.Create( new Vector2Int( Width, Height ), 4, TextureFormat.RGBA16161616F, TextureFormat.D32FS8, "Glass frame copy test (4x)" );
+			foreach ( var (target, gpuDriven) in new[] { (single, false), (single, true), (multi, false) } )
+			{
+				var samples = target.Samples;
+				backend.FrameBufferCopyMasked = false;
+				var apart = GlassFrames( backend, world, view, target, gpuDriven, new DrawCensus() );
+				backend.FrameBufferCopyMasked = true;
+				var census = new DrawCensus();
+				var together = GlassFrames( backend, world, view, target, gpuDriven, census );
+
+				TestContext.WriteLine( $"{samples}x, GPU-driven {gpuDriven}: {Differences( apart, together )}" );
+				Assert.AreEqual( 0, Device.ValidationErrors, "no validation errors" );
+				Assert.IsTrue( census.Draws.Any( d => d.Pass.EndsWith( "Translucent Forward", StringComparison.Ordinal ) ), "the glass draws" );
+				Assert.AreEqual( 0, Different( apart, together ), $"{samples}x, GPU-driven {gpuDriven}: the same pixels" );
+			}
+		}
+		finally
+		{
+			Device.WaitIdle();
+			RenderHost.Current = previousHost;
+		}
+	}
+
+	/// <summary>
+	/// The frame buffer copy's mips made a 16x16 tile a group (<see cref="BackendDevice.FrameBufferCopyTiledMips"/>) are
+	/// downsample_cs's, a texel a thread: the glass scene's frames, whose tinted glass reads them blurred, are the same pixels
+	/// either way.
+	/// </summary>
+	[TestMethod]
+	public void GlassFrameCopyMipsMadeInTiles()
+	{
+		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDriven = false, GpuDrivenMeshes = true };
+		var (world, view) = GlassScene( backend );
+
+		var previousHost = RenderHost.Current;
+		RenderHost.Current = new BackendRenderHost( backend );
+		try
+		{
+			using var target = ViewTarget.Create( new Vector2Int( Width, Height ), 1, TextureFormat.RGBA16161616F, TextureFormat.D32FS8, "Glass frame copy mips test" );
+			backend.FrameBufferCopyTiledMips = false;
+			var texels = GlassFrames( backend, world, view, target, false, new DrawCensus() );
+			backend.FrameBufferCopyTiledMips = true;
+			var tiles = GlassFrames( backend, world, view, target, false, new DrawCensus() );
+
+			TestContext.WriteLine( Differences( texels, tiles ) );
+			Assert.AreEqual( 0, Device.ValidationErrors, "no validation errors" );
+			Assert.AreEqual( 0, Different( texels, tiles ), "the same pixels" );
+		}
+		finally
+		{
+			Device.WaitIdle();
+			RenderHost.Current = previousHost;
+		}
+	}
+
+	/// <summary>
+	/// A 3D skybox's frame buffer copy is made, with its mask, only around the glass that reads it, which reads where it is
+	/// there (<see cref="BackendDevice.FrameBufferCopyRegions"/>): blurred and clear glass small in a skybox, in front of its
+	/// opaque boxes, and at the screen's edge, are the same pixels as with the copy made whole, multisampled too.
+	/// </summary>
+	[TestMethod]
+	public void SkyboxGlassFrameCopyMadeAroundItsReaders()
+	{
+		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDriven = false, GpuDrivenMeshes = true };
+		var (glassWorld, _) = GlassScene( backend );
+
+		var previousHost = RenderHost.Current;
+		RenderHost.Current = new BackendRenderHost( backend );
+		try
+		{
+			// The glass scene, far off in the skybox: what reads the copy is a small part of the screen
+			var world = new RenderWorld { Skybox3D = new Skybox3D( glassWorld ) { Scale = 16 } };
+			world.Lighting.SunShadowCascades = 0;
+			var view = new RenderView { Name = "Skybox glass", FieldOfView = 70, ZNear = 4, ZFar = 40000, ClearColor = new Color( 0.3f, 0.4f, 0.5f ), Viewport = new Rect( 0, 0, Width, Height ) };
+			view.Position = new Vector3( -16 * 2500, -16 * 300, 16 * 300 );
+			view.Rotation = Rotation.LookAt( -view.Position.WithZ( view.Position.z - 16 * 40 ) );
+
+			using var single = ViewTarget.Create( new Vector2Int( Width, Height ), 1, TextureFormat.RGBA16161616F, TextureFormat.D32FS8, "Skybox glass test" );
+			using var multi = ViewTarget.Create( new Vector2Int( Width, Height ), 4, TextureFormat.RGBA16161616F, TextureFormat.D32FS8, "Skybox glass test (4x)" );
+			foreach ( var target in new[] { single, multi } )
+			{
+				backend.FrameBufferCopyRegions = false;
+				var whole = GlassFrames( backend, world, view, target, false, new DrawCensus() );
+				backend.FrameBufferCopyRegions = true;
+				var census = new DrawCensus();
+				var around = GlassFrames( backend, world, view, target, false, census );
+
+				TestContext.WriteLine( $"{target.Samples}x: {Differences( whole, around )}" );
+				Assert.AreEqual( 0, Device.ValidationErrors, "no validation errors" );
+				Assert.IsTrue( census.Draws.Any( d => d.Pass.Contains( "Translucent Forward", StringComparison.Ordinal ) && d.Material is "Glass clear" or "Glass tinted" ), "the skybox's glass draws" );
+				Assert.AreEqual( 0, Different( whole, around ), $"{target.Samples}x: the same pixels" );
+			}
+		}
+		finally
+		{
+			Device.WaitIdle();
+			RenderHost.Current = previousHost;
+		}
+	}
+
+	/// <summary>
 	/// Refractive glass (glass.shader's surface, reading the frame buffer copy) draws GPU-driven in the translucent list's
 	/// order, with the frame copied once, at the first glass: between rows of translucent boxes that don't read it and in
 	/// front of opaque ones, two rows of glass, refracting, blurred and tinted, shade exactly as the classic path shades them,
@@ -2082,73 +2268,17 @@ public class GpuDrivenTests : GpuTest
 	{
 		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDriven = false, GpuDrivenMeshes = true };
 		RequireGpuDrivenDepth( backend );
-		const string glassPath = "materials/sbox/glass/glass_a.vmat";
-		const string translucentPath = "materials/dev/primary_white_trans.vmat";
-		if ( backend.Content.Find( glassPath ) is null || backend.Content.Find( translucentPath ) is null ) Assert.Inconclusive( $"{glassPath} or {translucentPath} isn't built" );
-		var clear = backend.LoadMaterial( glassPath, new Dictionary<string, float[]> { ["g_flRefractionStrength"] = [1.05f] }, "Glass clear" );
-		var tinted = backend.LoadMaterial( glassPath, new Dictionary<string, float[]> { ["g_flRefractionStrength"] = [1.02f], ["g_flBlurAmount"] = [0.6f], ["g_flTintColor"] = [0.6f, 0.9f, 0.7f] }, "Glass tinted" );
-		Assert.IsTrue( clear is SurfaceMaterial { IsTranslucent: true } glass && glass.Attribute( "bWantsFBCopyTexture", false ), $"{glassPath} draws translucent from the frame buffer copy" );
-		var red = backend.LoadMaterial( translucentPath, new Dictionary<string, float[]> { ["g_vColorTint"] = [0.9f, 0.2f, 0.1f, 0] }, "Glass test red" );
+		var (world, view) = GlassScene( backend );
 
 		var previousHost = RenderHost.Current;
 		RenderHost.Current = new BackendRenderHost( backend );
 		try
 		{
 			using var target = ViewTarget.Create( new Vector2Int( Width, Height ), 1, TextureFormat.RGBA16161616F, TextureFormat.D32FS8, "GPU-driven glass test" );
-
-			var world = new RenderWorld();
-			world.Lighting.SunDirection = new Vector3( 0.5f, 0.35f, -0.8f ).Normal;
-			world.Lighting.SunColor = new Color( 1.25f, 1.15f, 1.0f );
-			world.Lighting.AmbientColor = new Color( 0.12f, 0.15f, 0.2f, 1 );
-			world.Lighting.SunShadowCascades = 0;
-
-			// Opaque boxes behind; red, glass, tinted glass and red again, back to front, offset to show what's behind them
-			var (far, _) = Boxes( backend, backend.CreateMaterial( "Glass test far", new Color( 0.8f, 0.6f, 0.4f ) ), 150 );
-			world.Add( new MeshObject( far, Transform.Zero ) );
-			foreach ( var (material, y) in new[] { (red, 90f), (clear, 30f), (tinted, -30f), (red, -90f) } )
-			{
-				var (boxes, _) = Boxes( backend, backend.CreateMaterial( "Glass test boxes", Color.White ), y );
-				var reads = material != red;
-				world.Add( new MeshObject( boxes, new Transform( new Vector3( 20, 0, 0 ) ) ) { MaterialOverride = material, Tint = new Color( 1, 1, 1, reads ? 1 : 0.5f ), WantsFrameBufferCopy = reads } );
-			}
-
-			var view = new RenderView { Name = "Glass", FieldOfView = 70, ZNear = 4, ZFar = 4000, ClearColor = new Color( 0.3f, 0.4f, 0.5f ), Viewport = new Rect( 0, 0, Width, Height ) };
-			view.Position = new Vector3( -500, -300, 300 );
-			view.Rotation = Rotation.LookAt( -view.Position.WithZ( view.Position.z - 40 ) );
-
-			// Four frames in a renderer of its own, the last counted
-			byte[] Frames( bool gpuDriven, DrawCensus census )
-			{
-				using var system = new RenderSystem { ParallelRecording = false };
-				backend.GpuDriven = gpuDriven;
-				byte[] pixels = null;
-				for ( int i = 0; i < 4; i++ )
-				{
-					backend.BeginFrame();
-					RenderHost.Current.NextFrame();
-					backend.Census = i == 3 ? census : null;
-					try
-					{
-						system.Render( world, view, target );
-					}
-					finally
-					{
-						backend.Census = null;
-					}
-
-					Device.WaitIdle();
-					var (texture, layout) = BackendDevice.Unwrap( target.Color );
-					pixels = ReadBack( texture, layout );
-					BackendDevice.SetLayout( target.Color, ImageLayout.CopySource );
-				}
-
-				return pixels;
-			}
-
 			var before = new DrawCensus();
-			var classic = Frames( false, before );
+			var classic = GlassFrames( backend, world, view, target, false, before );
 			var census = new DrawCensus();
-			var driven = Frames( true, census );
+			var driven = GlassFrames( backend, world, view, target, true, census );
 
 			byte[] Rgba8( byte[] halfs )
 			{

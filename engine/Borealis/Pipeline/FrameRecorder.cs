@@ -692,6 +692,23 @@ internal sealed partial class FrameRecorder : IDisposable
 	/// </summary>
 	public void Record( ref RenderStats stats )
 	{
+		BeginRecording();
+		EndRecording( ref stats );
+	}
+
+	// The workers' recording started by BeginRecording, which EndRecording joins, and when
+	JobHandle recording;
+	long recordStart, mainDone;
+
+	/// <summary>Whether <see cref="BeginRecording"/> started a recording <see cref="EndRecording"/> hasn't joined yet.</summary>
+	public bool Recording { get; private set; }
+
+	/// <summary>
+	/// Run layer prerequisites, hand the workers their segments and record this thread's: what <see cref="Record"/> does
+	/// before it waits for the workers. <see cref="EndRecording"/> waits for them; until then this thread may do other work.
+	/// </summary>
+	public void BeginRecording()
+	{
 		for ( int l = 0; l < layerCount; l++ )
 			layers[l].Layer.BeforeSegments( layers[l].Frame, layers[l].Frame.System.FrameContext );
 
@@ -730,13 +747,15 @@ internal sealed partial class FrameRecorder : IDisposable
 		segmentFailed = false;
 
 		// Heaviest first, one at a time, on up to MaxRecordThreads workers beside this thread
-		var recording = JobDispatcher.Begin( workers, this, static ( recorder, claim ) => recorder.RecordClaimed( recorder.workerSegments[claim] ), itemsPerBatch: 1, maxDegreeOfParallelism: MaxRecordThreads + 1 );
+		recording = JobDispatcher.Begin( workers, this, static ( recorder, claim ) => recorder.RecordClaimed( recorder.workerSegments[claim] ), itemsPerBatch: 1, maxDegreeOfParallelism: MaxRecordThreads + 1 );
+		recordStart = start;
+		mainDone = start;
+		Recording = true;
 
 		// Record main-thread work, then help workers. Always join before accessing their output.
 		foreach ( var frame in frames )
 			frame.StagesMs = 0;
 
-		var mainDone = start;
 		try
 		{
 			for ( int i = 0; i < segmentCount; i++ )
@@ -750,13 +769,33 @@ internal sealed partial class FrameRecorder : IDisposable
 
 			mainDone = Stopwatch.GetTimestamp();
 		}
-		finally
+		catch
 		{
 			mainSlot = -1;
-			// Joining records whatever workers haven't claimed yet on this thread
-			using ( Zones.RecordWait.Start() ) recording.Join();
+			Join();
+			throw;
 		}
 
+		mainSlot = -1;
+	}
+
+	// Joining records whatever workers haven't claimed yet on this thread
+	void Join()
+	{
+		if ( !Recording ) return;
+		Recording = false;
+		using ( Zones.RecordWait.Start() ) recording.Join();
+		recording = default;
+	}
+
+	/// <summary>
+	/// Wait for the workers' segments of <see cref="BeginRecording"/>, recording on this thread what they haven't taken yet,
+	/// and accumulate counts per frame and timings in <paramref name="stats"/>.
+	/// </summary>
+	public void EndRecording( ref RenderStats stats )
+	{
+		Join();
+		var start = recordStart;
 		stats.RecordMs = Stopwatch.GetElapsedTime( start ).TotalMilliseconds;
 		stats.RecordWaitMs = Stopwatch.GetElapsedTime( mainDone ).TotalMilliseconds;
 
@@ -1078,6 +1117,8 @@ internal sealed partial class FrameRecorder : IDisposable
 	/// </summary>
 	public void End()
 	{
+		Join();
+
 		// Not what was submitted early
 		for ( int i = 0; i < _computeBatchCount; i++ )
 		{
