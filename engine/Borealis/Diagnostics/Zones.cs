@@ -64,6 +64,7 @@ internal static class Zones
 	public static readonly Zone WorldLighting = new( "Borealis World Lighting", Color.Cyan );
 	public static readonly Zone ChildView = new( "Borealis Child View", Color.Blue );
 	public static readonly Zone DrawCallbacks = new( "Borealis Draw Callbacks", Color.White );
+	public static readonly Zone GpuTimingsRead = new( "Borealis GPU Timings Read", Color.Gray );
 
 	// The render thread's frame (docs/reference/borealis-render-thread.md): what it draws of the frame handed over, and the main
 	// thread's sync point and extract

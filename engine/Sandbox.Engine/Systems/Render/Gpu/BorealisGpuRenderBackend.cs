@@ -399,6 +399,9 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 
 	void TimeFrame()
 	{
+		// The last frame's read has finished before its slot can be begun again
+		FinishBusyRead();
+
 		if ( busyTimer is null )
 		{
 			if ( services.PassTimer is not null || !gpu.Capabilities.Timestamps ) return;
@@ -409,30 +412,67 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 		services.PassTimer ??= busyTimer;
 		if ( services.PassTimer != busyTimer ) return;
 
-		// The frame before last is done (starting this frame waited for it); older ones are read once. Reading the queries
-		// back costs ~60 us: every frame while the dev tools show the passes, every BusyReadFrames frames otherwise
+		busyTimer.BeginFrame( (long)frame );
+
+		// The frame before last is done (starting this frame waited for it); older ones are read once, every frame while the
+		// dev tools show the passes, every BusyReadFrames frames otherwise. The read goes to a worker: reading the queries back
+		// takes 0.4 ms on some drivers. It reads a slot this frame doesn't write, and the next frame's start waits for it
 		var done = (long)frame - (Borealis.Backend.PassTimer.Slots - 1);
-		if ( done > 0 && done >= busyReadFrom && busyTimer.TryRead( done, busyTimings ) )
+		if ( done <= 0 || done < busyReadFrom ) return;
+		busyReadFrame = done;
+		busyReadCaller = Environment.CurrentManagedThreadId;
+		busyReading = true;
+		busyRead = JobDispatcher.Begin( 1, this, static ( backend, _ ) => backend.ReadBusy(), itemsPerBatch: 1 );
+	}
+
+	// The busy timer's read of a finished frame on a worker (TimeFrame), whether one was started, the frame it reads, and
+	// whether it read it
+	JobHandle busyRead;
+	bool busyReading;
+	long busyReadFrame;
+	bool busyReadOk;
+	int busyReadCaller;
+
+	/// <summary>Busy timer reads that ran on a worker rather than the thread that started the frame, for the tests.</summary>
+	internal long BusyReadsElsewhere { get; private set; }
+
+	// On a worker: read the frame TimeFrame asked for and publish it
+	void ReadBusy()
+	{
+		using var zone = global::Borealis.Zones.GpuTimingsRead.Start();
+		if ( Environment.CurrentManagedThreadId != busyReadCaller ) BusyReadsElsewhere++;
+		busyReadOk = busyTimer.TryRead( busyReadFrame, busyTimings );
+		if ( !busyReadOk ) return;
+
+		var busy = 0.0;
+		foreach ( var timing in busyTimings )
 		{
-			var busy = 0.0;
-			foreach ( var timing in busyTimings )
-			{
-				if ( timing.Kind == Borealis.Backend.PassTimer.ScopeKind.List ) busy += timing.Ms;
-			}
-
-			lock ( GpuBusyLock )
-			{
-				GpuBusyMs = busy;
-				GpuBusyFrame = (ulong)done;
-				if ( counterTimeline is not null ) AddCounterTimeline( busyTimings );
-				(busyTimings, publishedTimings) = (publishedTimings, busyTimings);
-			}
-
-			// Every frame while the dev tools' GPU view or a GPU counter capture (r_gpucounters) reads them
-			busyReadFrom = NextBusyRead( done, Sandbox.Diagnostics.GpuProfilerStats.Enabled || counterTimeline is not null );
+			if ( timing.Kind == Borealis.Backend.PassTimer.ScopeKind.List ) busy += timing.Ms;
 		}
 
-		busyTimer.BeginFrame( (long)frame );
+		lock ( GpuBusyLock )
+		{
+			GpuBusyMs = busy;
+			GpuBusyFrame = (ulong)busyReadFrame;
+			if ( counterTimeline is not null ) AddCounterTimeline( busyTimings );
+			(busyTimings, publishedTimings) = (publishedTimings, busyTimings);
+		}
+	}
+
+	/// <summary>
+	/// Wait for the busy timer's read started last frame, if one was, and take when the next may be: before the timer begins
+	/// another frame, and before it goes.
+	/// </summary>
+	void FinishBusyRead()
+	{
+		if ( !busyReading ) return;
+		busyReading = false;
+		var handle = busyRead;
+		busyRead = default;
+		handle.Join();
+
+		// Every frame while the dev tools' GPU view or a GPU counter capture (r_gpucounters) reads them
+		if ( busyReadOk ) busyReadFrom = NextBusyRead( busyReadFrame, Sandbox.Diagnostics.GpuProfilerStats.Enabled || counterTimeline is not null );
 	}
 
 	/// <summary>Frames between background saves of the pipeline cache.</summary>
@@ -2762,6 +2802,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 			errorTexture = default;
 		}
 		DestroyModelGeometry();
+		FinishBusyRead();
 		if ( services.PassTimer == busyTimer ) services.PassTimer = null;
 		busyTimer?.Dispose();
 		busyTimer = null;
