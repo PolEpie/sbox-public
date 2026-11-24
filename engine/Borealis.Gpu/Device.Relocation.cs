@@ -477,6 +477,6 @@ public sealed unsafe partial class Device
 	{
 		if ( record.BindlessSlot > 0 ) Bindless.RemoveBuffer( record.BindlessSlot - 1 );
 		Vk.vkDestroyBuffer( Vk.Device, record.Buffer, null );
-		Allocator.Free( record.Memory );
+		FreeMemory( record.Memory );
 	}
 }

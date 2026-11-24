@@ -1439,6 +1439,32 @@ internal unsafe struct VkPhysicalDeviceMeshShaderFeaturesEXT
 }
 
 [StructLayout( LayoutKind.Sequential )]
+internal unsafe struct VkBaseStructure
+{
+	public VkStructureType sType;
+	public void* pNext;
+}
+
+[StructLayout( LayoutKind.Sequential )]
+internal unsafe struct VkPhysicalDeviceAddressBindingReportFeaturesEXT
+{
+	public VkStructureType sType;
+	public void* pNext;
+	public uint reportAddressBinding;
+}
+
+[StructLayout( LayoutKind.Sequential )]
+internal unsafe struct VkDeviceAddressBindingCallbackDataEXT
+{
+	public VkStructureType sType;
+	public void* pNext;
+	public uint flags;
+	public ulong baseAddress;
+	public ulong size;
+	public int bindingType;
+}
+
+[StructLayout( LayoutKind.Sequential )]
 internal unsafe struct VkPhysicalDeviceFaultFeaturesEXT
 {
 	public VkStructureType sType;

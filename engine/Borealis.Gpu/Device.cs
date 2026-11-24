@@ -237,6 +237,7 @@ public sealed unsafe partial class Device : IDisposable
 			StageAll = Vulkan.Vk.StageVertex | Vulkan.Vk.StageFragment | Vulkan.Vk.StageCompute | (features.meshShaders ? Vulkan.Vk.StageTask | Vulkan.Vk.StageMesh : 0);
 			graphicsQueue = new DeviceQueue( this, Vk, queueFamilies[0], QueueType.Graphics );
 			computeQueue = computeFamily ? new DeviceQueue( this, Vk, queueFamilies[1], QueueType.Compute ) : graphicsQueue;
+			if ( AddressReports ) ListenForAddressBindings();
 
 			var driver = new VkPhysicalDeviceDriverProperties { sType = VkStructureType.PhysicalDeviceDriverProperties };
 			var subgroups = new VkPhysicalDeviceSubgroupProperties { sType = VkStructureType.PhysicalDeviceSubgroupProperties, pNext = &driver };
@@ -544,6 +545,22 @@ public sealed unsafe partial class Device : IDisposable
 			}
 		}
 
+		// The GPU address ranges the driver binds and takes back, for which resource a fault address lies in when the device is lost
+		var addressBinding = new VkPhysicalDeviceAddressBindingReportFeaturesEXT { sType = VkStructureType.PhysicalDeviceAddressBindingReportFeaturesExt };
+		if ( options.ProgressMarkers && messenger != 0 && deviceExtensions.Contains( "VK_EXT_device_address_binding_report" ) )
+		{
+			var supportedBinding = new VkPhysicalDeviceAddressBindingReportFeaturesEXT { sType = VkStructureType.PhysicalDeviceAddressBindingReportFeaturesExt };
+			var query = new VkPhysicalDeviceFeatures2 { sType = VkStructureType.PhysicalDeviceFeatures2, pNext = &supportedBinding };
+			Instance.vkGetPhysicalDeviceFeatures2( PhysicalDevice, &query );
+			if ( supportedBinding.reportAddressBinding != 0 )
+			{
+				extensions.Add( "VK_EXT_device_address_binding_report" );
+				addressBinding.reportAddressBinding = 1;
+				addressBinding.pNext = e13.pNext;
+				e13.pNext = &addressBinding;
+			}
+		}
+
 		// Progress markers, for how far the GPU got when the device is lost
 		if ( options.ProgressMarkers && deviceExtensions.Contains( "VK_AMD_buffer_marker" ) ) extensions.Add( "VK_AMD_buffer_marker" );
 
@@ -645,6 +662,7 @@ public sealed unsafe partial class Device : IDisposable
 
 		Presentation = extensions.Contains( "VK_KHR_swapchain" );
 		faultReports = extensions.Contains( "VK_EXT_device_fault" );
+		AddressReports = extensions.Contains( "VK_EXT_device_address_binding_report" );
 		memoryBudget = extensions.Contains( "VK_EXT_memory_budget" );
 		bufferMarkers = extensions.Contains( "VK_AMD_buffer_marker" );
 		shaderStatistics = extensions.Contains( "VK_KHR_pipeline_executable_properties" );
@@ -756,6 +774,14 @@ public sealed unsafe partial class Device : IDisposable
 		try
 		{
 			if ( GCHandle.FromIntPtr( (nint)user ).Target is not Device device ) return 0;
+			if ( (types & Vulkan.Vk.MessageDeviceAddressBinding) != 0 )
+			{
+				device.NoteAddressBinding( data );
+				return 0;
+			}
+
+			// Information is asked for only for the binding reports
+			if ( severity < Vulkan.Vk.SeverityWarning ) return 0;
 
 			var level = severity >= Vulkan.Vk.SeverityError ? MessageSeverity.Error
 				: severity >= Vulkan.Vk.SeverityWarning ? MessageSeverity.Warning
@@ -902,6 +928,7 @@ public sealed unsafe partial class Device : IDisposable
 
 	void DestroyInstance()
 	{
+		if ( bindingMessenger != 0 ) Instance.vkDestroyDebugUtilsMessengerEXT( Instance.Instance, bindingMessenger, null );
 		if ( messenger != 0 ) Instance.vkDestroyDebugUtilsMessengerEXT( Instance.Instance, messenger, null );
 		Instance.vkDestroyInstance( Instance.Instance, null );
 		if ( countersPrepared ) GpuCounters.Release();
