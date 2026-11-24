@@ -167,11 +167,11 @@ internal sealed partial class BackendContext
 	static readonly StringToken MipRegion = new( "MipRegion" );
 	static readonly StringToken MaskOutput = new( "Output" ), MaskMip = new( "Mip" ), MaskSource = new( "MaskSource" ), MaskRegion = new( "MaskRegion" ), MaskCopies = new( "D_COPY" ), MaskSamples = new( "MaskSamples" );
 
-	/// <summary>The frame buffer copy's mask and downsample parameters, kept between frames.</summary>
-	readonly BackendParameters maskParameters = new(), mipParameters = new();
+	/// <summary>The frame buffer copy's mask, copy and downsample parameters, kept between frames.</summary>
+	readonly BackendParameters maskParameters = new(), copyParameters = new(), mipParameters = new();
 
 	/// <summary>
-	/// The frame buffer copy made by its depth-aware mask (<c>depthaware_mask_cs</c>'s <c>D_COPY</c>): one pass writes the
+	/// The frame buffer copy made by its depth-aware mask (<c>framecopy_mask_cs</c>, <c>depthaware_mask_cs</c> with the copy): one pass writes the
 	/// last frame's blurred copy where the mask takes it and the frame everywhere else, so the frame is read only where it's
 	/// kept and the copy written once. The same texels as a copy then the mask; a multisampled frame is resolved there, its
 	/// samples averaged as a resolve averages them, so most of its samples (where the mask takes last frame's) aren't read.
@@ -187,25 +187,34 @@ internal sealed partial class BackendContext
 	/// <summary>
 	/// Native's depth-aware mask over the frame buffer copy (<c>CSceneSystem::DownsampleTexture</c> runs it before the mips):
 	/// <c>depthaware_mask_cs</c> writes, where something is nearer than the glass in <c>RefractionDepthTexture</c>, the last
-	/// frame's blurred copy reprojected, so nearer objects stay out of the refraction. With <paramref name="source"/>, it
-	/// copies the frame everywhere else. False when the shader isn't there.
+	/// frame's blurred copy reprojected, so nearer objects stay out of the refraction. With <paramref name="source"/>,
+	/// <c>framecopy_mask_cs</c> does, and copies the frame everywhere else, over the readers' region. False when the shader
+	/// isn't there.
 	/// </summary>
 	bool MaskFrameBufferCopy( BackendTexture copy, Rect viewport, BackendTexture source )
 	{
-		if ( device.MaterialFromShader( "shaders/depthaware_mask_cs.shader" ) is not BackendMaterial { Shader: not null } mask ) return false;
+		var shader = source is null ? "shaders/depthaware_mask_cs.shader" : "shaders/framecopy_mask_cs.shader";
+		if ( device.MaterialFromShader( shader ) is not BackendMaterial { Shader: not null } mask ) return false;
 
 		var scope = BeginGpuScope( "Frame Buffer Copy Mask" );
-		var width = Math.Min( copy.Width, (int)viewport.Width );
-		var height = Math.Min( copy.Height, (int)viewport.Height );
-		var (x0, y0, x1, y1) = source is null ? (0, 0, width, height) : ReadRegion( width, height );
-		maskParameters.Set( MaskOutput, copy, 0 );
-		maskParameters.Set( MaskMip, copy, 1 );
-		maskParameters.Set( MaskRegion, new Vector4( x0, y0, x1, y1 ) );
-		maskParameters.SetCombo( MaskCopies, source is null ? 0 : source.Samples > 1 ? 2 : 1 );
-		if ( source is { Samples: > 1 } ) maskParameters.Set( MaskSource, source );
-		else if ( source is not null ) maskParameters.Set( MaskSource, source, 0 );
-		if ( source is not null ) maskParameters.Set( MaskSamples, (float)source.Samples );
-		Dispatch( mask, maskParameters, x1 - x0, y1 - y0, 1 );
+		var parameters = source is null ? maskParameters : copyParameters;
+		parameters.Set( MaskOutput, copy, 0 );
+		parameters.Set( MaskMip, copy, 1 );
+		if ( source is null )
+		{
+			Dispatch( mask, parameters, copy.Width, copy.Height, 1 );
+		}
+		else
+		{
+			var (x0, y0, x1, y1) = ReadRegion( Math.Min( copy.Width, (int)viewport.Width ), Math.Min( copy.Height, (int)viewport.Height ) );
+			parameters.Set( MaskRegion, new Vector4( x0, y0, x1, y1 ) );
+			parameters.SetCombo( MaskCopies, source.Samples > 1 ? 2 : 1 );
+			if ( source.Samples > 1 ) parameters.Set( MaskSource, source );
+			else parameters.Set( MaskSource, source, 0 );
+			parameters.Set( MaskSamples, (float)source.Samples );
+			Dispatch( mask, parameters, x1 - x0, y1 - y0, 1 );
+		}
+
 		List.Barrier( PipelineStage.ComputeShader, MemoryAccess.ShaderWrite, PipelineStage.ComputeShader, MemoryAccess.ShaderRead | MemoryAccess.ShaderWrite );
 		EndGpuScope( scope );
 		return true;
