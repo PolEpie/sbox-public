@@ -177,6 +177,33 @@ public class MemoryAllocatorTests : GpuTest
 	}
 
 	/// <summary>
+	/// A freed block's memory goes back to the driver on a worker, not on the thread that let it go (the frame thread's frame
+	/// start, where a map's unload freed 85 blocks in one frame): it stops counting as reserved at once, and the worker frees it.
+	/// </summary>
+	[TestMethod]
+	public void BlocksGoBackToTheDriverOnAWorker()
+	{
+		using var allocator = new MemoryAllocator( Device.Vk, Device.Allocator.MemoryProperties, false ) { QuietSeconds = 0, GrowBlocks = false, MakeBlocksAhead = false, ShareLargeBlocks = true };
+		var big = new VkMemoryRequirements { size = allocator.BlockSize / 2, alignment = 256, memoryTypeBits = ~0u };
+
+		var frees = allocator.DriverFrees;
+		for ( int i = 0; i < 4; i++ ) allocator.Free( allocator.Allocate( big, MemoryLocation.Device, image: true, target: true ) );
+		Assert.AreEqual( 0ul, allocator.Reserved, "a freed block isn't reserved any more" );
+		Assert.AreEqual( frees + 4, allocator.DriverFrees, "and counts as given back" );
+
+		allocator.FinishReleases();
+		var clock = System.Diagnostics.Stopwatch.StartNew();
+		while ( allocator.DriverFreesOnWorker == 0 && clock.Elapsed.TotalSeconds < 10 )
+		{
+			allocator.Free( allocator.Allocate( big, MemoryLocation.Device, image: true, target: true ) );
+			System.Threading.Thread.Sleep( 5 );
+		}
+
+		allocator.FinishReleases();
+		Assert.IsTrue( allocator.DriverFreesOnWorker > 0, "the driver's frees are made on a worker" );
+	}
+
+	/// <summary>
 	/// A target too big for a small block (a view's colour or depth) gets its own allocation, which goes back to the driver
 	/// as soon as it's freed: in large blocks, targets made and dropped with views and window sizes left them mostly empty
 	/// (the editor held 512 MiB of large image blocks for 246 MiB of images). Small targets still share small blocks.
