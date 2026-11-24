@@ -400,6 +400,13 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 		return parameters;
 	} );
 
+	/// <summary>
+	/// Diagnostics (<c>BOREALIS_DRAW_SCOPES=&lt;layer name&gt;</c>): with a <see cref="PassTimer"/>, each classic model draw and
+	/// GPU-driven multi-draw inside that layer's GPU scope gets a scope of its own, named by its shader, to see where the
+	/// layer's time goes. Null (off) by default: the timestamps between draws keep them from overlapping, so the layer takes longer.
+	/// </summary>
+	internal static string DrawScopesLayer { get; set; } = Environment.GetEnvironmentVariable( "BOREALIS_DRAW_SCOPES" );
+
 	/// <summary>Time every model draw's binding and recording into <see cref="DrawTimes"/>, for benchmarks.</summary>
 	public bool TimeDraws { get; set; }
 
@@ -2010,6 +2017,12 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	internal static bool IsIdsFormat( Format format ) => format is Format.R32Uint or Format.RG32Uint;
 
 	/// <summary>
+	/// An ids pipeline's target 0, the scratch beside the ids: written nowhere (its contents are never stored). Its alpha still
+	/// drives alpha to coverage, which takes the shader's output whatever is written.
+	/// </summary>
+	internal static BlendState IdsScratchBlend => BlendState.NoWrites;
+
+	/// <summary>
 	/// A pipeline for a variant drawing vertices laid out as <paramref name="layout"/> into targets of these formats,
 	/// made once. Mesh vertices are stream 0, instance ids stream 1 (<c>TEXCOORD13</c>), and inputs the mesh lacks, or
 	/// has as integers where the shader wants floats (or the other way round), read the default stream 2, as native's
@@ -2053,7 +2066,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 
 			// A module with task and mesh stages draws with them, and no vertex input
 			var info = variant.Mesh is not null && Gpu.Capabilities.MeshShaders ? variant.MeshPipelineInfo( colors, depth, samples, depthBias, name ).Value : variant.PipelineInfo( streams, attributes, colors, depth, samples, depthBias, name );
-			if ( ids ) info.Blend = [BlendState.Opaque, BlendState.Opaque];
+			if ( ids ) info.Blend = [IdsScratchBlend, BlendState.Opaque];
 			if ( normals ) AddNormalsTarget( ref info, !depthOnly && WritesNormals( variant ) );
 			if ( sets is not null ) info.Sets = sets;
 

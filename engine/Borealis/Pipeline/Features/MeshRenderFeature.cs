@@ -675,7 +675,7 @@ internal sealed partial class MeshRenderFeature : RenderFeature
 			: run.Skinned ? (run.Morphable ? "skinned mesh, morphs" : run.Deformed ? "skinned mesh, deformed" : "skinned mesh")
 			: run.Morphable ? "mesh with morphs" : "static mesh";
 		var why = left ? "the device's GPU-driven path left it"
-			: list is not (MeshRuns.Opaque or MeshRuns.Faded or MeshRuns.Translucent) ? $"{list} list (only the opaque, faded and translucent lists go GPU-driven)"
+			: list is not (MeshRuns.Opaque or MeshRuns.Faded or MeshRuns.Translucent or MeshRuns.Refraction) ? $"{list} list (only the opaque, faded, translucent and refraction lists go GPU-driven)"
 			: run.Custom is not null ? "custom object"
 			: run.Callbacks is not null ? "draw callbacks"
 			: run.Skinned ? "skinned"
@@ -684,7 +684,7 @@ internal sealed partial class MeshRenderFeature : RenderFeature
 			: run.ReadsFrameBuffer ? "reads the frame buffer"
 			: run.CullDraw >= 0 ? "occlusion culled"
 			: run.Attributes is not null ? "object attributes"
-			: RenderHost.Current?.Device is { DrawsMeshesGpuDriven: true } device ? (list == MeshRuns.Faded && !device.DrawsFadedGpuDriven ? "GPU-driven faded off" : list == MeshRuns.Translucent && !device.DrawsTranslucentGpuDriven ? "GPU-driven translucent off" : "occlusion culling on") : "GPU-driven meshes off";
+			: RenderHost.Current?.Device is { DrawsMeshesGpuDriven: true } device ? (list == MeshRuns.Faded && !device.DrawsFadedGpuDriven ? "GPU-driven faded off" : list is (MeshRuns.Translucent or MeshRuns.Refraction) && !device.DrawsTranslucentGpuDriven ? "GPU-driven translucent off" : "occlusion culling on") : "GPU-driven meshes off";
 		return list == MeshRuns.Faded ? $"{kind}, faded: {why}" : list == MeshRuns.Translucent ? $"{kind}, translucent: {why}" : $"{kind}: {why}";
 	}
 

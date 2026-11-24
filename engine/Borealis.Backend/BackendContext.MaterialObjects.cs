@@ -169,6 +169,7 @@ internal sealed partial class BackendContext
 	bool Draw( GpuMaterial material, StringToken shaderMode, RenderMesh mesh, in RenderMesh.Draw draw, int firstInstance, int instances, int depthBias, float slopeScaledDepthBias, bool stripPixelShader, bool skinned, in IndirectDraws indirect )
 	{
 		if ( Census ) return DrawCounted( material, shaderMode, mesh, draw, firstInstance, instances, depthBias, slopeScaledDepthBias, stripPixelShader, skinned, indirect );
+		if ( drawScopes >= 0 ) return DrawScoped( material, shaderMode, mesh, draw, firstInstance, instances, depthBias, slopeScaledDepthBias, stripPixelShader, skinned, indirect );
 		return DrawTimed( material, shaderMode, mesh, draw, firstInstance, instances, depthBias, slopeScaledDepthBias, stripPixelShader, skinned, indirect );
 	}
 

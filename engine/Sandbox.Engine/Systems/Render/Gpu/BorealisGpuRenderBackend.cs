@@ -577,6 +577,9 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 
 	int blockTimer = -1;
 
+	/// <summary>The pass timer the frame's lists are timed by, if any: engine scopes inside them time themselves with it.</summary>
+	internal Borealis.Backend.PassTimer ScopeTimer => services.PassTimer;
+
 	/// <summary>
 	/// After the last frame: drop what the last block and draw were given, which would hold their textures and material
 	/// past their owners, and the sheet cache. Blocks remake the set as they start, and sheets are written again when asked for.

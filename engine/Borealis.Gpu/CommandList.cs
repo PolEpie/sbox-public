@@ -162,6 +162,9 @@ public sealed unsafe class CommandList
 
 	// The bound graphics pipeline isn't made yet: draws are skipped
 	bool skippingDraws;
+
+	/// <summary>Whether draws are being skipped: the bound pipeline is one workers are still making.</summary>
+	public bool SkippingDraws => skippingDraws;
 	int skippedDraws;
 
 	// The dynamic render state last set (RenderStateBits), and whether any has been since the list began

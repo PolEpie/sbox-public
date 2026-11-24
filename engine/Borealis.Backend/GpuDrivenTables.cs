@@ -159,7 +159,10 @@ internal sealed class GpuDrivenTables : IDisposable
 	readonly Dictionary<(int Page, long Offset, VertexLayout Layout, int Count), uint> geometryRecords = new();
 	// Draw and material records are found without a lock by every recording thread, many times a frame (a lock per draw
 	// kept recording threads waiting on each other); added to under a lock of their own
-	readonly System.Collections.Concurrent.ConcurrentDictionary<(uint Geometry, uint Vertex, uint Pixel, uint Flags, uint FirstIndex, uint IndexCount, int BaseVertex, int IndexPage), uint> drawRecords = new();
+	// A record struct, not a tuple: a tuple of eight keeps its last in a tuple of its own, which its hash and equality box
+	// until the JIT has optimised them
+	readonly System.Collections.Concurrent.ConcurrentDictionary<DrawRecordKey, uint> drawRecords = new();
+	readonly record struct DrawRecordKey( uint Geometry, uint Vertex, uint Pixel, uint Flags, uint FirstIndex, uint IndexCount, int BaseVertex, int IndexPage );
 	// Added to under a lock per stripe of keys: many new records at once (a map's first frames) waited on one lock
 	readonly object[] drawLocks = Enumerable.Range( 0, 16 ).Select( _ => new object() ).ToArray();
 	readonly System.Collections.Concurrent.ConcurrentDictionary<MaterialRecordKey, uint> materialRecords = new();
@@ -626,7 +629,7 @@ internal sealed class GpuDrivenTables : IDisposable
 	/// </summary>
 	public uint Draw( uint geometryRecord, uint vertexMaterial, uint pixelMaterial, uint flags, uint firstIndex, uint indexCount, int baseVertex, int indexPage )
 	{
-		var key = (geometryRecord, vertexMaterial, pixelMaterial, flags, firstIndex, indexCount, baseVertex, indexPage);
+		var key = new DrawRecordKey( geometryRecord, vertexMaterial, pixelMaterial, flags, firstIndex, indexCount, baseVertex, indexPage );
 		if ( drawRecords.TryGetValue( key, out var known ) ) return known;
 		uint index;
 		lock ( drawLocks[(key.GetHashCode() & int.MaxValue) % drawLocks.Length] )

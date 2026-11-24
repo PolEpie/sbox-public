@@ -128,6 +128,7 @@ internal sealed class ShadowSystem : IShadowRenderer, IDisposable
 			ViewportSize = new Vector2( view.Viewport.Width, view.Viewport.Height ),
 			RenderTags = view.RenderTags,
 			ExcludeTags = view.ExcludeTags,
+			SharesCascades = view.ClipPlane is not null,
 			SubWorlds = view.SubWorlds,
 			IsSkybox = skybox,
 			IsReflection = view.Reflection,
@@ -601,7 +602,11 @@ internal sealed class ShadowSystem : IShadowRenderer, IDisposable
 	/// Make the tiles' shader on the main thread: made where it's first dispatched, on a recording thread, it isn't there
 	/// for that frame, whose tiles would then say every receiver is lit.
 	/// </summary>
-	public static void WarmUp() => _ = TilesCompute;
+	public static void WarmUp()
+	{
+		_ = TilesCompute;
+		_ = CacheCopy;
+	}
 
 	// Each cascade's tiles side by side: their own min and max depth, then widened over their neighbours
 	GpuTexture tilesRaw, tiles;
@@ -841,12 +846,17 @@ internal sealed class ShadowSystem : IShadowRenderer, IDisposable
 		var view = pass.View;
 		var size = new Vector2( pass.Target.Width, pass.Target.Height );
 
-		// Copy static depth once before drawing dynamic casters. A cache held wrapped around is unwrapped
+		// Copy static depth once before drawing dynamic casters. A cache held wrapped around is unwrapped. A 2D cache is drawn
+		// in (DrawCache), which costs less than a transfer copy into the depth target
 		var cached = pass.CachedStatic;
 		if ( clear && cached is not null && pass.TargetSlice == 0 )
 		{
-			if ( pass.CacheOffset == default ) context.CopyTexture( cached.Texture, pass.Target, cached.IsCube ? 6 : 1 );
-			else CopyWrapped( context, cached.Texture, pass.Target, pass.CacheOffset );
+			var scope = context.BeginGpuScope( "Shadow cache copy" );
+			var drawn = !cached.IsCube && cached.Texture.Width == pass.Target.Width && cached.Texture.Height == pass.Target.Height
+				&& DrawCache( context, cached.Texture, pass.Target, pass.CacheOffset );
+			if ( !drawn && pass.CacheOffset == default ) context.CopyTexture( cached.Texture, pass.Target, cached.IsCube ? 6 : 1 );
+			else if ( !drawn ) CopyWrapped( context, cached.Texture, pass.Target, pass.CacheOffset );
+			context.EndGpuScope( scope );
 		}
 
 		// A view of part of a map clears only that part, from a cleared tile
@@ -881,6 +891,53 @@ internal sealed class ShadowSystem : IShadowRenderer, IDisposable
 		context.SetViewConstants( constants, null );
 	}
 
+
+	// The device's own: a material is made per device
+	static GpuMaterial cacheCopy;
+	static GpuDevice cacheCopyDevice;
+	static GpuMaterial CacheCopy
+	{
+		get
+		{
+			var device = RenderHost.Current.Device;
+			if ( cacheCopy is null || cacheCopyDevice != device ) (cacheCopy, cacheCopyDevice) = (device.MaterialFromShader( "shaders/borealis_shadow_cache_copy.shader" ), device);
+			return cacheCopy;
+		}
+	}
+
+	static readonly StringToken CacheDepthName = new( "ShadowCacheDepth" );
+	static readonly StringToken CacheWrapName = new( "ShadowCacheWrap" );
+	static readonly StringToken DefaultMode = new( "Default" );
+
+	/// <summary>
+	/// Write a 2D cache's depth into a map the same size, unwrapped by <paramref name="offset"/> texels as <see cref="CopyWrapped"/>
+	/// does: a full-screen draw that writes every texel's depth as the cache holds it, so the map stays a depth target.
+	/// False when it couldn't draw yet (its pipeline is still being made): the caller copies instead.
+	/// </summary>
+	internal static bool DrawCache( GpuContext context, GpuTexture source, GpuTexture destination, Vector2Int offset )
+	{
+		int w = source.Width, h = source.Height;
+		int ox = ((offset.x % w) + w) % w, oy = ((offset.y % h) + h) % h;
+		context.BarrierToPixelShaderRead( source );
+		context.Bind( new StageTarget
+		{
+			Context = context,
+			Attributes = context.Attributes,
+			Depth = destination,
+			Size = new Vector2( w, h ),
+			Viewport = new Rect( 0, 0, w, h ),
+			MaxZ = 1,
+			ColorFormat = TextureFormat.None,
+			Samples = 1,
+		} );
+
+		var parameters = ParameterPool.Get();
+		parameters.Set( CacheDepthName, source );
+		parameters.Set( CacheWrapName, new Vector4( ox, oy, w, h ) );
+		var drew = context.DrawFullscreenNow( CacheCopy, parameters, DefaultMode );
+		ParameterPool.Return( parameters );
+		return drew;
+	}
 
 	/// <summary>
 	/// Copy a texture held wrapped around by <paramref name="offset"/> texels into one that isn't: four rectangles.

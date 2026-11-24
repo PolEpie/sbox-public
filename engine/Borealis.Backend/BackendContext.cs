@@ -192,6 +192,7 @@ internal sealed partial class BackendContext : GpuContext
 		}
 
 		wait = signal = default;
+		drawScopes = -1;
 		boundValid = false;
 		bound = default;
 		clearColor = clearDepth = false;
@@ -983,6 +984,7 @@ internal sealed partial class BackendContext : GpuContext
 		if ( count ) CloseScope();
 		var timed = timer.Begin( List, name, PassTimer.ScopeKind.Pass, count );
 		if ( count && timer.Counts( timed ) ) recording.Counting = timed;
+		if ( timed >= 0 && drawScopes < 0 && BackendDevice.DrawScopesLayer is { } layer && name == layer ) drawScopes = timed;
 		return new GpuScope( timed + 2, false );
 	}
 
@@ -993,6 +995,7 @@ internal sealed partial class BackendContext : GpuContext
 		if ( scope.Marker > 1 && device.PassTimer is { } timer )
 		{
 			var timed = (int)scope.Marker - 2;
+			if ( timed == drawScopes ) drawScopes = -1;
 			if ( recording.Counting == timed )
 			{
 				CloseScope();
@@ -1460,16 +1463,26 @@ internal sealed partial class BackendContext : GpuContext
 		if ( frameBufferCopy is null || frameBufferCopied || bound.Color is null ) return;
 		frameBufferCopied = true;
 
-		// Made by an earlier part of the layer, in a list submitted before this one, which left it readable
+		// Made by an earlier part of the layer, in a list submitted before this one, which left it readable. Timed on its own,
+		// its mips (and mask) apart
+		var scope = frameBufferMadeBefore ? default : BeginGpuScope( "Frame Buffer Copy" );
 		if ( !frameBufferMadeBefore ) CopyTexture( bound.Color, frameBufferCopy, 1 );
 		var viewport = frameBufferCopyViewport;
 
 		// Its mips for blurred refraction, then readable by the draws after it: they bind only what's readable
 		if ( frameBufferCopy is BackendTexture copy )
 		{
-			if ( device.FrameBufferCopyMips && !frameBufferMadeBefore ) GenerateFrameBufferCopyMips( copy, viewport );
+			if ( device.FrameBufferCopyMips && !frameBufferMadeBefore )
+			{
+				var mips = BeginGpuScope( "Frame Buffer Copy Mips" );
+				GenerateFrameBufferCopyMips( copy, viewport );
+				EndGpuScope( mips );
+			}
+
 			Transition( copy, ImageLayout.ShaderRead );
 		}
+
+		EndGpuScope( scope );
 
 		attributes.Set( FrameBufferCopyTexture, frameBufferCopy );
 		attributes.Set( FrameBufferCopyRectangle, new Vector4( 0, 0, viewport.Width / frameBufferCopy.Width, viewport.Height / frameBufferCopy.Height ) );
@@ -1548,11 +1561,17 @@ internal sealed partial class BackendContext : GpuContext
 	/// (<see cref="BackendDevice.FullscreenQuad"/>) with <paramref name="parameters"/> over this context's, in
 	/// <paramref name="shaderMode"/> (else the material's first mode). A frame's flipped output is copied this way.
 	/// </summary>
-	public override void DrawFullscreen( GpuMaterial material, ShaderParameters parameters, StringToken shaderMode )
-	{
-		if ( recording is null || material is not BackendMaterial { Shader: { } shader } || shader.Modes.Count == 0 ) return;
+	public override void DrawFullscreen( GpuMaterial material, ShaderParameters parameters, StringToken shaderMode ) => Fullscreen( material, parameters, shaderMode );
 
-		var mode = ModeName( shader, shaderMode ) is null ? Token( shader.Modes[0].Name ) : shaderMode;
+	public override bool DrawFullscreenNow( GpuMaterial material, ShaderParameters parameters, StringToken shaderMode )
+		=> Fullscreen( material, parameters, shaderMode ) && recording is not null && !recording.List.SkippingDraws;
+
+	bool Fullscreen( GpuMaterial material, ShaderParameters parameters, StringToken shaderMode )
+	{
+		if ( recording is null || material is not BackendMaterial { Shader: { } shader } || shader.Modes.Count == 0 ) return false;
+
+		// The mode's name is looked up once per shader: the lookup walks the shader's modes, whose enumerator is an allocation
+		var mode = CachedModeName( shader, shaderMode ) is null ? Token( shader.Modes[0].Name ) : shaderMode;
 
 		// What it samples is read where it was drawn: a frame's colour, moved there first, as Source 2's blit does
 		if ( parameters is BackendParameters own )
@@ -1565,8 +1584,9 @@ internal sealed partial class BackendContext : GpuContext
 
 		var quad = device.FullscreenQuad;
 		SetObjectAttributes( parameters );
-		DrawModel( material, mode, quad, quad.DrawsForLod( 0 )[0], 0, 1 );
+		var drew = DrawModel( material, mode, quad, quad.DrawsForLod( 0 )[0], 0, 1 );
 		SetObjectAttributes( null );
+		return drew;
 	}
 
 	public override void DrawIndexedInstanced( in RenderMesh.Draw draw, int instanceCount ) { }
