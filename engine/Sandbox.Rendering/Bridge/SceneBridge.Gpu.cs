@@ -383,14 +383,14 @@ internal sealed partial class SceneBridge
 	bool RenderChildOnGpu( SceneCamera camera, in ViewSetup setup, Texture target, Texture depthTarget, out CameraState state )
 	{
 		using ( Borealis.Zones.ChildView.Start() )
-			return RenderOnGpu( camera, setup, target, depthTarget, rendering.View.ToneMapScalar, out state );
+			return RenderOnGpu( camera, setup, target, depthTarget, rendering.View.ToneMapScalar, out state, child: true );
 	}
 
 	/// <summary>
 	/// Render a view on the Borealis.Gpu device into targets of its own for <paramref name="target"/> and
 	/// <paramref name="depthTarget"/> (<see cref="RenderChildOnGpu"/>), with <paramref name="toneMapScalar"/> as its exposure.
 	/// </summary>
-	bool RenderOnGpu( SceneCamera camera, in ViewSetup setup, Texture target, Texture depthTarget, float toneMapScalar, out CameraState state )
+	bool RenderOnGpu( SceneCamera camera, in ViewSetup setup, Texture target, Texture depthTarget, float toneMapScalar, out CameraState state, bool child = false )
 	{
 		using var rendererAllocations = Borealis.RendererAllocations.Measure();
 		state = null;
@@ -398,6 +398,9 @@ internal sealed partial class SceneBridge
 
 		(var render, state) = Prepare( camera, setup, target.Size );
 		state.View.ToneMapScalar = toneMapScalar;
+
+		// A child of a frame being drawn may finish after the parent's other segments, its workers recording meanwhile
+		state.System.MayFinishLater = child;
 
 		var size = new Vector2Int( target.Width, target.Height );
 		var format = Source2Formats.From( target.ImageFormat );
@@ -414,7 +417,7 @@ internal sealed partial class SceneBridge
 			}
 
 			state.System.Render( render.World, state.View, output, 1, null );
-			MirrorContent.Gpu.MakeReadable( output );
+			state.System.AfterSubmit( makeReadable, output );
 			MirrorContent.SetCapture( target, output );
 			return true;
 		}
@@ -436,17 +439,19 @@ internal sealed partial class SceneBridge
 
 		state.System.Render( render.World, state.View, drawn, null );
 
-		// What reads them samples them
-		var gpu = MirrorContent.Gpu;
-		gpu.MakeReadable( drawn.Resolved );
+		// What reads them samples them, once the view is submitted: a child view drawn from a draw's callback may finish after
+		// its parent's other segments (RenderSystem.AfterSubmit), before the parent submits
+		state.System.AfterSubmit( makeReadable, drawn.Resolved );
 		MirrorContent.SetCapture( target, drawn.Resolved );
 		if ( depthTarget is not null )
 		{
-			gpu.MakeReadable( drawn.Depth );
+			state.System.AfterSubmit( makeReadable, drawn.Depth );
 			MirrorContent.SetCapture( depthTarget, drawn.Depth );
 		}
 		return true;
 	}
+
+	static readonly Action<Borealis.GpuTexture> makeReadable = static texture => MirrorContent.Gpu.MakeReadable( texture );
 
 	/// <summary>
 	/// A top-level view's planar reflection, as native's pipeline renders one for its views (<see cref="PlanarReflections"/>): the
