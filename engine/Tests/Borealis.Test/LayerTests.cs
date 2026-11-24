@@ -40,8 +40,8 @@ public class LayerTests
 	}
 
 	/// <summary>
-	/// An overlay in the prepass prepasses on its own, first, as native's overlay prepass does, and draws with the world in
-	/// forward; the world's prepass then tests the overlay stencil bit.
+	/// An overlay in the prepass prepasses on its own, first, as native's overlay prepass does, and the world's prepass then
+	/// tests the overlay stencil bit; it isn't drawn in the world's forward pass.
 	/// </summary>
 	[TestMethod]
 	public void OverlayPrepassesFirst()
@@ -61,9 +61,34 @@ public class LayerTests
 		var overlayPrepass = system.Layers.OfType<OverlayDepthPrepassLayer>().Single();
 		var opaque = system.Layers.OfType<OpaqueLayer>().Single();
 		Assert.IsTrue( overlayPrepass.IsNeeded( system.Frame ) );
-		Assert.AreEqual( 2, system.RunCount( view, opaque ), "both in forward" );
+		Assert.AreEqual( 1, system.RunCount( view, opaque ), "only the world in forward: the overlay is shaded in GameOverlay" );
 		var worldPrepass = system.Layers.OfType<DepthPrepassLayer>().Single( l => l.GetType() == typeof( DepthPrepassLayer ) );
 		Assert.IsTrue( System.Array.IndexOf( system.Layers, overlayPrepass ) < System.Array.IndexOf<RenderLayer>( system.Layers, worldPrepass ), "overlays first" );
+	}
+
+	/// <summary>
+	/// An opaque overlay is shaded once, in GameOverlay, after its depth alone in the overlay's range, so each of its pixels
+	/// shades once there.
+	/// </summary>
+	[TestMethod]
+	public void OverlayShadesOnceAfterItsDepth()
+	{
+		var world = new RenderWorld();
+		world.Add( new MeshObject( TestMesh( false ), new Transform( new Vector3( 20, 0, 0 ) ) ) { Overlay = true } );
+
+		using var system = new RenderSystem();
+		CollectAndPrepare( system, world, LookingDownX() );
+
+		var view = system.MainPass;
+		var layers = system.Layers;
+		var opaque = layers.OfType<OpaqueLayer>().Single();
+		var depth = layers.OfType<GameOverlayDepthLayer>().Single();
+		var overlay = layers.OfType<GameOverlayLayer>().Single( l => l.GetType() == typeof( GameOverlayLayer ) );
+		Assert.AreEqual( 0, system.RunCount( view, opaque ), "not in the world's forward pass" );
+		Assert.AreEqual( 1, system.RunCount( view, depth ) );
+		Assert.AreEqual( 1, system.RunCount( view, overlay ) );
+		Assert.IsTrue( depth.Depth && depth.IsNeeded( system.Frame ), "its depth alone" );
+		Assert.AreEqual( System.Array.IndexOf<RenderLayer>( layers, depth ) + 1, System.Array.IndexOf<RenderLayer>( layers, overlay ), "right before the colour" );
 	}
 
 	/// <summary>

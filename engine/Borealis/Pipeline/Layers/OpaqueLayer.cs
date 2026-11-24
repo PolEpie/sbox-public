@@ -12,7 +12,8 @@ internal sealed class OpaqueLayer : MeshLayer
 	public OpaqueLayer() : base( "Opaque Forward" )
 	{
 		ShaderMode = ForwardMode;
-		Runs = MeshRuns.Opaque | MeshRuns.OpaqueNoPrepass | MeshRuns.Faded | MeshRuns.OverlayPrepass;
+		// Not the overlays the prepass drew in the world (OverlayPrepass): they're shaded once, in GameOverlay
+		Runs = MeshRuns.Opaque | MeshRuns.OpaqueNoPrepass | MeshRuns.Faded;
 		OcclusionPhase = OcclusionPhase.Final;
 		TakesToolsPass = true;
 	}
