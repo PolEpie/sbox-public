@@ -150,6 +150,8 @@ internal static class MirrorContent
 				gpu.SetFeaturesOnMaterial( made.Material, material.FeaturesSetInCode );
 
 				made.Version = material.SetInCodeVersion;
+				made.Set = material.SetInCode;
+				made.Features = material.FeaturesSetInCode;
 			}
 
 			return made.Material;
@@ -165,7 +167,12 @@ internal static class MirrorContent
 		return shader.Contains( '/' ) ? shader : $"shaders/{shader}";
 	}
 
-	/// <summary>A material whose values or features set in code changed: its copy here takes them, if it has one.</summary>
+	/// <summary>
+	/// A material whose values or features set in code changed: its copy here takes them, if it has one. Code that sets a
+	/// material's values every frame (a weapon's glow) changes one or two values a frame: only values that changed are set,
+	/// textures are set again (what one resolves to can change), and features only when they changed (each change replaces
+	/// <see cref="Sandbox.Material.FeaturesSetInCode"/> whole), so following it allocates nothing.
+	/// </summary>
 	static void Follow( Sandbox.Material material )
 	{
 		if ( Gpu is not { } gpu || !setMaterials.TryGetValue( material, out var made ) ) return;
@@ -173,11 +180,34 @@ internal static class MirrorContent
 		lock ( made )
 		{
 			if ( made.Material is null || made.Version == material.SetInCodeVersion ) return;
-			var (values, textures) = Lower( material.SetInCode );
-			gpu.SetOnMaterial( made.Material, values, textures );
-			gpu.SetFeaturesOnMaterial( made.Material, material.FeaturesSetInCode );
+
+			var set = material.SetInCode;
+			if ( set is Dictionary<string, object> own )
+			{
+				foreach ( var (name, value) in own ) FollowOne( gpu, made, name, value );
+			}
+			else if ( set is not null )
+			{
+				foreach ( var (name, value) in set ) FollowOne( gpu, made, name, value );
+			}
+
+			if ( !ReferenceEquals( made.Features, material.FeaturesSetInCode ) ) gpu.SetFeaturesOnMaterial( made.Material, material.FeaturesSetInCode );
+
+			made.Set = set;
+			made.Features = material.FeaturesSetInCode;
 			made.Version = material.SetInCodeVersion;
 		}
+	}
+
+	/// <summary>One value or texture set in code on a material's copy (<see cref="Follow"/>): a value only when it changed.</summary>
+	static void FollowOne( BackendDevice gpu, SetMaterial made, string name, object value )
+	{
+		if ( value is Vector4 v )
+		{
+			if ( made.Set is { } before && before.TryGetValue( name, out var was ) && was is Vector4 old && old == v ) return;
+			gpu.SetValueOnMaterial( made.Material, name, [v.x, v.y, v.z, v.w] );
+		}
+		else if ( value is Sandbox.Texture t && Texture( t ) is { } texture ) gpu.SetTextureOnMaterial( made.Material, name, texture );
 	}
 
 	/// <summary>Values set in code as shader variables: vectors, and textures Borealis.Gpu has.</summary>
@@ -198,6 +228,10 @@ internal static class MirrorContent
 	{
 		public GpuMaterial Material;
 		public int Version;
+
+		/// <summary>The values and features set in code it last took (<see cref="Follow"/>).</summary>
+		public IReadOnlyDictionary<string, object> Set;
+		public IReadOnlyDictionary<string, int> Features;
 	}
 
 	static readonly ConditionalWeakTable<Sandbox.Material, SetMaterial> setMaterials = new();
