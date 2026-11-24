@@ -186,7 +186,7 @@ internal sealed partial class BackendContext
 		var objectChange = !bind && layerEpoch != timedLayer;
 		(timedMaterial, timedMode, timedLayer) = (material, shaderMode.Value, layerEpoch);
 		device.DrawTimes.Add( ticks, bind, drawn, objectChange );
-		if ( !drawn ) device.DrawTimes.Fail( material?.Name );
+		if ( !drawn ) device.DrawTimes.Fail( material?.Name, shaderMode.Value );
 		else if ( indirect.Count > 0 ) device.DrawTimes.AddIndirect( indirect.Count );
 		return drawn;
 	}

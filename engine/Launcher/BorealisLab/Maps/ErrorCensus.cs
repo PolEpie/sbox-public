@@ -184,7 +184,7 @@ internal static class ErrorCensus
 			foreach ( var g in bad ) census.Append( $"| {g.Key.Material ?? "(none)"} | {g.Key.Shader} | {g.Key.Kind} | {g.Sum( d => d.Calls )} | {string.Join( "; ", g.Select( d => d.Pass ).Distinct() )} |\n" );
 			lock ( map.Backend.DrawTimes.Failed )
 			{
-				foreach ( var (material, count) in map.Backend.DrawTimes.Failed ) census.Append( $"- recorded nothing: {count} draws of {material}\n" );
+				foreach ( var ((material, mode), count) in map.Backend.DrawTimes.FailedModes ) census.Append( $"- recorded nothing: {count} draws of {material} ({BackendContext.ModeNameOf( mode )})\n" );
 			}
 
 			foreach ( var (why, count) in map.Backend.GpuDrivenLeftClassic ) census.Append( $"- aggregate batches left classic: {count} {why}\n" );

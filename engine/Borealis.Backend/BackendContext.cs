@@ -1117,6 +1117,9 @@ internal sealed partial class BackendContext : GpuContext
 
 	static readonly System.Collections.Concurrent.ConcurrentDictionary<string, StringToken> tokens = new();
 
+	/// <summary>A mode's name from its token, for reports: one this backend has made a token of, else the number.</summary>
+	internal static string ModeNameOf( uint mode ) => System.Linq.Enumerable.FirstOrDefault( tokens, t => t.Value.Value == mode ).Key ?? mode.ToString( System.Globalization.CultureInfo.InvariantCulture );
+
 	internal static StringToken Token( string name ) => tokens.GetOrAdd( name, n => new StringToken( n ) );
 
 	/// <summary>
