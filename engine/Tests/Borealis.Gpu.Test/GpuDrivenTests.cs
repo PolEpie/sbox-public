@@ -2211,6 +2211,51 @@ public class GpuDrivenTests : GpuTest
 	}
 
 	/// <summary>
+	/// A 3D skybox's frame buffer copy is made, with its mask, only around the glass that reads it, which reads where it is
+	/// there (<see cref="BackendDevice.FrameBufferCopyRegions"/>): blurred and clear glass small in a skybox, in front of its
+	/// opaque boxes, and at the screen's edge, are the same pixels as with the copy made whole, multisampled too.
+	/// </summary>
+	[TestMethod]
+	public void SkyboxGlassFrameCopyMadeAroundItsReaders()
+	{
+		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDriven = false, GpuDrivenMeshes = true };
+		var (glassWorld, _) = GlassScene( backend );
+
+		var previousHost = RenderHost.Current;
+		RenderHost.Current = new BackendRenderHost( backend );
+		try
+		{
+			// The glass scene, far off in the skybox: what reads the copy is a small part of the screen
+			var world = new RenderWorld { Skybox3D = new Skybox3D( glassWorld ) { Scale = 16 } };
+			world.Lighting.SunShadowCascades = 0;
+			var view = new RenderView { Name = "Skybox glass", FieldOfView = 70, ZNear = 4, ZFar = 40000, ClearColor = new Color( 0.3f, 0.4f, 0.5f ), Viewport = new Rect( 0, 0, Width, Height ) };
+			view.Position = new Vector3( -16 * 2500, -16 * 300, 16 * 300 );
+			view.Rotation = Rotation.LookAt( -view.Position.WithZ( view.Position.z - 16 * 40 ) );
+
+			using var single = ViewTarget.Create( new Vector2Int( Width, Height ), 1, TextureFormat.RGBA16161616F, TextureFormat.D32FS8, "Skybox glass test" );
+			using var multi = ViewTarget.Create( new Vector2Int( Width, Height ), 4, TextureFormat.RGBA16161616F, TextureFormat.D32FS8, "Skybox glass test (4x)" );
+			foreach ( var target in new[] { single, multi } )
+			{
+				backend.FrameBufferCopyRegions = false;
+				var whole = GlassFrames( backend, world, view, target, false, new DrawCensus() );
+				backend.FrameBufferCopyRegions = true;
+				var census = new DrawCensus();
+				var around = GlassFrames( backend, world, view, target, false, census );
+
+				TestContext.WriteLine( $"{target.Samples}x: {Differences( whole, around )}" );
+				Assert.AreEqual( 0, Device.ValidationErrors, "no validation errors" );
+				Assert.IsTrue( census.Draws.Any( d => d.Pass.Contains( "Translucent Forward", StringComparison.Ordinal ) && d.Material is "Glass clear" or "Glass tinted" ), "the skybox's glass draws" );
+				Assert.AreEqual( 0, Different( whole, around ), $"{target.Samples}x: the same pixels" );
+			}
+		}
+		finally
+		{
+			Device.WaitIdle();
+			RenderHost.Current = previousHost;
+		}
+	}
+
+	/// <summary>
 	/// Refractive glass (glass.shader's surface, reading the frame buffer copy) draws GPU-driven in the translucent list's
 	/// order, with the frame copied once, at the first glass: between rows of translucent boxes that don't read it and in
 	/// front of opaque ones, two rows of glass, refracting, blurred and tinted, shade exactly as the classic path shades them,

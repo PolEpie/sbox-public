@@ -1448,6 +1448,7 @@ internal sealed partial class BackendContext : GpuContext
 		frameBufferCopyViewport = viewport;
 		frameBufferCopied = false;
 		frameBufferMadeBefore = madeBefore;
+		FrameBufferReadArea = FrameBufferReadArea.All;
 	}
 
 	public override void EndFrameBufferReads() => frameBufferCopy = null;
