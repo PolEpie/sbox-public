@@ -42,9 +42,16 @@ public sealed class DrawTimings
 	/// <summary>Draws that recorded nothing (no variant, no shader, or a way the backend can't draw yet), by material.</summary>
 	public Dictionary<string, int> Failed { get; } = new();
 
-	internal void Fail( string material )
+	/// <summary>The same by material and the mode drawn (its token: <see cref="BackendContext.ModeNameOf"/> names it).</summary>
+	public Dictionary<(string Material, uint Mode), int> FailedModes { get; } = new();
+
+	internal void Fail( string material, uint mode )
 	{
-		lock ( Failed ) Failed[material ?? "(none)"] = Failed.GetValueOrDefault( material ?? "(none)" ) + 1;
+		lock ( Failed )
+		{
+			Failed[material ?? "(none)"] = Failed.GetValueOrDefault( material ?? "(none)" ) + 1;
+			FailedModes[(material ?? "(none)", mode)] = FailedModes.GetValueOrDefault( (material ?? "(none)", mode) ) + 1;
+		}
 	}
 
 	internal void Add( long ticks, bool bind, bool drawn, bool objectChange = false )
@@ -86,6 +93,10 @@ public sealed class DrawTimings
 	{
 		Draws = Binds = BindTicks = DrawTicks = IndirectDraws = ObjectChanges = ObjectChangeTicks = 0;
 		GpuDrivenBatches = GpuDrivenBuckets = GpuDrivenMultiDraws = GpuDrivenFragments = 0;
-		lock ( Failed ) Failed.Clear();
+		lock ( Failed )
+		{
+			Failed.Clear();
+			FailedModes.Clear();
+		}
 	}
 }

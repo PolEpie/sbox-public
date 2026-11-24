@@ -146,6 +146,9 @@ public sealed unsafe class SwapChain : IDisposable
 		}
 		catch
 		{
+			// What was made before the failure: a window that can't be presented to yet is tried again
+			foreach ( var semaphore in acquireSemaphores ) vk.vkDestroySemaphore( vk.Device, semaphore.Handle, null );
+			acquireSemaphores.Clear();
 			device.Instance.vkDestroySurfaceKHR( device.Instance.Instance, surface, null );
 			throw;
 		}

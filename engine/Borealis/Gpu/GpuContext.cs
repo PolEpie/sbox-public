@@ -554,6 +554,12 @@ internal abstract class GpuContext : IDisposable
 	/// </summary>
 	public abstract void BeginFrameBufferReads( GpuTexture copy, Rect viewport, bool madeBefore = false );
 
+	/// <summary>
+	/// Where on the screen this layer's frame-buffer readers are, set after <see cref="BeginFrameBufferReads"/>: the copy need
+	/// only hold what they can read. The whole screen unless set.
+	/// </summary>
+	internal FrameBufferReadArea FrameBufferReadArea { get; set; } = FrameBufferReadArea.All;
+
 	/// <summary>Stop frame copies after the translucent layer.</summary>
 	public abstract void EndFrameBufferReads();
 

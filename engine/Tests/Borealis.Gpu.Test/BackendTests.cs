@@ -163,6 +163,7 @@ public class BackendTests : GpuTest
 		Assert.IsNotNull( missing.Shader.Mode( "Forward" ), "the error shader draws in every layer, with its one mode" );
 		Assert.IsNotNull( missing.Shader.Mode( "Depth" ) );
 		Assert.AreEqual( "materials/not_installed/missing_for_test.vmat", missing.Name );
+		StringAssert.Contains( backend.MaterialFallbacks.GetValueOrDefault( "materials/not_installed/missing_for_test.vmat" ) ?? "", "isn't built", "said for censuses" );
 
 		Assert.IsNull( ((Borealis.Backend.BackendMaterial)backend.LoadMaterial( "" )).Shader );
 	}
@@ -197,9 +198,84 @@ public class BackendTests : GpuTest
 		StringAssert.Contains( water.File.Shader, "error.shader" );
 		Assert.IsNotNull( water.Shader.Mode( "Forward" ), "the error shader draws in every layer" );
 		Assert.AreEqual( "materials/test/missing_shader_for_test.vmat", water.Name );
+		StringAssert.Contains( backend.MaterialFallbacks.GetValueOrDefault( "materials/test/missing_shader_for_test.vmat" ) ?? "", "shaders/not_shipped_for_test.shader won't load", "said for censuses" );
 
 		var unlit = Load( "materials/test/unlit_for_test.vmat", "shaders/unlit.shader" );
 		StringAssert.Contains( unlit.Shader?.Name ?? "", "unlit", "a shader that loads is kept" );
+		Assert.IsFalse( backend.MaterialFallbacks.ContainsKey( "materials/test/unlit_for_test.vmat" ), "nor said to fall back" );
+	}
+
+	/// <summary>
+	/// A translucent standard surface casts no shadow (it has no translucent depth pass), so once its program has compiled the
+	/// shadow and depth passes leave its draws out rather than try each and record nothing (a trash pile's on Flatgrass did
+	/// every frame).
+	/// </summary>
+	[TestMethod]
+	public void TranslucentSurfacesWithNoDepthPassArentTriedInDepthPasses()
+	{
+		using var backend = new Borealis.Backend.BackendDevice( Device );
+		var previousHost = RenderHost.Current;
+		RenderHost.Current = new Borealis.Backend.BackendRenderHost( backend );
+		try
+		{
+			using var system = new RenderSystem { ParallelRecording = false };
+			using var target = ViewTarget.Create( new Vector2Int( 160, 100 ), 1, TextureFormat.RGBA16161616F, TextureFormat.D32FS8, "Translucent depth test" );
+			// As the trash pile's: standard, translucent (a surface alone: no .shader to draw its depth instead)
+			var material = backend.LoadMaterial( "materials/test/translucent_standard_for_test.vmat", new Borealis.Source2.Materials.MaterialFile
+			{
+				Name = "materials/test/translucent_standard_for_test.vmat",
+				Shader = "shaders/standard.shader",
+				Ints = new Dictionary<string, int> { ["F_TRANSLUCENT"] = 1 },
+				Floats = new Dictionary<string, float>(),
+				Vectors = new Dictionary<string, float[]>(),
+				Textures = new Dictionary<string, string>(),
+				IntAttributes = new Dictionary<string, int>(),
+			} );
+			Assert.IsTrue( material.IsTranslucent, "a translucent standard material draws translucent" );
+
+			var world = new RenderWorld();
+			world.Lighting.SunDirection = new Vector3( 0.5f, 0.35f, -0.8f ).Normal;
+			world.Lighting.SunColor = Color.White;
+			world.Lighting.SunShadowCascades = 1;
+			world.Add( new MeshObject( ObjectAttributeTests.BoxMesh( backend, material ), new Transform( Vector3.Zero, Rotation.Identity, 2 ) ) );
+			world.Add( new MeshObject( ObjectAttributeTests.BoxMesh( backend, backend.CreateMaterial( "Translucent depth test floor", Color.White ) ), new Transform( new Vector3( 0, 0, -120 ), Rotation.Identity, new Vector3( 10, 10, 0.2f ) ) ) );
+
+			var view = new RenderView { Name = "Translucent depth test", FieldOfView = 60, ZNear = 4, ZFar = 4000, ClearColor = Color.Black, Viewport = new Rect( 0, 0, 160, 100 ) };
+			view.Position = new Vector3( -300, 0, 100 );
+			view.Rotation = Rotation.LookAt( -view.Position );
+
+			void Frame()
+			{
+				Device.BeginFrame();
+				RenderHost.Current.NextFrame();
+				system.Render( world, view, target );
+				Device.WaitIdle();
+			}
+
+			// Its program compiles on a worker after its first draw
+			for ( int i = 0; i < 600 && !material.DrawsNoDepth; i++ )
+			{
+				Frame();
+				System.Threading.Thread.Sleep( 10 );
+			}
+
+			Assert.IsTrue( material.DrawsNoDepth, "a compiled translucent standard surface has no depth pass of its own" );
+
+			backend.TimeDraws = true;
+			backend.DrawTimes.Reset();
+			Frame();
+			backend.TimeDraws = false;
+			lock ( backend.DrawTimes.Failed )
+			{
+				Assert.AreEqual( 0, backend.DrawTimes.Failed.GetValueOrDefault( material.Name ), $"no draw of it recorded nothing: {string.Join( ", ", backend.DrawTimes.FailedModes.Select( f => $"{f.Value} {f.Key.Material} ({Borealis.Backend.BackendContext.ModeNameOf( f.Key.Mode )})" ) )}" );
+			}
+
+			Assert.IsTrue( backend.DrawTimes.Draws > 0, "the frame drew" );
+		}
+		finally
+		{
+			RenderHost.Current = previousHost;
+		}
 	}
 
 	/// <summary>

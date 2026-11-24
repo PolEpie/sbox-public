@@ -79,6 +79,9 @@ internal sealed class RenderFrame
 	/// </summary>
 	public GpuTexture FrameBufferCopy { get; internal set; }
 
+	/// <summary>Where on the main view's screen what reads <see cref="FrameBufferCopy"/> is.</summary>
+	internal FrameBufferReadArea FrameBufferReadArea { get; set; }
+
 	/// <summary>
 	/// The opaque pass's normals and roughness while this frame traces screen-space reflections, or null
 	/// (<see cref="ScreenSpaceReflectionsLayer.NormalsFor"/>).
@@ -337,6 +340,7 @@ internal sealed class RenderFrame
 			// Parts are submitted in order: one after the first reader's finds the copy made
 			var reader = first > 0 ? System.FirstFrameBufferReader( view, layer ) : -1;
 			rc.BeginFrameBufferReads( FrameBufferCopy, View.Viewport, madeBefore: reader >= 0 && reader < first );
+			rc.FrameBufferReadArea = FrameBufferReadArea;
 		}
 
 		System.DrawRange( rc, view, layer, first, count, ref stats );
