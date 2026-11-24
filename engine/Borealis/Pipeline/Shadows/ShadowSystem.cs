@@ -695,6 +695,13 @@ internal sealed class ShadowSystem : IShadowRenderer, IDisposable
 		var side = tiles.Height;
 		context.TextureBarrier( tilesRaw, GpuStage.ComputeShader, GpuAccess.ShaderRead, GpuStage.ComputeShader, GpuAccess.ShaderWrite, TextureLayout.General );
 
+		// Every map readable before the first dispatch, so no barrier sits between the dispatches
+		for ( int i = 0; i < cascades.Length; i++ )
+		{
+			if ( (tileCascades & (1u << i)) == 0 ) continue;
+			context.TextureBarrier( cascades[i].Texture, GpuStage.LateFragmentTests, GpuAccess.DepthStencilAttachmentWrite, GpuStage.ComputeShader | GpuStage.FragmentShader, GpuAccess.ShaderRead, TextureLayout.ShaderRead );
+		}
+
 		var parameters = ParameterPool.Get();
 		parameters.Set( ShadowTilesOutName, tilesRaw );
 		parameters.SetCombo( WidenCombo, false );
@@ -702,7 +709,6 @@ internal sealed class ShadowSystem : IShadowRenderer, IDisposable
 		{
 			if ( (tileCascades & (1u << i)) == 0 ) continue;
 			var depth = cascades[i].Texture;
-			context.TextureBarrier( depth, GpuStage.LateFragmentTests, GpuAccess.DepthStencilAttachmentWrite, GpuStage.ComputeShader | GpuStage.FragmentShader, GpuAccess.ShaderRead, TextureLayout.ShaderRead );
 			parameters.Set( ShadowTileDepthName, depth );
 			parameters.Set( ShadowTilesName, new Vector4( i * side, side, 0, 0 ) );
 			context.Dispatch( TilesCompute, parameters, side * 8, side * 8, 1 );
