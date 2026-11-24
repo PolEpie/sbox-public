@@ -80,12 +80,14 @@ public class ShadowCacheCopyTests : GpuTest
 
 	/// <summary>
 	/// The sparse copy: the cache's 32x32 tiles made (<see cref="ShadowSystem.BuildCacheTiles"/>), the map cleared, and only the
-	/// tiles holding something nearer than the clear written; what the map held before is gone everywhere.
+	/// tiles holding something nearer than the clear written; what the map held before is gone everywhere. A wrap of whole
+	/// tiles draws a quad a tile; any other discards texel by texel.
 	/// </summary>
 	[TestMethod]
 	[DataRow( 0, 0 )]
 	[DataRow( 64, 32 )]
 	[DataRow( -32, 96 )]
+	[DataRow( 37, 11 )]
 	public void SparseCopyWritesOnlyTilesWithCasters( int offsetX, int offsetY )
 	{
 		const int Width = 128, Height = 128, Tile = 32;

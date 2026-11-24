@@ -1017,8 +1017,22 @@ internal sealed class ShadowSystem : IShadowRenderer, IDisposable
 		parameters.Set( CacheDepthName, source );
 		parameters.Set( CacheWrapName, new Vector4( ox, oy, w, h ) );
 		if ( tiles is not null ) parameters.Set( CacheTilesName, tiles );
-		parameters.Set( CacheSparseName, tiles is not null ? 1.0f : 0.0f );
-		var drew = context.DrawFullscreenNow( CacheCopy, parameters, DefaultMode );
+
+		// A quad a tile, those without a caster collapsed, where the wrap is a whole number of tiles; else every texel drawn,
+		// those of tiles without a caster discarded
+		var drew = false;
+		if ( tiles is not null && ox % TileTexels == 0 && oy % TileTexels == 0 && w % TileTexels == 0 && h % TileTexels == 0 )
+		{
+			parameters.Set( CacheSparseName, 2.0f );
+			drew = context.DrawFullscreenInstances( CacheCopy, parameters, DefaultMode, (w / TileTexels) * (h / TileTexels) );
+		}
+
+		if ( !drew )
+		{
+			parameters.Set( CacheSparseName, tiles is not null ? 1.0f : 0.0f );
+			drew = context.DrawFullscreenNow( CacheCopy, parameters, DefaultMode );
+		}
+
 		ParameterPool.Return( parameters );
 		return drew;
 	}
