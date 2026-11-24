@@ -81,7 +81,8 @@ public sealed class ViewTarget : IDisposable
 		if ( size.x < 1 || size.y < 1 ) throw new ArgumentOutOfRangeException( nameof( size ) );
 
 		var device = RenderHost.Current.Device;
-		var colorTexture = device.CreateTexture( TextureDesc.Target( size.x, size.y, color, samples ), $"{name} color" );
+		// Multisampled, sampled too: the frame copy resolves it where it reads it
+		var colorTexture = device.CreateTexture( TextureDesc.Target( size.x, size.y, color, samples ) with { SampledMultisampled = samples > 1 }, $"{name} color" );
 		var depthTexture = device.CreateTexture( TextureDesc.Target( size.x, size.y, depth, samples ), $"{name} depth" );
 
 		GpuTexture resolved = null;

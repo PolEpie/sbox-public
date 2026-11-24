@@ -1451,6 +1451,7 @@ internal sealed partial class BackendContext : GpuContext
 		frameBufferCopyViewport = viewport;
 		frameBufferCopied = false;
 		frameBufferMadeBefore = madeBefore;
+		FrameBufferReadArea = FrameBufferReadArea.All;
 	}
 
 	public override void EndFrameBufferReads() => frameBufferCopy = null;
@@ -1463,19 +1464,27 @@ internal sealed partial class BackendContext : GpuContext
 		// Made by an earlier part of the layer, in a list submitted before this one, which left it readable. Timed on its own,
 		// its mips (and mask) apart
 		var scope = frameBufferMadeBefore ? default : BeginGpuScope( "Frame Buffer Copy" );
-		if ( !frameBufferMadeBefore ) CopyTexture( bound.Color, frameBufferCopy, 1 );
 		var viewport = frameBufferCopyViewport;
+		var copy = frameBufferCopy as BackendTexture;
 
-		// Its mips for blurred refraction, then readable by the draws after it: they bind only what's readable
-		if ( frameBufferCopy is BackendTexture copy )
+		// With mips, the depth-aware mask, made with the copy in one pass where it can be; then the mips for blurred refraction
+		var masked = !frameBufferMadeBefore && device.FrameBufferCopyMips && copy is { Mips: > 1 };
+		if ( !frameBufferMadeBefore && !(masked && CopyFrameBufferMasked( bound.Color as BackendTexture, copy, viewport )) )
 		{
-			if ( device.FrameBufferCopyMips && !frameBufferMadeBefore )
+			CopyTexture( bound.Color, frameBufferCopy, 1 );
+			if ( masked ) MaskFrameBufferCopy( copy, viewport, null );
+		}
+
+		if ( copy is not null )
+		{
+			if ( masked )
 			{
 				var mips = BeginGpuScope( "Frame Buffer Copy Mips" );
 				GenerateFrameBufferCopyMips( copy, viewport );
 				EndGpuScope( mips );
 			}
 
+			// Then readable by the draws after it: they bind only what's readable
 			Transition( copy, ImageLayout.ShaderRead );
 		}
 

@@ -40,4 +40,38 @@ public class FrameBufferCopyTests
 
 		Assert.AreEqual( 1, frame.Commands.Count( c => c.Op == GpuOp.CopyFrameBuffer ), "one copy, at the layer's first reader" );
 	}
+
+	/// <summary>
+	/// Where a reader is on the screen (<see cref="FrameBufferReadArea"/>): in front, the rectangle around its bounds'
+	/// projection; crossing the camera's plane, the whole screen; behind it, past the far plane or off to the side, nowhere.
+	/// </summary>
+	[TestMethod]
+	public void ReadAreaIsWhereTheReadersAreOnScreen()
+	{
+		var view = LookingDownX();
+		var toProjection = view.WorldToProjection;
+
+		var area = FrameBufferReadArea.Empty;
+		area.Add( new Vector3( 100, 0, 0 ), new Vector3( 1, 10, 10 ), toProjection );
+		Assert.IsFalse( area.Whole || area.IsEmpty, "a reader in front is somewhere" );
+		Assert.AreEqual( -10f / 99, area.Min.x, 0.002f, "its left at the near face's edge" );
+		Assert.AreEqual( 10f / 99, area.Max.x, 0.002f );
+		Assert.AreEqual( -10f / 99, area.Min.y, 0.002f );
+		Assert.AreEqual( 10f / 99, area.Max.y, 0.002f );
+
+		// A second widens it
+		area.Add( new Vector3( 100, -40, 0 ), new Vector3( 1, 10, 10 ), toProjection );
+		Assert.AreEqual( 50f / 99, area.Max.x, 0.002f, "right of the first: -y is to the right looking down +x" );
+
+		foreach ( var (center, what) in new[] { (new Vector3( -100, 0, 0 ), "behind"), (new Vector3( 2000, 0, 0 ), "past the far plane"), (new Vector3( 100, 500, 0 ), "off the side") } )
+		{
+			var nowhere = FrameBufferReadArea.Empty;
+			nowhere.Add( center, new Vector3( 1, 10, 10 ), toProjection );
+			Assert.IsTrue( nowhere.IsEmpty, $"a reader {what} is nowhere" );
+		}
+
+		var around = FrameBufferReadArea.Empty;
+		around.Add( Vector3.Zero, new Vector3( 5, 5, 5 ), toProjection );
+		Assert.IsTrue( around.Whole, "a reader round the camera may be read anywhere" );
+	}
 }

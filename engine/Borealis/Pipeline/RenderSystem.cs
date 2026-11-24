@@ -758,6 +758,7 @@ public sealed partial class RenderSystem : IDisposable
 	}
 
 	GpuTexture frameBufferCopy, otherFrameBufferCopy;
+	bool frameBufferCopyNew;
 
 	/// <summary>
 	/// Persistent mipmapped RGBA16F copy (<c>FindOrCreateFrameBufferScratchTexture</c>).
@@ -783,6 +784,7 @@ public sealed partial class RenderSystem : IDisposable
 		var device = RenderHost.Current.Device;
 		frameBufferCopy = device.CreateTexture( desc, "Borealis frame buffer copy" );
 		device.Clear( frameBufferCopy, Color.Transparent );
+		frameBufferCopyNew = true;
 		return frameBufferCopy;
 	}
 
@@ -872,6 +874,11 @@ public sealed partial class RenderSystem : IDisposable
 
 		// Here on the main thread: the translucent layer's parts copy into it on their workers
 		frame.FrameBufferCopy = ReadsFrameBuffer( MeshRenderFeature.FrameBufferCopyingLists ) ? FrameBufferCopy( view.Viewport ) : null;
+
+		// A 3D skybox's glass reads the copy where it is (it doesn't refract there), so the copy need only be made there; a
+		// new copy is made whole, so what's around that is a frame's and not the cleared texture's
+		frame.FrameBufferReadArea = frame.FrameBufferCopy is null || !isSkybox || frameBufferCopyNew || aggregates.ResidentReadsFrameBuffer( mainPass ) ? FrameBufferReadArea.All : meshes.ReadArea( mainPass );
+		frameBufferCopyNew = false;
 
 		// Skyboxes use their own system and view.
 		using ( Zones.SkyboxPrepare.Start() ) PrepareSkybox( world, view );
