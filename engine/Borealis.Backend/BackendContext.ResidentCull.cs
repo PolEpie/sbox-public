@@ -650,21 +650,33 @@ internal sealed partial class BackendContext
 		{
 			cullRuns.Clear();
 			for ( int i = 0; i < plan.Runs.Length; i++ ) cullRuns.Add( ResidentRun( plan, i, assignment.Region.Compacted, assignment.Region.Compacted16 ) );
+
+			// A prepass whose own batches follow: their call marks these ids with its own
+			markLater = ids && prefix < batches.Length && device.MergedMarks;
 			DrawCulledRegion( cull, assignment.Region, 0, compact, shaders, visibility, ids, lists, meshlets, depth, samples, depthBias, slopeScaledDepthBias, resolver, assignment.Fragments, dispatch: false );
 			plan.Drawn.AsSpan().CopyTo( drawn );
 			TimeGpuDriven( start, drawn[..prefix], assignment.Fragments );
 		}
 		finally
 		{
+			markLater = false;
 			gpuDrivenBuckets = ownBuckets;
 			gpuDrivenBucketCount = 0;
 		}
 
 		System.Threading.Interlocked.Increment( ref device.ResidentCullCalls );
 
-		// The view's own batches: a call of their own, with buckets, culling, ids and compaction of its own
-		if ( prefix < batches.Length && EnsureScope() )
-			DrawBucketed( shaderMode, batches[prefix..], args, transforms, depthBias, slopeScaledDepthBias, drawn[prefix..], cull with { Plan = null, PlanBatches = 0 }, null, 0 );
+		// The view's own batches: a call of their own, with buckets, culling, ids and compaction of its own; the resident
+		// ids are marked with theirs, or here when they drew none
+		try
+		{
+			if ( prefix < batches.Length && EnsureScope() )
+				DrawBucketed( shaderMode, batches[prefix..], args, transforms, depthBias, slopeScaledDepthBias, drawn[prefix..], cull with { Plan = null, PlanBatches = 0 }, null, 0 );
+		}
+		finally
+		{
+			MarkUnmarked();
+		}
 
 		return true;
 	}

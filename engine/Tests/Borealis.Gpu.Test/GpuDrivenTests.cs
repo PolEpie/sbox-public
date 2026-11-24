@@ -672,6 +672,122 @@ public class GpuDrivenTests : GpuTest
 	}
 
 	/// <summary>
+	/// <see cref="BackendDevice.MergedMarks"/>: a prepass call drawn from the resident cull, followed by the view's own
+	/// batches (a box moved every frame), leaves its ids for their call to mark. Resident aggregates and a seeded field of
+	/// boxes with three LODs, in the main world and in its 3D skybox, each with a moving box, draw the same pixels with one
+	/// mark a view as with a mark a call, single-sampled and multisampled, serial and on workers, and with normals from the
+	/// ids (whose target keeps every call's ids).
+	/// </summary>
+	[TestMethod]
+	[DataRow( false )]
+	[DataRow( true )]
+	public void MergedMarksDrawWhatAMarkACallDraws( bool idsNormals )
+	{
+		using var backend = new BackendDevice( Device ) { GpuDrivenGeometry = true, GpuDriven = true, GpuDrivenVisibility = true, IdsNormals = idsNormals };
+		RequireGpuDrivenDepth( backend );
+		if ( backend.ResidentCullShader is null ) Assert.Inconclusive( "borealis_resident_cull_cs isn't compiled" );
+
+		var previousHost = RenderHost.Current;
+		RenderHost.Current = new BackendRenderHost( backend );
+		try
+		{
+			using var system = new RenderSystem { ParallelRecording = false };
+			using var single = ViewTarget.Create( new Vector2Int( Width, Height ), 1, TextureFormat.RGBA16161616F, TextureFormat.D32FS8, "Merged marks test" );
+			using var multi = ViewTarget.Create( new Vector2Int( Width, Height ), 4, TextureFormat.RGBA16161616F, TextureFormat.D32FS8, "Merged marks test (4x)" );
+
+			var vertices = new List<MeshVertex>();
+			var indices = new List<uint>();
+			Box( vertices, indices, Vector3.Zero, 10 );
+			var lodMaterials = new[] { new Color( 0.9f, 0.2f, 0.2f ), new Color( 0.2f, 0.9f, 0.2f ), new Color( 0.2f, 0.2f, 0.9f ) }
+				.Select( ( c, i ) => backend.CreateMaterial( $"Merged marks LOD {i}", c ) ).ToArray();
+			var box = BackendMesh.Create( backend, vertices.ToArray(), indices.ToArray(), lodMaterials[0], "Merged marks LOD box" );
+			var draw = box.Draws[0];
+			RenderMesh.Draw[][] lods = [[draw], [draw with { Material = lodMaterials[1] }], [draw with { Material = lodMaterials[2], IndexCount = 12 }]];
+			var model = new RenderMesh( box.Geometry, box.Bounds, lods, [0, 30, 90] );
+			var moving = BackendMesh.Create( backend, vertices.ToArray(), indices.ToArray(), backend.CreateMaterial( "Merged marks moving", new Color( 0.9f, 0.8f, 0.3f ) ), "Merged marks moving box" );
+
+			// A world of a resident row, a field of boxes and a box that moves, seen from (-400, 0, 200)
+			(RenderWorld World, MeshObject Moving) Scene( int seed )
+			{
+				var world = new RenderWorld();
+				world.Lighting.SunDirection = new Vector3( 0.5f, 0.35f, -0.8f ).Normal;
+				world.Lighting.SunColor = new Color( 1.25f, 1.15f, 1.0f );
+				world.Lighting.AmbientColor = new Color( 0.12f, 0.15f, 0.2f, 1 );
+				world.Lighting.SunShadowCascades = 0;
+				var (rowMesh, fragments) = Boxes( backend, backend.CreateMaterial( $"Merged marks row {seed}", new Color( 0.5f, 0.6f, 0.4f ) ), -120 );
+				world.Add( new AggregateObject( rowMesh, fragments ) { IsStatic = true } );
+				var random = new Random( seed );
+				for ( int i = 0; i < 120; i++ )
+				{
+					var position = new Vector3( random.NextSingle() * 1600 - 200, random.NextSingle() * 1600 - 800, random.NextSingle() * 60 );
+					world.Add( new MeshObject( model, new Transform( position, Rotation.FromYaw( random.NextSingle() * 360 ), 0.5f + random.NextSingle() * 2.5f ) ) { IsStatic = true } );
+				}
+
+				var mover = new MeshObject( moving, new Transform( new Vector3( 0, 0, 40 ), Rotation.Identity, 4 ) );
+				world.Add( mover );
+				return (world, mover);
+			}
+
+			// The skybox's scene seen from where the main world's is, its camera at (-400, 0, 200) there too: drawn where the main
+			// world shows nothing
+			var (skyWorld, skyMover) = Scene( 1234 );
+			var (world, mover) = Scene( 4321 );
+			world.Skybox3D = new Skybox3D( skyWorld ) { Scale = 16, Origin = new Vector3( -400 + 400 / 16f, 0, 200 - 200 / 16f ) };
+			var view = new RenderView { Name = "Merged marks test", FieldOfView = 70, ZNear = 4, ZFar = 4000, ClearColor = new Color( 0.3f, 0.4f, 0.5f ), Viewport = new Rect( 0, 0, Width, Height ) };
+			view.Position = new Vector3( -400, 0, 200 );
+			view.Rotation = Rotation.LookAt( new Vector3( 1, 0, -0.1f ) );
+
+			// The same frames each way: the boxes move along the same path
+			byte[] Frames( ViewTarget target, bool merged )
+			{
+				backend.MergedMarks = merged;
+				byte[] pixels = null;
+				for ( int i = 0; i < 8; i++ )
+				{
+					mover.Transform = mover.Transform.WithPosition( new Vector3( 100 + i * 30, 40 - i * 10, 60 ) );
+					skyMover.Transform = skyMover.Transform.WithPosition( new Vector3( 300 + i * 30, 60 + i * 10, 40 ) );
+					backend.BeginFrame();
+					RenderHost.Current.NextFrame();
+					system.Render( world, view, target );
+					Device.WaitIdle();
+					var color = target.Samples > 1 ? target.Resolved : target.Color;
+					var (texture, layout) = BackendDevice.Unwrap( color );
+					pixels = ReadBack( texture, layout );
+					BackendDevice.SetLayout( color, ImageLayout.CopySource );
+				}
+
+				return pixels;
+			}
+
+			foreach ( var parallel in new[] { false, true } )
+			{
+				system.ParallelRecording = parallel;
+				foreach ( var target in new[] { single, multi } )
+				{
+					var name = $"{target.Samples}x{(parallel ? ", on workers" : "")}";
+					Frames( target, true );
+					var apart = Frames( target, false );
+					var none = backend.MarksMerged;
+					var mergedCalls = backend.ResidentCullCalls;
+					var merged = Frames( target, true );
+					TestContext.WriteLine( $"{name}: {Differences( apart, merged )}, {backend.MarksMerged - none} marks merged" );
+					Assert.AreEqual( 0, Device.ValidationErrors, $"{name}: no validation errors" );
+					Assert.IsTrue( backend.ResidentCullCalls > mergedCalls, $"{name}: calls drew from the resident cull" );
+					Assert.IsTrue( backend.MarksMerged - none >= 8 * 2, $"{name}: both views' resident prepass marked with their own batches' ({backend.MarksMerged - none})" );
+					Assert.AreEqual( 0, Different( apart, merged ), $"{name}: the same pixels" );
+				}
+			}
+
+			Assert.IsTrue( system.SkyboxSystem is { Stats.Draws: > 0 }, "the skybox drew" );
+		}
+		finally
+		{
+			Device.WaitIdle();
+			RenderHost.Current = previousHost;
+		}
+	}
+
+	/// <summary>
 	/// A render system disposed takes its views out of the resident cull's state (<see cref="GpuDevice.ReleaseView"/>): the
 	/// device keeps which calls each view drew, and with them the view's pass and what it last drew, until frames age them
 	/// out, which after the renderer has gone (at shutdown) never happens.
