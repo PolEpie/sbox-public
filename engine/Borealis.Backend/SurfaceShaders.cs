@@ -978,8 +978,8 @@ internal sealed class SurfaceProgram : IDisposable
 		var fields = Compiled.Material.Features;
 		if ( fields.Count == 0 ) return null;
 
-		// Kept on the material until a field changes: buckets ask for every batch
-		var version = material.Version;
+		// Kept on the material until a field its features read changes: buckets ask for every batch
+		var version = material.StateVersion;
 		if ( material.Specialization is { } cached && cached.Version == version && ReferenceEquals( cached.Program, this ) ) return cached.Features;
 
 		var (key, values) = material.Features( fields );

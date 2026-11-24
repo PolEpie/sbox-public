@@ -49,6 +49,42 @@ public class MaterialSetInCodeTests : GpuTest
 	}
 
 	/// <summary>
+	/// Code that sets a value on its copy of a material every frame (the physgun's glow): each set lands and moves the
+	/// material's version on, but not its state version, so its render state and feature values aren't worked out again,
+	/// and neither the set nor reading them back allocates. A feature set in code still moves the state on.
+	/// </summary>
+	[TestMethod]
+	public void AValueSetEveryFrameAllocatesNothing()
+	{
+		using var backend = new BackendDevice( Device );
+		const string path = "materials/default/white.vmat";
+		if ( backend.Content.Find( path ) is null ) Assert.Inconclusive( $"{path} isn't built" );
+		if ( backend.LoadMaterial( path, new Dictionary<string, float[]> { ["g_vColorTint"] = [1, 0, 0, 1] }, null ) is not ConvertedMaterial set ) { Assert.Inconclusive( "white.vmat isn't drawn as a surface here" ); return; }
+
+		_ = set.RenderState;
+		backend.SetValueOnMaterial( set, "g_vColorTint", [0, 1, 0, 1] );
+		_ = set.RenderState;
+
+		var state = set.StateVersion;
+		var version = set.Version;
+		var before = GC.GetAllocatedBytesForCurrentThread();
+		for ( int frame = 0; frame < 100; frame++ )
+		{
+			backend.SetValueOnMaterial( set, "g_vColorTint", [frame / 100f, 1, 0, 1] );
+			_ = set.RenderState;
+		}
+
+		var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+		Assert.AreEqual( 0, allocated, "setting a value and reading the render state back allocated" );
+		Assert.AreNotEqual( version, set.Version, "each set moves the version on" );
+		Assert.AreEqual( state, set.StateVersion, "a value no state reads leaves the state version" );
+
+		backend.SetFeaturesOnMaterial( set, new Dictionary<string, int> { ["F_ALPHA_TEST"] = 1 } );
+		Assert.AreNotEqual( state, set.StateVersion, "a feature set in code moves the state on" );
+		Assert.IsTrue( set.RenderState.AlphaTest, "and the render state follows it" );
+	}
+
+	/// <summary>
 	/// A material made in code from a shader alone (complex, which standard stands for, as <c>Material.Create</c> makes one) is
 	/// the surface with its defaults, every texture the error texture as the shader's raw material had, until code sets one; a
 	/// feature set in code reaches its field, and setting none takes it back.
