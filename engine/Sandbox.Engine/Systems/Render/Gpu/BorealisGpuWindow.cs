@@ -12,8 +12,14 @@ namespace Sandbox;
 internal sealed partial class BorealisGpuWindow : IDisposable
 {
 	readonly BorealisGpuRenderBackend backend;
-	readonly SwapChain swapChain;
 	Texture target;
+
+	// Null while the game window's surface can't be presented to (no display attached: the driver can't say what it takes):
+	// frames are drawn into the target and not shown, and a swap chain is tried again now and then (Update)
+	SwapChain swapChain;
+	readonly SurfaceSource surface;
+	bool vsyncWanted;
+	long retryAt;
 
 	/// <summary>The size frames are drawn at, in pixels.</summary>
 	public Vector2 Size { get; private set; }
@@ -29,12 +35,34 @@ internal sealed partial class BorealisGpuWindow : IDisposable
 		// the window system's handles: the splash's window isn't made for Vulkan, which SDL's own surface call requires
 		sdl = Borealis.Sdl.SdlWindow.Wrap( window );
 		var (width, height) = sdl.PixelSize;
-		swapChain = backend.CreateSwapChain( SurfaceOf( sdl.NativeWindow ), Math.Max( width, 1 ), Math.Max( height, 1 ), vsync );
-
-		// The game window's presents are queued on a thread of their own: the present call's cost leaves the main thread
-		swapChain.PresentOnThread = true;
+		surface = SurfaceOf( sdl.NativeWindow );
+		vsyncWanted = vsync;
 		Size = new Vector2( width, height );
+		TryPresenting( width, height );
+		if ( swapChain is null ) Log.Warning( $"Borealis.Gpu: the game window can't be presented to ({unpresentable}); its frames are drawn but not shown until it can be" );
 		timestamps = CreateTimestamps( backend, out timestampMs );
+	}
+
+	string unpresentable;
+
+	/// <summary>
+	/// Make the game window's swap chain, or leave none when its surface can't be presented to: with no display attached the
+	/// driver can't say what the surface takes, and the game goes on drawing rather than exiting. A lost device still throws.
+	/// </summary>
+	void TryPresenting( int width, int height )
+	{
+		try
+		{
+			swapChain = backend.CreateSwapChain( surface, Math.Max( width, 1 ), Math.Max( height, 1 ), vsyncWanted );
+
+			// The game window's presents are queued on a thread of their own: the present call's cost leaves the main thread
+			swapChain.PresentOnThread = true;
+		}
+		catch ( GpuException e ) when ( !e.IsDeviceLost && sdl is not null )
+		{
+			unpresentable = e.Message;
+			retryAt = Environment.TickCount64 + 2000;
+		}
 	}
 
 	BorealisGpuWindow( BorealisGpuRenderBackend backend, SurfaceSource surface, IntPtr nativeWindow, Vector2 pixelSize, bool vsync )
@@ -174,9 +202,17 @@ internal sealed partial class BorealisGpuWindow : IDisposable
 		// Minimised: the frame thread doesn't acquire for the window until it has a size again
 		resizeWanted = pixelSize.x < 1 || pixelSize.y < 1;
 		if ( resizeWanted ) return false;
+
+		// A window that couldn't be presented to tries again every two seconds (a display attached since)
+		if ( swapChain is null && sdl is not null && Environment.TickCount64 >= retryAt )
+		{
+			TryPresenting( (int)pixelSize.x, (int)pixelSize.y );
+			if ( swapChain is not null ) Log.Info( "Borealis.Gpu: the game window can be presented to again" );
+		}
+
 		if ( pixelSize == Size && target is not null ) return true;
 
-		if ( pixelSize != Size ) swapChain.Resize( (int)pixelSize.x, (int)pixelSize.y );
+		if ( pixelSize != Size ) swapChain?.Resize( (int)pixelSize.x, (int)pixelSize.y );
 		Size = pixelSize;
 		target?.Dispose();
 		target = Texture.CreateRenderTarget().WithSize( (int)pixelSize.x, (int)pixelSize.y ).WithFormat( ImageFormat.RGBA8888 ).Create( "Borealis.Gpu window" );
@@ -190,6 +226,12 @@ internal sealed partial class BorealisGpuWindow : IDisposable
 	public bool Present( Color background, bool clear, Action draw )
 	{
 		if ( target is null ) return false;
+		if ( swapChain is null )
+		{
+			Draw( backend, target, background, clear, draw, null );
+			return true;
+		}
+
 		backend.BeforeAcquire( swapChain );
 		if ( !swapChain.Acquire( out _ ) ) return false;
 
@@ -212,13 +254,14 @@ internal sealed partial class BorealisGpuWindow : IDisposable
 	public int Samples { get; set; } = 1;
 
 	/// <summary>Whether the swap chain presents with vsync.</summary>
-	public bool VSync => swapChain.PresentMode == PresentMode.Fifo;
+	public bool VSync => swapChain is null ? vsyncWanted : swapChain.PresentMode == PresentMode.Fifo;
 
 	/// <summary>Present with vsync or as soon as possible from now on. Recreates the swap chain's images when it changes.</summary>
 	public void SetVSync( bool vsync )
 	{
 		if ( VSync == vsync ) return;
-		swapChain.SetPresentMode( vsync ? PresentMode.Fifo : BorealisGpuRenderBackend.NoVSyncMode );
+		vsyncWanted = vsync;
+		swapChain?.SetPresentMode( vsync ? PresentMode.Fifo : BorealisGpuRenderBackend.NoVSyncMode );
 	}
 
 	/// <summary>
@@ -236,13 +279,14 @@ internal sealed partial class BorealisGpuWindow : IDisposable
 	{
 		using var rendererAllocations = Borealis.RendererAllocations.Measure();
 		if ( target is null ) return false;
-		backend.BeforeAcquire( swapChain );
+		if ( swapChain is not null ) backend.BeforeAcquire( swapChain );
+		else backend.FollowFrame();
 		try
 		{
 			// Acquired on the frame thread while the game ran (AcquireAhead), or now
 			var ahead = acquiredAhead;
 			acquiredAhead = false;
-			if ( !ahead && !swapChain.Acquire( out _ ) ) return false;
+			if ( !ahead && swapChain is not null && !swapChain.Acquire( out _ ) ) return false;
 		}
 		catch ( GpuException e ) when ( e.IsDeviceLost )
 		{
@@ -262,6 +306,9 @@ internal sealed partial class BorealisGpuWindow : IDisposable
 	// An image the frame thread acquired for the next frame, and a size change that waits for a frame without one
 	bool acquiredAhead, resizeWanted;
 
+	// A frame drawn with no swap chain to show it in, which PresentFrame counts as presented
+	bool drawnUnshown;
+
 	/// <summary>
 	/// On the frame thread, after the next frame's device frame started (<see cref="BorealisGpuRenderBackend.HandOverFrame"/>):
 	/// acquire the image the next <see cref="BeginFrame"/> draws into, so a wait for one (vsync's) is off the main thread.
@@ -269,7 +316,7 @@ internal sealed partial class BorealisGpuWindow : IDisposable
 	/// </summary>
 	internal void AcquireAhead()
 	{
-		if ( target is null || resizeWanted || Size.x < 1 || Size.y < 1 || swapChain.Current.IsValid ) return;
+		if ( target is null || resizeWanted || Size.x < 1 || Size.y < 1 || swapChain is null || swapChain.Current.IsValid ) return;
 		using var timing = AcquireAheadTiming.Scope();
 		acquiredAhead = swapChain.Acquire( out _ );
 	}
@@ -308,7 +355,9 @@ internal sealed partial class BorealisGpuWindow : IDisposable
 			// The acquired image has to be presented whatever the drawing did, or the next frame can't acquire
 			if ( present )
 			{
-				backend.CopyToSwapChain( target, swapChain );
+				// With nothing acquired (no swap chain yet: nothing can be shown) the frame is drawn all the same
+				if ( swapChain is { Current.IsValid: true } chain ) backend.CopyToSwapChain( target, chain );
+				else drawnUnshown = true;
 				if ( timestamps is not null ) backend.WriteTimestamp( timestamps, TimestampSlot + 1, PipelineStage.AllCommands );
 			}
 		}
@@ -371,17 +420,22 @@ internal sealed partial class BorealisGpuWindow : IDisposable
 	public bool PresentFrame()
 	{
 		using var rendererAllocations = Borealis.RendererAllocations.Measure();
-		if ( !swapChain.Current.IsValid ) return false;
-		try
+		if ( swapChain is { Current.IsValid: true } )
 		{
-			swapChain.Present();
+			try
+			{
+				swapChain.Present();
+			}
+			catch ( GpuException e ) when ( e.IsDeviceLost )
+			{
+				// Said once, with what the GPU was doing when it was lost, and the process exits as native's does
+				BorealisGpuDeviceLost.Check( backend.Device );
+				throw;
+			}
 		}
-		catch ( GpuException e ) when ( e.IsDeviceLost )
-		{
-			// Said once, with what the GPU was doing when it was lost, and the process exits as native's does
-			BorealisGpuDeviceLost.Check( backend.Device );
-			throw;
-		}
+		else if ( !drawnUnshown ) return false;
+
+		drawnUnshown = false;
 
 		// The oldest pair in flight, the frame TimedFrames - 1 back
 		if ( timestamps is not null )
@@ -434,8 +488,11 @@ internal sealed partial class BorealisGpuWindow : IDisposable
 	{
 		// The frame thread may be acquiring for this window
 		if ( backend.FrameAhead ) backend.FollowFrame();
-		backend.Forget( swapChain );
-		swapChain.Dispose();
+		if ( swapChain is not null )
+		{
+			backend.Forget( swapChain );
+			swapChain.Dispose();
+		}
 		sdl?.Dispose();
 		timestamps?.Dispose();
 		ReleaseTarget();

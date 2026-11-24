@@ -1556,6 +1556,10 @@ internal sealed partial class MeshRenderFeature : RenderFeature
 			// Shared attributes preserve material binds between draws.
 
 			var material = MaterialFor( run, draw, depth, layer.ForceDepthFastPath, out var stripPixelShader );
+
+			// A translucent surface that casts no shadow has nothing to draw in a depth-only pass
+			if ( depth && material is { DrawsNoDepth: true } ) continue;
+
 			var probe = depth || run.Probe is null || !RenderMesh.NeedsLightProbe( material ) ? null : run.Probe;
 			context.SetObjectAttributes( run.Attributes, draw.Lightmapped ? (depth ? null : run.Lightmap) : probe );
 

@@ -8,11 +8,11 @@ internal sealed partial class BorealisGpuWindow
 	/// On the frame thread, while the main thread is busy past a frame it handed over (<see cref="BorealisGpuRenderBackend"/>'s
 	/// keep presenting): present the last frame's output again, copied from <see cref="Target"/> into the image acquired ahead,
 	/// then acquire the next for the main thread's frame. Nothing while the window is minimised, waits to resize or has no
-	/// target. True when it presented.
+	/// target, or nothing to present to. True when it presented.
 	/// </summary>
 	internal bool PresentAgain( Device gpu, TextureHandle output )
 	{
-		if ( target is null || resizeWanted || Size.x < 1 || Size.y < 1 || !output.IsValid ) return false;
+		if ( target is null || swapChain is null || resizeWanted || Size.x < 1 || Size.y < 1 || !output.IsValid ) return false;
 
 		try
 		{
