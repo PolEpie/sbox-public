@@ -1575,7 +1575,10 @@ internal sealed partial class BackendContext : GpuContext
 	public override bool DrawFullscreenNow( GpuMaterial material, ShaderParameters parameters, StringToken shaderMode )
 		=> Fullscreen( material, parameters, shaderMode ) && recording is not null && !recording.List.SkippingDraws;
 
-	bool Fullscreen( GpuMaterial material, ShaderParameters parameters, StringToken shaderMode )
+	internal override bool DrawFullscreenInstances( GpuMaterial material, ShaderParameters parameters, StringToken shaderMode, int instances )
+		=> Fullscreen( material, parameters, shaderMode, instances ) && recording is not null && !recording.List.SkippingDraws;
+
+	bool Fullscreen( GpuMaterial material, ShaderParameters parameters, StringToken shaderMode, int instances = 1 )
 	{
 		if ( recording is null || material is not BackendMaterial { Shader: { } shader } || shader.Modes.Count == 0 ) return false;
 
@@ -1593,7 +1596,7 @@ internal sealed partial class BackendContext : GpuContext
 
 		var quad = device.FullscreenQuad;
 		SetObjectAttributes( parameters );
-		var drew = DrawModel( material, mode, quad, quad.DrawsForLod( 0 )[0], 0, 1 );
+		var drew = DrawModel( material, mode, quad, quad.DrawsForLod( 0 )[0], 0, instances );
 		SetObjectAttributes( null );
 		return drew;
 	}
