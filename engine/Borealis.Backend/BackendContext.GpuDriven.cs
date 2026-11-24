@@ -1999,6 +1999,11 @@ internal sealed partial class BackendContext
 		var cache = device.MaterialCache;
 		var depthTexture = r.Depth;
 
+		// Over the ids an earlier call of the view left unmarked (MarkLater), which this call's mark marks with its own
+		if ( unmarked.Visibility is not null && !ReferenceEquals( unmarked.Visibility, visibility ) ) MarkUnmarked();
+		var merged = unmarked.Visibility is not null;
+		if ( merged ) clearIds = false;
+
 		var timer = device.PassTimer;
 		var idsScope = timer?.Begin( r.List, "GPU-driven ids", PassTimer.ScopeKind.Own ) ?? -1;
 		r.List.Marker( "GPU-driven ids" );
@@ -2122,7 +2127,43 @@ internal sealed partial class BackendContext
 		SetObjectAttributes( null );
 		if ( !mark ) return;
 
-		// Mark: every distinct id of each pixel's samples sets its triangle's bit
+		// Left for the view's next call to mark with its own, or marked here: every id when it marks an earlier call's too
+		if ( markLater )
+		{
+			unmarked = (visibility, shaders.Mark);
+			return;
+		}
+
+		unmarked = default;
+		if ( merged ) System.Threading.Interlocked.Increment( ref device.MarksMerged );
+		Mark( visibility, shaders.Mark, merged ? default : idsCall );
+	}
+
+	/// <summary>
+	/// Whether a call's ids are left unmarked for the call after it (<see cref="BackendDevice.MergedMarks"/>), and the ids
+	/// and mark shader of a call that left them.
+	/// </summary>
+	bool markLater;
+	(BackendDevice.VisibilityView Visibility, ShaderFile Mark) unmarked;
+
+	/// <summary>Mark the ids a call left unmarked for a call after it that drew none: outside a rendering scope.</summary>
+	void MarkUnmarked()
+	{
+		if ( unmarked.Visibility is not { } visibility ) return;
+		var shader = unmarked.Mark;
+		unmarked = default;
+		CloseScope( flushClears: false );
+		Mark( visibility, shader, default );
+	}
+
+	/// <summary>
+	/// <c>borealis_gpu_driven_mark_cs</c> over the view's ids: every distinct id of each pixel's samples sets its triangle's
+	/// bit, only <paramref name="call"/>'s ids where it names one (normals from the ids, whose target keeps earlier calls').
+	/// </summary>
+	void Mark( BackendDevice.VisibilityView visibility, ShaderFile shader, (uint Slot, uint First, uint Instances) call )
+	{
+		var r = recording;
+		var timer = device.PassTimer;
 		r.List.Barrier( Borealis.Gpu.TextureBarrier.Transition( visibility.Ids, ImageLayout.ColorTarget, ImageLayout.ShaderRead, PipelineStage.ColorTargetOutput, MemoryAccess.ColorTargetWrite, PipelineStage.ComputeShader, MemoryAccess.ShaderRead ) );
 		var markConstants = this.markConstants ??= new byte[Marshal.SizeOf<GpuDrivenMarkConstants>()];
 		var frameBits = device.GpuDrivenTables.FrameVisibilityBits;
@@ -2132,9 +2173,9 @@ internal sealed partial class BackendContext
 			Height = (uint)visibility.Height,
 			Samples = (uint)visibility.Samples,
 			Bits = (uint)Math.Min( frameBits > 0 ? GpuDrivenTables.FrameVisibilityBitBase + frameBits : device.GpuDrivenTables.VisibilityBits, uint.MaxValue ),
-			CallSlot = idsCall.Slot,
-			CallFirst = idsCall.First,
-			CallInstances = idsCall.Instances,
+			CallSlot = call.Slot,
+			CallFirst = call.First,
+			CallInstances = call.Instances,
 		} );
 		cullAttributes.Clear();
 		cullAttributes.Set( "BorealisIds", visibility.Ids );
@@ -2143,7 +2184,7 @@ internal sealed partial class BackendContext
 		cullAttributes.SetData( "BorealisGpuDrivenMark_t", markConstants );
 		var markScope = timer?.Begin( r.List, "GPU-driven mark", PassTimer.ScopeKind.Own, count: false ) ?? -1;
 		r.List.Marker( "GPU-driven mark" );
-		cullDrawer.Dispatch( r.List, shaders.Mark, cullAttributes, visibility.Width, visibility.Height, 1 );
+		cullDrawer.Dispatch( r.List, shader, cullAttributes, visibility.Width, visibility.Height, 1 );
 		r.List.Marker( "end GPU-driven mark" );
 		timer?.End( r.List, markScope );
 

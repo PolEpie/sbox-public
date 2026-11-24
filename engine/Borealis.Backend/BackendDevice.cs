@@ -274,6 +274,9 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	/// <summary>Prepass calls culled in two phases (<see cref="HiZOcclusion"/>), and those that tested against a Hi-Z.</summary>
 	internal long HiZCalls, HiZTested;
 
+	/// <summary>Marks left out by <see cref="MergedMarks"/>: a resident call's ids marked with the next call's, for tests.</summary>
+	internal long MarksMerged;
+
 	readonly List<(uint Frame, BufferHandle Buffer, long Offset)> hizCounts = new();
 
 	/// <summary>A two-phase call's candidates' arguments, whose counts <see cref="HiZCounts"/> reads once its frame is done.</summary>
@@ -2410,6 +2413,13 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	/// <c>-no-gpudriven-visibility</c>, for comparisons.
 	/// </summary>
 	public bool GpuDrivenVisibility { get; set; } = !HasSwitch( "-no-gpudriven-visibility" );
+
+	/// <summary>
+	/// A prepass call drawn from the resident cull that the view's own batches follow as a call of their own leaves its ids
+	/// unmarked: the next call draws its ids on over them and one mark marks both, instead of a mark of the whole ids target
+	/// each. On by default; off with <c>-no-merged-marks</c>, for comparisons.
+	/// </summary>
+	internal bool MergedMarks { get; set; } = !HasSwitch( "-no-merged-marks" );
 
 	/// <summary>The frame's stamp for <see cref="GpuDrivenVisibility"/>: fragments the prepass drew ids for this frame carry it.</summary>
 	internal uint GpuDrivenFrame { get; private set; } = 1;
