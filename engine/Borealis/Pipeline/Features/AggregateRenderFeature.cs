@@ -410,7 +410,7 @@ internal sealed partial class AggregateRenderFeature : RenderFeature
 
 			var drawn = batch.CullArg >= 0 && phase != OcclusionPhase.None
 				? context.DrawModelFragmentsCulled( material, mode, mesh, draw, phase, aggregate.FirstInstance, batch.CullArg, batch.Count, depthBias, slopeBias, stripPixelShader, batch.TextureSize )
-				: context.DrawModelFragments( material, mode, mesh, draw, aggregate.FirstInstance, argsRing.Current, batch.FirstArg, batch.Count, depthBias, slopeBias, stripPixelShader, batch.TextureSize );
+				: DrawFragmentsInView( context, view, shadow, material, mode, mesh, draw, aggregate, aggregate.FirstInstance, batch.FirstArg, batch.Count, depthBias, slopeBias, stripPixelShader, batch.TextureSize );
 			if ( !drawn ) continue;
 
 			CountDrawn( batch, shadow, depth, ref stats );
@@ -510,7 +510,7 @@ internal sealed partial class AggregateRenderFeature : RenderFeature
 
 		// Batches the device counted what survived of (not mesh draws, which the CPU culled): the caller counts the rest
 		var counted = Math.Min( context.GpuCountedBatches, residentCount + batches.Length );
-		if ( resident is not null ) ResidentDrawn( context, layer, resident, alone ? deviceBatches : list.AsSpan( 0, residentCount ), drawn[..residentCount], Math.Min( counted, residentCount ), mode, depthBias, slopeBias, ref stats );
+		if ( resident is not null ) ResidentDrawn( context, view, layer, resident, alone ? deviceBatches : list.AsSpan( 0, residentCount ), drawn[..residentCount], Math.Min( counted, residentCount ), mode, depthBias, slopeBias, ref stats );
 		if ( combined is not null ) ReturnCombined( resident, kind, combined, count );
 		else if ( list is not null )
 		{
@@ -637,7 +637,7 @@ internal sealed partial class AggregateRenderFeature : RenderFeature
 	/// Count what the device drew of a view's resident list (<see cref="GpuContext.GpuDrivenCull.Plan"/>) and draw what it left
 	/// the classic way, from the frame's arguments.
 	/// </summary>
-	void ResidentDrawn( GpuContext context, MeshLayer layer, ResidentList list, ReadOnlySpan<GpuContext.GpuDrivenBatch> batches, ReadOnlySpan<bool> drawn, int counted, StringToken mode, int depthBias, float slopeBias, ref RenderStats stats )
+	void ResidentDrawn( GpuContext context, ViewPass view, MeshLayer layer, ResidentList list, ReadOnlySpan<GpuContext.GpuDrivenBatch> batches, ReadOnlySpan<bool> drawn, int counted, StringToken mode, int depthBias, float slopeBias, ref RenderStats stats )
 	{
 		var shadow = layer.LayerType == MeshLayerType.Shadow;
 		var depth = layer.Depth;
@@ -672,7 +672,7 @@ internal sealed partial class AggregateRenderFeature : RenderFeature
 			if ( batch.Material is null ) continue;
 			if ( context.Census ) context.CensusNote = "aggregate: the device's GPU-driven path left it (resident)";
 			context.SetObjectAttributes( null, batch.ObjectAttributes );
-			if ( context.DrawModelFragments( batch.Material, mode, batch.Mesh, batch.Draw, batch.FirstInstance, argsRing.Current, batch.FirstArg, batch.Count, depthBias, slopeBias, batch.StripPixelShader, batch.TextureSize ) )
+			if ( DrawFragmentsInView( context, view, shadow, batch.Material, mode, batch.Mesh, batch.Draw, own[i].Aggregate, batch.FirstInstance, batch.FirstArg, batch.Count, depthBias, slopeBias, batch.StripPixelShader, batch.TextureSize ) )
 				CountDrawn( own[i], shadow, depth, ref stats );
 		}
 
@@ -693,6 +693,45 @@ internal sealed partial class AggregateRenderFeature : RenderFeature
 
 		context.SetObjectAttributes( null );
 	}
+
+	/// <summary>
+	/// A batch's fragments on the classic path, from args that hold every one of them untested: the GPU culls what it draws
+	/// GPU-driven (<see cref="Prepare"/>, resident lists), but a batch it leaves (a material with no GPU-driven variant) would
+	/// otherwise draw fragments the view can't see. Here the view's frustum takes those out, the survivors drawn a run of
+	/// consecutive args at a time. A shadow view's args leave out what casts none, so they don't line up with the fragments:
+	/// those draw as they are. False when nothing was drawn.
+	/// </summary>
+	bool DrawFragmentsInView( GpuContext context, ViewPass view, bool shadow, GpuMaterial material, StringToken mode, RenderMesh mesh, in RenderMesh.Draw draw, AggregateObject aggregate, int firstInstance, int firstArg, int count, int depthBias, float slopeBias, bool stripPixelShader, int textureSize )
+	{
+		var centers = aggregate.Centers;
+		if ( shadow || !CullsLeftFragments || count != centers.Length )
+			return context.DrawModelFragments( material, mode, mesh, draw, firstInstance, argsRing.Current, firstArg, count, depthBias, slopeBias, stripPixelShader, textureSize );
+
+		var extents = aggregate.Extents;
+		var frustum = view.View.Frustum;
+		var drew = false;
+		var run = -1;
+		for ( int i = 0; i <= count; i++ )
+		{
+			if ( i < count && frustum.Intersects( centers[i], extents[i] ) )
+			{
+				if ( run < 0 ) run = i;
+				continue;
+			}
+
+			if ( run < 0 ) continue;
+			drew |= context.DrawModelFragments( material, mode, mesh, draw, firstInstance, argsRing.Current, firstArg + run, i - run, depthBias, slopeBias, stripPixelShader, textureSize );
+			run = -1;
+		}
+
+		return drew;
+	}
+
+	/// <summary>
+	/// Whether <see cref="DrawFragmentsInView"/> frustum-culls a left batch's fragments (on by default); BorealisLab's
+	/// <c>-noleftcull</c> variants turn it off to measure it.
+	/// </summary>
+	internal static bool CullsLeftFragments { get; set; } = true;
 
 	/// <summary>
 	/// The depth-only material on the fast path, else the draw's own, with the pixel shader stripped for an opaque depth pass
