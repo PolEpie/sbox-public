@@ -46,6 +46,10 @@ BoolAttribute( NeedsLightProbe, true );
 #if ( F_ALPHA_TEST )
 BoolAttribute( alphatest, true );
 #endif
+// Its wind moves vertices: lights draw it live instead of keeping it in their static shadow caches
+#if ( F_FOLIAGE_ANIMATION )
+BoolAttribute( AnimatesVertices, true );
+#endif
 // End of the material editor's lines
 #define S_FOLIAGE_ANIMATION F_FOLIAGE_ANIMATION
 #include "common/vertex.hlsl"

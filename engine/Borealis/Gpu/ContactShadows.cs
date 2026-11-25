@@ -16,6 +16,7 @@ internal static class ContactShadows
 
 	static readonly StringToken OutputShadow = new( "OutputShadow" );
 	static readonly StringToken SssConstantsName = new( "SssConstants" );
+	static readonly StringToken BorealisSunShadow = new( "D_BOREALIS_SUN_SHADOW" );
 
 	/// <summary>
 	/// Make the shader on the main thread, before anything records with it.
@@ -47,16 +48,9 @@ internal static class ContactShadows
 		{
 			LightCoordinate = lightCoordinate,
 			InvDepthTextureSize = new Vector2( 1.0f / width, 1.0f / height ),
-			DepthBounds = new Vector2( 0.0f, 1.0f ),
 			SurfaceThickness = 0.01f,
 			BilinearThreshold = 0.02f,
 			ShadowContrast = 1.0f + shadowHardness * 4.0f, // same as CSM penumbra
-			FarDepthValue = 0.0f,  // reverse-Z
-			NearDepthValue = 1.0f,
-			IgnoreEdgePixels = 0,
-			UsePrecisionOffset = 0,
-			BilinearSamplingOffsetMode = 0,
-			UseEarlyOut = 1,
 		};
 
 		// Sparse wavefront writes - unwritten pixels stay lit.
@@ -70,6 +64,7 @@ internal static class ContactShadows
 		{
 			var parameters = ParameterPool.Get();
 			parameters.Set( OutputShadow, mask );
+			parameters.SetCombo( BorealisSunShadow, true );
 
 			for ( int i = 0; i < dispatchCount; i++ )
 			{
@@ -104,24 +99,17 @@ internal static class ContactShadows
 		All = Prepare | Dispatch | Finish,
 	}
 
-	[StructLayout( LayoutKind.Sequential )]
+	// Keep the offsets of the shared SssConstants cbuffer. The sun combo specializes the other fields.
+	[StructLayout( LayoutKind.Explicit, Size = 80 )]
 	struct SssConstants
 	{
-		public Vector4 LightCoordinate;
-		public int WaveOffsetX;
-		public int WaveOffsetY;
-		public Vector2 InvDepthTextureSize;
-		public Vector2 DepthBounds;
-		public float SurfaceThickness;
-		public float BilinearThreshold;
-		public float ShadowContrast;
-		public float FarDepthValue;
-		public float NearDepthValue;
-		public int IgnoreEdgePixels;
-		public int UsePrecisionOffset;
-		public int BilinearSamplingOffsetMode;
-		public int UseEarlyOut;
-		int _pad0;
+		[FieldOffset( 0 )] public Vector4 LightCoordinate;
+		[FieldOffset( 16 )] public int WaveOffsetX;
+		[FieldOffset( 20 )] public int WaveOffsetY;
+		[FieldOffset( 24 )] public Vector2 InvDepthTextureSize;
+		[FieldOffset( 40 )] public float SurfaceThickness;
+		[FieldOffset( 44 )] public float BilinearThreshold;
+		[FieldOffset( 48 )] public float ShadowContrast;
 	}
 
 	struct DispatchData

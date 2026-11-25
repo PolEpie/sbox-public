@@ -51,13 +51,7 @@ internal partial class ShadowMapper
 			return InvalidShadowIndex;
 		}
 
-		bool isBakedLight = light.Baked;
-		bool isStaticLight = light.Static;
-
-		// How big do we want it, it's okay if our cached is bigger, but not if it's smaller
-		int desiredResolution = GetDesiredResolution( flScreenSize, (int)Math.Max( View.ViewportSize.x, View.ViewportSize.y ) );
-
-		var cacheEntry = GetOrCreateCacheEntry( light, desiredResolution, isCube: true, flScreenSize );
+		var cacheEntry = GetOrCreateCacheEntry( light, isCube: true, flScreenSize );
 
 		// Already rendered this frame, or not this light's turn. A light filling the view never waits its turn. A frame in flight
 		// drew it this frame: it's drawn again for this one, submitted first
@@ -66,11 +60,11 @@ internal partial class ShadowMapper
 			return AddProjectedCubeShadow( cacheEntry );
 
 		// The entry may keep a bigger map than this view asked for
-		desiredResolution = cacheEntry.CurrentResolution;
+		int resolution = cacheEntry.CurrentResolution;
 
 		GPUProjectedCubeShadow shadow = new();
 
-		float biasScale = ComputeBiasScale( 45f, light.Radius, desiredResolution );
+		float biasScale = ComputeBiasScale( 45f, light.Radius, resolution );
 
 		var shadowView = new ShadowViewDesc
 		{
@@ -79,43 +73,27 @@ internal partial class ShadowMapper
 			FieldOfView = 90.0f,
 			ZNear = 1.0f,
 			ZFar = light.Radius,
-			Resolution = desiredResolution,
+			Resolution = resolution,
 			DepthBias = (int)(ShadowDepthBias * biasScale),
 			SlopeScaledDepthBias = ShadowSlopeScale * biasScale,
 		};
 
-		// Static lights render their static casters once into a cache that gets copied in
-		// each frame, and only dynamic casters are re-rendered on top.
-		if ( isStaticLight && !isBakedLight && (cacheEntry.StaticCache is null || (inFlight && cacheEntry.StaticRenderedFrame == FrameCount)) )
+		// Static lights, and ones that have kept still, draw their static and settled casters once into a cache that's copied in
+		// each update, and only the casters that move are drawn on top
+		if ( DrawsCache( light, cacheEntry, inFlight ) )
 		{
-			cacheEntry.StaticCache ??= AcquireTexture( desiredResolution, isCube: true );
-
-			// Render static objects to the static cache, once
 			var staticView = shadowView;
-			staticView.Name = cacheEntry.DebugName + "_StaticCache";
-			staticView.Target = cacheEntry.StaticCache;
-			staticView.StaticFilter = StaticFilter.OnlyStatic;
-
+			ToCache( light, cacheEntry, ref staticView );
 			for ( int i = 0; i < 6; i++ )
 			{
 				staticView.Rotation = CubeRotations[i];
 				staticView.Slice = i;
 				Renderer.RenderShadowView( staticView );
 			}
-
-			cacheEntry.StaticRenderedFrame = FrameCount;
-			cacheEntry.StaticRevision = light.StaticChanges?.Revision ?? 0;
 		}
 
-		bool useStaticCache = cacheEntry.StaticCache is not null;
-
-		// Baked lights exclude static objects from shadow maps, their static shadows come from lightmaps.
-		// Cached lights exclude them too - their static shadows come from the static cache.
-		shadowView.Target = cacheEntry.ShadowMap;
-		shadowView.StaticFilter = isBakedLight || useStaticCache ? StaticFilter.NoStatic : StaticFilter.Any;
-
-		// The cached static shadows are copied into the shadow map (once, on the first face), dynamic objects render on top
-		shadowView.CachedStatic = useStaticCache ? cacheEntry.StaticCache : null;
+		// The cache is copied into the map once, on the first face
+		ToMap( light, cacheEntry, ref shadowView );
 
 		for ( int i = 0; i < 6; i++ )
 		{
@@ -129,7 +107,7 @@ internal partial class ShadowMapper
 
 		shadow.ShadowMapTextureCubeIndex = 0; // filled in by ResolveTextureIndices
 		shadow.LightPosition = light.Position;
-		shadow.InvShadowMapRes = 1.0f / desiredResolution;
+		shadow.InvShadowMapRes = 1.0f / resolution;
 		shadow.ShadowHardness = 1.0f + light.Hardness * 4.0f;
 
 		cacheEntry.Cube = shadow;

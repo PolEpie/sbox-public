@@ -32,6 +32,7 @@ float g_flRimFudge < Default( 0.01 ); Range( 0.01, 1 ); UiGroup( "Rim Lighting, 
 bool g_bFogEnabled < Default( 1 ); UiGroup( "Fog,300" ); >;
 bool g_bUseGeometryNormals < Default( 1 ); UiGroup( "Rim Lighting, 30/40" ); >;
 BoolAttribute( NeedsLightProbe, true );
+BoolAttribute( AnimatesVertices, true );
 // End of the material editor's lines
 #ifndef S_ALPHA_TEST
 #define S_ALPHA_TEST 1

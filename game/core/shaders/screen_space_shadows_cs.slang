@@ -24,6 +24,8 @@ Mode( Default );
 #include "sbox/math.slangh"
 #include "common/classes/Depth.hlsl"
 
+DynamicCombo( D_BOREALIS_SUN_SHADOW, 0..1, Sys( ALL ) );
+
 // Compile-time configuration for the Bend header (see bend_sss_gpu.h for meaning).
 #define WAVE_SIZE 64
 #define SAMPLE_COUNT 60
@@ -72,16 +74,26 @@ cbuffer SssConstants
 	p.LightCoordinate = g_Sss.LightCoordinate;
 	p.WaveOffset = g_Sss.WaveOffset;
 	p.InvDepthTextureSize = g_Sss.InvDepthTextureSize;
-	p.DepthBounds = g_Sss.DepthBounds;
 	p.SurfaceThickness = g_Sss.SurfaceThickness;
 	p.BilinearThreshold = g_Sss.BilinearThreshold;
 	p.ShadowContrast = g_Sss.ShadowContrast;
+
+#if D_BOREALIS_SUN_SHADOW
+	// Borealis only dispatches contact shadows for its reverse-Z sun. Keep the shared
+	// shader's runtime settings for other callers, but specialize the march for this path.
+	p.DepthBounds = float2( 0.0, 1.0 );
+	p.FarDepthValue = 0.0;
+	p.NearDepthValue = 1.0;
+	p.UseEarlyOut = true;
+#else
+	p.DepthBounds = g_Sss.DepthBounds;
 	p.FarDepthValue = g_Sss.FarDepthValue;
 	p.NearDepthValue = g_Sss.NearDepthValue;
 	p.IgnoreEdgePixels = g_Sss.IgnoreEdgePixels != 0;
 	p.UsePrecisionOffset = g_Sss.UsePrecisionOffset != 0;
 	p.BilinearSamplingOffsetMode = g_Sss.BilinearSamplingOffsetMode != 0;
 	p.UseEarlyOut = g_Sss.UseEarlyOut != 0;
+#endif
 
 	p.DepthTexture = g_tSssDepth;
 	p.OutputTexture = g_outShadow;

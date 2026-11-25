@@ -19,9 +19,14 @@ public class ShadowCacheTests
 	public void ResetCache() => Borealis.Shadows.ShadowMapper.ResetCache();
 
 	/// <summary>
-	/// The views drawing a static cache this frame.
+	/// Whether a view draws a light's cache.
 	/// </summary>
-	static int StaticCacheViews( RenderSystem system ) => system.ShadowMaps.Passes.ToArray().Count( p => p.StaticFilter == StaticFilter.OnlyStatic );
+	static bool IsCache( ViewPass pass ) => pass.StaticFilter is StaticFilter.Settled or StaticFilter.SettledNoStatic;
+
+	/// <summary>
+	/// The views drawing a cache this frame.
+	/// </summary>
+	static int StaticCacheViews( RenderSystem system ) => system.ShadowMaps.Passes.ToArray().Count( IsCache );
 
 	static MeshObject StaticBox( RenderWorld world, Vector3 position )
 	{
@@ -49,7 +54,7 @@ public class ShadowCacheTests
 
 		CollectAndPrepare( system, world, view );
 		Assert.AreEqual( 6, StaticCacheViews( system ), "drawn once" );
-		Assert.IsTrue( system.ShadowMaps.Passes.ToArray().Any( p => p.StaticFilter == StaticFilter.OnlyStatic && p.Visible( mesh ).Contains( near.Index ) ) );
+		Assert.IsTrue( system.ShadowMaps.Passes.ToArray().Any( p => IsCache( p ) && p.Visible( mesh ).Contains( near.Index ) ) );
 
 		CollectAndPrepare( system, world, view );
 		Assert.AreEqual( 0, StaticCacheViews( system ), "then kept" );
@@ -74,6 +79,196 @@ public class ShadowCacheTests
 		Redraws( "removed", () => world.Remove( near ) );
 		Redraws( "added", () => StaticBox( world, new Vector3( 100, 0, 20 ) ) );
 		Redraws( "added out of reach", () => StaticBox( world, new Vector3( 400, 0, 20 ) ), expected: false );
+	}
+
+	/// <summary>
+	/// A light nothing flags static draws its static casters into a cache once it has kept still as long as a caster takes to
+	/// settle, and each update then draws only the casters that aren't static on top of a copy of it. Moving the light drops the
+	/// cache, and everything is drawn again until it has kept still once more.
+	/// </summary>
+	[TestMethod]
+	public void LightThatKeptStillCachesItsStaticCasters()
+	{
+		var world = new RenderWorld();
+		world.Lighting.SunColor = Color.Black;
+		var box = StaticBox( world, new Vector3( 100, 0, -20 ) );
+		var light = new LightObject( LightObject.LightKind.Point, new Transform( new Vector3( 100, 0, 0 ) ) ) { Radius = 50 };
+		world.Add( light );
+
+		var view = LookingDownX();
+		using var system = new RenderSystem();
+		var mesh = system.GetFeature<MeshRenderFeature>();
+
+		bool Cached() => system.ShadowMaps.Passes.ToArray().Where( p => !IsCache( p ) ).All( p => p.CachedStatic is not null );
+		bool DrawsBox() => system.ShadowMaps.Passes.ToArray().Any( p => !IsCache( p ) && p.Visible( mesh ).Contains( box.Index ) );
+
+		Borealis.Shadows.SettledCasters.Reset();
+		CollectAndPrepare( system, world, view );
+		Assert.AreEqual( 6, system.ShadowMaps.Passes.Length );
+		Assert.AreEqual( 0, StaticCacheViews( system ), "new" );
+		Assert.IsTrue( DrawsBox() );
+
+		CollectAndPrepare( system, world, view );
+		Assert.AreEqual( 0, StaticCacheViews( system ), "not still for long" );
+		Assert.IsTrue( DrawsBox() );
+
+		// It has kept still long enough
+		Borealis.Shadows.SettledCasters.Reset( settled: true );
+		CollectAndPrepare( system, world, view );
+		Assert.AreEqual( 6, StaticCacheViews( system ), "its static casters, once" );
+		Assert.IsTrue( Cached() );
+		Assert.IsFalse( DrawsBox(), "left out of the map, which copies the cache" );
+
+		CollectAndPrepare( system, world, view );
+		Assert.AreEqual( 0, StaticCacheViews( system ), "then kept" );
+		Assert.AreEqual( 6, system.ShadowMaps.Passes.Length, "the map still updates" );
+		Assert.IsTrue( Cached() );
+
+		light.Transform = new Transform( new Vector3( 100, 5, 0 ) );
+		CollectAndPrepare( system, world, view );
+		Assert.AreEqual( 0, StaticCacheViews( system ), "moved: no cache" );
+		Assert.IsFalse( system.ShadowMaps.Passes.ToArray().Any( p => p.CachedStatic is not null ) );
+		Assert.IsTrue( DrawsBox(), "everything drawn again" );
+	}
+
+	/// <summary>
+	/// A static mesh whose material animates vertices (<see cref="GpuMaterial.AnimatesVertices"/>) isn't a static caster: a cached
+	/// light draws it live, while a plain static mesh stays in its cache. A material that doesn't know yet (null) leaves it
+	/// cached until it does.
+	/// </summary>
+	[TestMethod]
+	public void AStaticMeshThatAnimatesVerticesIsDrawnLiveInACachedLight()
+	{
+		var world = new RenderWorld();
+		world.Lighting.SunColor = Color.Black;
+		using var animating = new AnimatingMaterial { Animates = null };
+		using var plain = new AnimatingMaterial { Animates = false };
+		RenderMesh Box( GpuMaterial material ) => new( new HeadlessMesh( "box" ), UnitBox, [[new RenderMesh.Draw( 0, 0, 0, 36, 24, 0, material )]] );
+		var sways = new MeshObject( Box( animating ), new Transform( new Vector3( 100, 0, -20 ) ) ) { IsStatic = true };
+		var still = new MeshObject( Box( plain ), new Transform( new Vector3( 100, 20, -20 ) ) ) { IsStatic = true };
+		world.Add( sways );
+		world.Add( still );
+		world.Add( new LightObject( LightObject.LightKind.Point, new Transform( new Vector3( 100, 0, 0 ) ) ) { Radius = 50 } );
+
+		var view = LookingDownX();
+		using var system = new RenderSystem();
+		var feature = system.GetFeature<MeshRenderFeature>();
+		bool Live( RenderObject obj ) => system.ShadowMaps.Passes.ToArray().Any( p => p.StaticFilter == StaticFilter.Unsettled && p.Visible( feature ).Contains( obj.Index ) );
+		bool Cached( RenderObject obj ) => system.ShadowMaps.Passes.ToArray().Any( p => IsCache( p ) && p.Visible( feature ).Contains( obj.Index ) );
+
+		Borealis.Shadows.SettledCasters.Reset();
+		CollectAndPrepare( system, world, view );
+		CollectAndPrepare( system, world, view );
+		Borealis.Shadows.SettledCasters.Reset( settled: true );
+		CollectAndPrepare( system, world, view );
+		Assert.AreEqual( 6, StaticCacheViews( system ), "the light caches" );
+		Assert.IsTrue( Cached( sways ) && !Live( sways ), "its material doesn't say yet: cached" );
+
+		animating.Animates = true;
+		CollectAndPrepare( system, world, view );
+		Assert.AreEqual( 6, StaticCacheViews( system ), "once it says so, the cache is drawn again without it" );
+		Assert.IsTrue( Live( sways ) && !Cached( sways ), "its material animates: drawn live" );
+		Assert.IsTrue( Cached( still ) && !Live( still ), "a plain static mesh stays cached" );
+
+		CollectAndPrepare( system, world, view );
+		Assert.AreEqual( 0, StaticCacheViews( system ), "then the cache is kept" );
+	}
+
+	/// <summary>
+	/// A cached light's cache holds casters that aren't static once they've settled, so its updates draw nothing on top of the
+	/// copy and its map is kept as it is. A settled caster moving within its reach draws the cache again without it, drawn on
+	/// top each update in the faces it's in; the first face copies the cache into all six, and the others draw nothing. Once it
+	/// has settled again, the cache is drawn again with it. A custom object that isn't static is never cached: its draws change
+	/// without it moving.
+	/// </summary>
+	[TestMethod]
+	public void CachedLightHoldsSettledCasters()
+	{
+		var world = new RenderWorld();
+		world.Lighting.SunColor = Color.Black;
+		var crate = new MeshObject( null, new Transform( new Vector3( 100, 0, -20 ) ) ) { LocalBounds = UnitBox };
+		world.Add( crate );
+
+		var view = LookingDownX();
+		using var system = new RenderSystem();
+		var mesh = system.GetFeature<MeshRenderFeature>();
+		bool InCache() => system.ShadowMaps.Passes.ToArray().Any( p => IsCache( p ) && p.Visible( mesh ).Contains( crate.Index ) );
+		bool OnTop() => system.ShadowMaps.Passes.ToArray().Any( p => p.StaticFilter == StaticFilter.Unsettled && p.Visible( mesh ).Contains( crate.Index ) );
+
+		// The crate has kept still since the frame before the light comes
+		CollectAndPrepare( system, world, view );
+		world.Add( new LightObject( LightObject.LightKind.Point, new Transform( new Vector3( 100, 0, 0 ) ) ) { Radius = 50, IsStatic = true } );
+		Borealis.Shadows.SettledCasters.Reset( settled: true );
+		CollectAndPrepare( system, world, view );
+		Assert.IsTrue( InCache() && !OnTop(), "settled: in the cache" );
+		Assert.AreEqual( 7, system.ShadowMaps.Drawn.Length, "the cache, and the map's first face, which copies it into all six" );
+
+		CollectAndPrepare( system, world, view );
+		Assert.AreEqual( 6, system.ShadowMaps.Passes.Length, "the map still updates" );
+		Assert.AreEqual( 0, system.ShadowMaps.Drawn.Length, "but nothing moved, so it's kept" );
+
+		crate.Transform = new Transform( new Vector3( 100, 5, -20 ) );
+		CollectAndPrepare( system, world, view );
+		Assert.AreEqual( 6, StaticCacheViews( system ), "a settled caster moved: the cache is drawn again" );
+		Assert.IsTrue( !InCache() && OnTop(), "without it, which is drawn on top" );
+		var faces = system.ShadowMaps.Drawn.ToArray().Where( p => !IsCache( p ) ).ToArray();
+		Assert.IsTrue( faces.Length < 6 && faces.All( p => p.TargetSlice == 0 || p.Visible( mesh ).Contains( crate.Index ) ), "the first face, which copies the cache, and the faces it's drawn in" );
+
+		CollectAndPrepare( system, world, view );
+		Assert.AreEqual( faces.Length, system.ShadowMaps.Drawn.Length, "drawn on top, those faces are drawn each update" );
+
+		var seconds = Borealis.Shadows.SettledCasters.Seconds;
+		try
+		{
+			// Every frame's casters settle by the next
+			Borealis.Shadows.SettledCasters.Seconds = 0;
+			CollectAndPrepare( system, world, view );
+			Assert.IsTrue( OnTop(), "settled since the cache was drawn: still on top, and counted" );
+
+			CollectAndPrepare( system, world, view );
+			Assert.AreEqual( 6, StaticCacheViews( system ), "so the cache is drawn again" );
+			Assert.IsTrue( InCache() && !OnTop(), "with it" );
+		}
+		finally
+		{
+			Borealis.Shadows.SettledCasters.Seconds = seconds;
+		}
+
+		var custom = new ShadowCustom( new Vector3( 100, 20, -20 ) );
+		world.Add( custom );
+		CollectAndPrepare( system, world, view );
+		Borealis.Shadows.SettledCasters.Reset( settled: true );
+		CollectAndPrepare( system, world, view );
+		CollectAndPrepare( system, world, view );
+		Assert.IsTrue( system.ShadowMaps.Passes.ToArray().Any( p => p.StaticFilter == StaticFilter.Unsettled && p.Visible( mesh ).Contains( custom.Index ) ), "a custom object is drawn on top however settled" );
+		Assert.AreEqual( 0, StaticCacheViews( system ), "and never draws the cache again" );
+	}
+
+	sealed class ShadowCustom : CustomObject
+	{
+		public ShadowCustom( Vector3 position )
+		{
+			LocalBounds = UnitBox;
+			Transform = new Transform( position );
+			IsOpaque = true;
+			CastShadows = true;
+		}
+
+		internal override void Render( GpuContext context, ViewPass view, MeshLayer layer ) { }
+	}
+
+	sealed class AnimatingMaterial : GpuMaterial
+	{
+		public bool? Animates { get; set; }
+		public override string Name => "Animating";
+		public override bool IsTranslucent => false;
+		public override bool IsAlphaTest => false;
+		public override bool ReadsFrameBuffer => false;
+		public override bool ShadowFastPath => false;
+		public override bool NeedsLightProbe => false;
+		public override ulong SimilarityKey => 1;
+		public override bool? AnimatesVertices => Animates;
+		public override void Dispose() { }
 	}
 
 	/// <summary>
@@ -418,7 +613,7 @@ public class ShadowCacheTests
 
 		var passes = system.ShadowMaps.Passes.ToArray();
 		Assert.AreEqual( 12, passes.Length );
-		CollectionAssert.Contains( passes.Where( p => p.StaticFilter == StaticFilter.OnlyStatic ).SelectMany( p => p.Visible( mesh ) ).ToArray(), pebble.Index );
+		CollectionAssert.Contains( passes.Where( IsCache ).SelectMany( p => p.Visible( mesh ) ).ToArray(), pebble.Index );
 		CollectionAssert.DoesNotContain( passes.SelectMany( p => p.Visible( mesh ) ).ToArray(), marble.Index, "too small from here" );
 	}
 

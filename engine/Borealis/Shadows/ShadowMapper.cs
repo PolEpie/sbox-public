@@ -36,6 +36,9 @@ internal partial class ShadowMapper
 	internal const int ProjectedShadowBufferSize = 512;
 	internal const int ProjectedCubeShadowBufferSize = 256;
 
+	const int ResolutionShrinkFrames = 4;
+	const float ResolutionShrinkFraction = 0.8f;
+
 	int ShadowsAllocated { get; set; }
 
 	/// <summary>
@@ -189,15 +192,27 @@ internal partial class ShadowMapper
 		internal WeakReference<object> Light;
 
 		public float LastFrame;
+
+		/// <summary>
+		/// The light's static casters, but a baked light's, and the casters settled when it was drawn
+		/// (<see cref="SettledCasters"/>): copied into <see cref="ShadowMap"/> each update, which draws the rest on top.
+		/// </summary>
 		public ShadowMap StaticCache;
 		public ShadowMap ShadowMap;
 		public float ScreenSize;
 		public int CurrentResolution;
-		public int DesiredResolution;
+		internal float RequestedSize;
+		internal int UndersizedFrames;
 		public int DebugLightIndex;
 		public bool IsCube;
 		public string DebugName;
 		public int CachedTransformVersion;
+
+		/// <summary>
+		/// The <see cref="SettledCasters"/> stamp the light last moved or changed shape at, or was first seen: once it's old
+		/// enough to count as settled, the light keeps a static cache like a static one (<see cref="CachesStatic"/>).
+		/// </summary>
+		public ulong MovedStamp;
 
 		// The light as it was last seen, for the debug overlay
 		public ShadowLightType Type;
@@ -217,6 +232,23 @@ internal partial class ShadowMapper
 		public ulong StaticRenderedFrame;
 
 		/// <summary>
+		/// When <see cref="StaticCache"/> was drawn.
+		/// </summary>
+		public float StaticDrawnAt;
+
+		/// <summary>
+		/// The <see cref="SettledCasters"/> stamps <see cref="StaticCache"/> was drawn at: casters that moved after them are drawn
+		/// on top each update.
+		/// </summary>
+		public ulong SettledStamp, RestlessStamp;
+
+		/// <summary>
+		/// The casters its last update drew on top of <see cref="StaticCache"/> that have settled since: drawn again, the cache
+		/// would hold them.
+		/// </summary>
+		internal readonly CasterCount NewlySettled = new();
+
+		/// <summary>
 		/// The mapper whose view last drew the map.
 		/// </summary>
 		internal ShadowMapper DrawnBy;
@@ -225,6 +257,11 @@ internal partial class ShadowMapper
 		/// The world's <see cref="StaticCasterChanges.Revision"/> <see cref="StaticCache"/> is up to date with.
 		/// </summary>
 		public long StaticRevision;
+
+		/// <summary>
+		/// The world's <see cref="RenderWorld.SettledChanges"/> revision <see cref="StaticCache"/> is up to date with.
+		/// </summary>
+		public long SettledRevision;
 
 		/// <summary>
 		/// The tags of the views this map is for: it holds the casters they show.
@@ -268,7 +305,7 @@ internal partial class ShadowMapper
 	/// Get or create the cache entry for a light seen through <see cref="View"/>'s tags, handling resolution changes and
 	/// dropping the static cache if the light moved or a static caster it reaches changed.
 	/// </summary>
-	LightEntry GetOrCreateCacheEntry( in ShadowLight light, int desiredResolution, bool isCube, float flScreenSize )
+	LightEntry GetOrCreateCacheEntry( in ShadowLight light, bool isCube, float flScreenSize )
 	{
 		// A map holds the casters its view's tags show, so views with other tags keep maps of their own
 		var renderTags = View.RenderTags ?? [];
@@ -277,6 +314,32 @@ internal partial class ShadowMapper
 		var entry = first;
 		while ( entry is not null && !(SameTags( entry.RenderTags, renderTags ) && SameTags( entry.ExcludeTags, excludeTags ) && entry.SubWorlds == View.SubWorlds) )
 			entry = entry.NextFilter;
+
+		// ComputeScreenSize returns an area fraction; take its square root to get a fraction of the viewport edge.
+		float linearSize = MathF.Sqrt( flScreenSize ) * (int)Math.Max( View.ViewportSize.x, View.ViewportSize.y );
+		var frame = FrameCount;
+		float previousSize = 0;
+		if ( entry is not null )
+		{
+			if ( entry.UsedFrame == frame )
+			{
+				linearSize = Math.Max( entry.RequestedSize, linearSize );
+			}
+			else if ( entry.UsedFrame == frame - 1 )
+			{
+				previousSize = entry.RequestedSize;
+				entry.UndersizedFrames = previousSize < entry.CurrentResolution * ResolutionShrinkFraction
+					? Math.Min( entry.UndersizedFrames + 1, ResolutionShrinkFrames )
+					: 0;
+			}
+			else
+			{
+				entry.UndersizedFrames = 0;
+			}
+		}
+
+		float requestedSize = Math.Max( previousSize, linearSize );
+		int desiredResolution = GetDesiredResolution( requestedSize );
 
 		if ( entry is null )
 		{
@@ -290,6 +353,7 @@ internal partial class ShadowMapper
 				RenderTags = renderTags.Length == 0 ? [] : (uint[])renderTags.Clone(),
 				ExcludeTags = excludeTags.Length == 0 ? [] : (uint[])excludeTags.Clone(),
 				SubWorlds = View.SubWorlds,
+				MovedStamp = SettledCasters.Now,
 			};
 
 			if ( first is null )
@@ -307,6 +371,7 @@ internal partial class ShadowMapper
 		else if ( entry.Type != light.Type || entry.Radius != light.Radius || (light.Type == ShadowLightType.Spot && entry.ConeOuter != light.ConeOuter) )
 		{
 			// A new kind, radius or cone is a new projection, which neither the map nor its static cache hold yet
+			entry.MovedStamp = SettledCasters.Now;
 			ReleaseTexture( entry.StaticCache, entry.CurrentResolution, entry.IsCube );
 			entry.StaticCache = null;
 			entry.RenderedFrame = 0;
@@ -325,23 +390,24 @@ internal partial class ShadowMapper
 		entry.Bias = light.Bias;
 		entry.ConeOuter = light.ConeOuter;
 
-		// Keep track of how big we actually want it, if we run low on budget we can downgrade these out of scope
-		entry.DesiredResolution = desiredResolution;
 		entry.ScreenSize = flScreenSize;
+		entry.RequestedSize = linearSize;
 
-		// A smaller view later in the same frame (probe bake, mirror) keeps the bigger map already rendered this frame
-		// A map another frame in flight drew keeps its size: that frame's commands draw into it
-		if ( entry.RenderedFrame == FrameCount && (desiredResolution < entry.CurrentResolution || DrawnInFlight( entry )) )
-			desiredResolution = entry.CurrentResolution;
+		if ( desiredResolution < entry.CurrentResolution )
+		{
+			bool hold = entry.CurrentResolution <= MaxResolution
+				&& (entry.UndersizedFrames < ResolutionShrinkFrames || requestedSize >= entry.CurrentResolution * ResolutionShrinkFraction);
+			if ( hold || entry.RenderedFrame == frame ) desiredResolution = entry.CurrentResolution;
+		}
 
-		// Do we want a different resolution for this shadow map now?
-		if ( entry.CurrentResolution != desiredResolution )
+		if ( entry.CurrentResolution != desiredResolution && !DrawnInFlight( entry ) )
 		{
 			ReleaseTexture( entry.ShadowMap, entry.CurrentResolution, entry.IsCube );
 			ReleaseTexture( entry.StaticCache, entry.CurrentResolution, entry.IsCube );
 			entry.ShadowMap = AcquireTexture( desiredResolution, isCube );
 			entry.StaticCache = null;
 			entry.CurrentResolution = desiredResolution;
+			entry.UndersizedFrames = 0;
 			entry.RenderedFrame = 0;
 		}
 
@@ -349,25 +415,93 @@ internal partial class ShadowMapper
 		if ( entry.CachedTransformVersion != light.TransformVersion )
 		{
 			entry.CachedTransformVersion = light.TransformVersion;
+			entry.MovedStamp = SettledCasters.Now;
 			ReleaseTexture( entry.StaticCache, entry.CurrentResolution, entry.IsCube );
 			entry.StaticCache = null;
 			entry.RenderedFrame = 0;
 		}
 
-		// The static cache holds the static casters as they were drawn: a change within the light's reach redraws it
+		// The cache holds the static and settled casters as they were drawn: a change within the light's reach redraws it, and
+		// so does a settled caster in it moving, where it was and is
 		if ( entry.StaticCache is not null && light.StaticChanges is { } changes && entry.StaticRevision != changes.Revision )
 		{
-			if ( changes.Touches( entry.StaticRevision, light.Position, light.Radius ) )
-			{
-				ReleaseTexture( entry.StaticCache, entry.CurrentResolution, entry.IsCube );
-				entry.StaticCache = null;
-				entry.RenderedFrame = 0;
-			}
-
+			if ( changes.Touches( entry.StaticRevision, light.Position, light.Radius ) ) DropCache( entry );
 			entry.StaticRevision = changes.Revision;
 		}
 
+		if ( entry.StaticCache is not null && light.SettledChanges is { } settled && entry.SettledRevision != settled.Revision )
+		{
+			if ( settled.Touches( entry.SettledRevision, light.Position, light.Radius ) ) DropCache( entry );
+			entry.SettledRevision = settled.Revision;
+		}
+
 		return entry;
+	}
+
+	/// <summary>
+	/// Drop an entry's cache, which no longer holds what's there: it's drawn again with the map, now.
+	/// </summary>
+	static void DropCache( LightEntry entry )
+	{
+		ReleaseTexture( entry.StaticCache, entry.CurrentResolution, entry.IsCube );
+		entry.StaticCache = null;
+		entry.RenderedFrame = 0;
+	}
+
+	/// <summary>
+	/// Whether the light keeps a cache, drawn once and copied in each time it updates: a static light, and one that hasn't
+	/// moved or changed shape for as long as a caster takes to settle (<see cref="SettledCasters.Seconds"/>). Nothing flags a
+	/// scene's lights static, so without the second most would redraw every caster each update. The cache is dropped when the
+	/// light moves, so a moving light draws everything, as before.
+	/// </summary>
+	static bool CachesStatic( in ShadowLight light, LightEntry entry ) => light.Static || SettledCasters.Settled( entry.MovedStamp );
+
+	/// <summary>
+	/// Whether the light's cache is drawn this update: it has none yet, a frame in flight drew it this frame (it's drawn again
+	/// for this one, submitted first), or casters drawn on top of it have settled, and it was drawn as long ago as they take
+	/// to, so it isn't drawn more often than they settle.
+	/// </summary>
+	static bool DrawsCache( in ShadowLight light, LightEntry entry, bool inFlight ) => CachesStatic( light, entry )
+		&& (entry.StaticCache is null || (inFlight && entry.StaticRenderedFrame == FrameCount)
+			|| (entry.NewlySettled.Value > 0 && RealTime.Now - entry.StaticDrawnAt >= SettledCasters.Seconds));
+
+	/// <summary>
+	/// Make <paramref name="view"/> draw the light's cache, made if it has none: its static casters, but a baked light's,
+	/// whose lightmaps hold them, and the casters settled now.
+	/// </summary>
+	static void ToCache( in ShadowLight light, LightEntry entry, ref ShadowViewDesc view )
+	{
+		entry.StaticCache ??= AcquireTexture( entry.CurrentResolution, entry.IsCube );
+		view.Name = entry.DebugName + "_StaticCache";
+		view.Target = entry.StaticCache;
+		view.StaticFilter = light.Baked ? StaticFilter.SettledNoStatic : StaticFilter.Settled;
+		view.SettledStamp = entry.SettledStamp = SettledCasters.Stamp;
+		view.RestlessStamp = entry.RestlessStamp = SettledCasters.RestlessStamp;
+		entry.StaticRenderedFrame = FrameCount;
+		entry.StaticDrawnAt = RealTime.Now;
+		entry.StaticRevision = light.StaticChanges?.Revision ?? 0;
+		entry.SettledRevision = light.SettledChanges?.Revision ?? 0;
+	}
+
+	/// <summary>
+	/// Make <paramref name="view"/> draw the light's map: a copy of its cache with the casters it doesn't hold on top, counting
+	/// those that have settled since; without one, every caster, but a baked light's static ones.
+	/// </summary>
+	static void ToMap( in ShadowLight light, LightEntry entry, ref ShadowViewDesc view )
+	{
+		view.Target = entry.ShadowMap;
+		view.CachedStatic = entry.StaticCache;
+		if ( entry.StaticCache is null )
+		{
+			view.StaticFilter = light.Baked ? StaticFilter.NoStatic : StaticFilter.Any;
+			return;
+		}
+
+		view.StaticFilter = StaticFilter.Unsettled;
+		view.SettledStamp = entry.SettledStamp;
+		view.RestlessStamp = entry.RestlessStamp;
+		entry.NewlySettled.Value = 0;
+		view.NewlySettled = entry.NewlySettled;
 	}
 
 	/// <summary>
@@ -577,14 +711,10 @@ internal partial class ShadowMapper
 			/ Math.Max( resolution, 1 ) );
 	}
 
-	internal static int GetDesiredResolution( float screenSizePercent, int viewportSize )
+	static int GetDesiredResolution( float linearSize )
 	{
-		// screenSizePercent is a screen-area fraction from ComputeScreenSize.
-		// Convert to linear dimension: sqrt(area) gives the fraction of the viewport edge.
-		float linearSize = MathF.Sqrt( screenSizePercent ) * viewportSize;
-
 		// Round down to nearest power of two
-		int desiredSize = (int)BitOperations.RoundUpToPowerOf2( (uint)Math.Max( linearSize, 1 ) ) >> 1;
+		int desiredSize = 1 << BitOperations.Log2( (uint)Math.Max( linearSize, 1 ) );
 
 		return Math.Clamp( desiredSize, 128, MaxResolution );
 	}

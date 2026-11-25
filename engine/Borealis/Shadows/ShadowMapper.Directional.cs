@@ -516,7 +516,7 @@ internal partial class ShadowMapper
 			gpuShadowData.WorldToShadowMatrices[i] = viewProjection * texScaleBiasMat.Transpose();
 			gpuShadowData.ShadowMapIndex[i] = 0; // filled in by ResolveTextureIndices
 			CascadeShadowMaps[i] = rt;
-			LastCascadeMaps[i] = rt;
+			if ( !View.IsReflection ) LastCascadeMaps[i] = rt;
 
 			// Bound the world-space kernel scaling without clamping away the hardness control.
 			gpuShadowData.CascadeHardness[i] = i == 0 ? baseHardness

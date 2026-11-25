@@ -44,13 +44,7 @@ internal partial class ShadowMapper
 			return InvalidShadowIndex;
 		}
 
-		bool isBakedLight = light.Baked;
-		bool isStaticLight = light.Static;
-
-		// How big do we want it, it's okay if our cached is bigger, but not if it's smaller
-		int desiredResolution = GetDesiredResolution( flScreenSize, (int)Math.Max( View.ViewportSize.x, View.ViewportSize.y ) );
-
-		var cacheEntry = GetOrCreateCacheEntry( light, desiredResolution, isCube: false, flScreenSize );
+		var cacheEntry = GetOrCreateCacheEntry( light, isCube: false, flScreenSize );
 
 		// Already rendered this frame, or not this light's turn. A light filling the view never waits its turn. A frame in flight
 		// drew it this frame: it's drawn again for this one, submitted first
@@ -79,29 +73,16 @@ internal partial class ShadowMapper
 			SlopeScaledDepthBias = ShadowSlopeScale * biasScale,
 		};
 
-		// Static lights render their static casters once into a cache that gets copied in
-		// each frame, and only dynamic casters are re-rendered on top.
-		if ( isStaticLight && !isBakedLight && (cacheEntry.StaticCache is null || (inFlight && cacheEntry.StaticRenderedFrame == FrameCount)) )
+		// Static lights, and ones that have kept still, draw their static and settled casters once into a cache that's copied in
+		// each update, and only the casters that move are drawn on top
+		if ( DrawsCache( light, cacheEntry, inFlight ) )
 		{
-			cacheEntry.StaticCache ??= AcquireTexture( cacheEntry.CurrentResolution, isCube: false );
-
-			// Render static objects to the static cache, once
 			var staticView = shadowView;
-			staticView.Name = cacheEntry.DebugName + "_StaticCache";
-			staticView.Target = cacheEntry.StaticCache;
-			staticView.StaticFilter = StaticFilter.OnlyStatic;
+			ToCache( light, cacheEntry, ref staticView );
 			Renderer.RenderShadowView( staticView );
-			cacheEntry.StaticRenderedFrame = FrameCount;
-			cacheEntry.StaticRevision = light.StaticChanges?.Revision ?? 0;
 		}
 
-		bool useStaticCache = cacheEntry.StaticCache is not null;
-
-		// Baked lights exclude static objects from shadow maps, their static shadows come from lightmaps.
-		// Cached lights exclude them too - their static shadows come from the static cache.
-		shadowView.Target = cacheEntry.ShadowMap;
-		shadowView.StaticFilter = isBakedLight || useStaticCache ? StaticFilter.NoStatic : StaticFilter.Any;
-		shadowView.CachedStatic = useStaticCache ? cacheEntry.StaticCache : null;
+		ToMap( light, cacheEntry, ref shadowView );
 
 		Matrix viewProjection = Renderer.RenderShadowView( shadowView );
 

@@ -14,6 +14,7 @@ public sealed partial class RenderSystem
 	{
 		frame.World = world;
 		frame.View = view;
+		world.ResolveAnimation();
 		mainPass.Reset( features.Count );
 		mainPass.View = view;
 		mainPass.Root = view;
@@ -149,7 +150,7 @@ public sealed partial class RenderSystem
 			return true;
 		}
 
-		var size = sizeCull && !KeepsSmallCasters( pass ) ? SizeCull.ForPass( pass ) : default;
+		var size = sizeCull && !pass.KeepsSmallCasters ? SizeCull.ForPass( pass ) : default;
 
 		// Avoid traversing static objects for dynamic-only shadows.
 		var tree = pass.StaticFilter is StaticFilter.NoStatic or StaticFilter.SettledNoStatic or StaticFilter.Unsettled ? world.DynamicTree : world.Tree;
@@ -169,10 +170,9 @@ public sealed partial class RenderSystem
 			inFrustum = true;
 		}
 
-		// Lights, custom objects and anything else that's never size culled
+		// Non-tree casters are kept separately so each shadow face can skip lights, probes and decals.
 		inTree = candidates.Count;
-		foreach ( var i in world.Unculled )
-			candidates.Add( i << 1 );
+		candidates.AddRange( world.UnculledCandidates( pass.IsShadow && pass.CullReasons is null ) );
 
 		return inFrustum;
 	}
@@ -193,7 +193,7 @@ public sealed partial class RenderSystem
 	{
 		var frustum = pass.View.Frustum;
 		var root = pass.Root;
-		var sizeCull = KeepsSmallCasters( pass ) ? default : SizeCull.ForPass( pass );
+		var sizeCull = pass.KeepsSmallCasters ? default : SizeCull.ForPass( pass );
 		var shadow = pass.IsShadow;
 		var filter = pass.StaticFilter;
 		var objects = world.Objects;
@@ -268,9 +268,8 @@ public sealed partial class RenderSystem
 			if ( shadow )
 			{
 				if ( !f.DrawsShadows || !f.CastsShadow( obj ) ) continue;
-				if ( filter == StaticFilter.OnlyStatic && !obj.IsStatic ) continue;
-				if ( filter == StaticFilter.NoStatic && obj.IsStatic ) continue;
-				if ( filter >= StaticFilter.Settled && !TakesSettled( pass, filter, obj.IsStatic, world.MovedStamps[i] ) ) continue;
+				if ( filter == StaticFilter.NoStatic && obj.CachesAsStatic ) continue;
+				if ( filter >= StaticFilter.Settled && !(DrawnLive( pass, obj ) ? filter == StaticFilter.Unsettled : TakesSettled( pass, filter, obj.IsStatic, world.MovedStamps[i] )) ) continue;
 			}
 
 			visible[feature].Add( i );
@@ -279,9 +278,16 @@ public sealed partial class RenderSystem
 	}
 
 	/// <summary>
-	/// Whether the sun's cached far cascade (<see cref="StaticFilter.Settled"/>, <see cref="StaticFilter.SettledNoStatic"/>) or
-	/// what's drawn on top of it (<see cref="StaticFilter.Unsettled"/>) takes a caster that last moved at <paramref name="moved"/>.
-	/// The one on top counts those it takes that have settled since its cache was drawn.
+	/// A caster no cache holds, drawn live on top of one: a static caster that animates vertices, and in a light's cache, a
+	/// custom object that isn't static, whose draws change without anything moving. The sun's far cascade, far from the
+	/// camera, keeps custom objects once they've settled.
+	/// </summary>
+	static bool DrawnLive( ViewPass pass, RenderObject obj ) => obj.AnimatesVertices || (pass.LightSphere is not null && !obj.IsStatic && obj is CustomObject);
+
+	/// <summary>
+	/// Whether a cache (<see cref="StaticFilter.Settled"/>, <see cref="StaticFilter.SettledNoStatic"/>) or what's drawn on top
+	/// of it (<see cref="StaticFilter.Unsettled"/>) takes a caster that last moved at <paramref name="moved"/>. The one on top
+	/// counts those it takes that have settled since its cache was drawn.
 	/// </summary>
 	static bool TakesSettled( ViewPass pass, StaticFilter filter, bool isStatic, ulong moved )
 	{
@@ -294,12 +300,6 @@ public sealed partial class RenderSystem
 		if ( pass.NewlySettled is { } count && Borealis.Shadows.SettledCasters.Settled( moved ) ) count.Value++;
 		return true;
 	}
-
-	/// <summary>
-	/// A static shadow cache is kept while the camera moves, so it isn't size culled by where the camera was when it was drawn.
-	/// A texel-sized cull doesn't depend on the camera, so it keeps that.
-	/// </summary>
-	static bool KeepsSmallCasters( ViewPass pass ) => pass.StaticFilter == StaticFilter.OnlyStatic && !pass.TexelSized;
 
 	/// <summary>
 	/// Warm type lookups before parallel culling; cache misses write shared state.
