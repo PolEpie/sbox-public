@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 
@@ -84,6 +85,10 @@ public partial class RenderAttributes
 /// </summary>
 internal sealed class ManagedRenderAttributes
 {
+	// Exact type checks: a pattern over arrays goes through a cast helper per value, as an array of another element type may convert
+	static bool IsFloats( object value ) => value is not null && value.GetType() == typeof( float[] );
+	static bool IsBytes( object value ) => value is not null && value.GetType() == typeof( byte[] );
+
 	/// <summary>A texture and the mip bound (-1 for all).</summary>
 	public readonly record struct TextureValue( Texture Texture, int Mip );
 
@@ -120,14 +125,13 @@ internal sealed class ManagedRenderAttributes
 			Borrowed.Clear();
 			foreach ( var (k, entry) in other.Values )
 			{
-				var value = entry.Value switch
+				var value = entry.Value;
+				if ( IsFloats( value ) ) value = Copy( k, Unsafe.As<float[]>( value ) );
+				else if ( IsBytes( value ) )
 				{
-					float[] floats => Copy( k, floats ),
-					byte[] bytes when !other.Borrowed.Contains( k ) => Copy( k, bytes ),
-					var shared => shared,
-				};
-
-				if ( value is byte[] && other.Borrowed.Contains( k ) ) Borrowed.Add( k );
+					if ( !other.Borrowed.Contains( k ) ) value = Copy( k, Unsafe.As<byte[]>( value ) );
+					else Borrowed.Add( k );
+				}
 				Values[k] = new Entry<object> { Value = value, Stamp = entry.Stamp };
 			}
 
@@ -147,8 +151,8 @@ internal sealed class ManagedRenderAttributes
 		// An array of this length for k's value that only this store holds: its value's, else one a cleared value left, else new
 		public T[] Array<T>( uint k, int length )
 		{
-			if ( Values.TryGetValue( k, out var current ) && current.Value is T[] array && array.Length == length && Owns( k, array ) ) return array;
-			if ( Spare.Remove( k, out var old ) && old is T[] kept && kept.Length == length ) return kept;
+			if ( Values.TryGetValue( k, out var current ) && current.Value is { } value && value.GetType() == typeof( T[] ) && Unsafe.As<T[]>( value ) is var array && array.Length == length && Owns( k, array ) ) return array;
+			if ( Spare.Remove( k, out var old ) && old.GetType() == typeof( T[] ) && Unsafe.As<T[]>( old ) is var kept && kept.Length == length ) return kept;
 			return length == 0 ? [] : new T[length];
 		}
 
@@ -163,10 +167,10 @@ internal sealed class ManagedRenderAttributes
 		// An array this store made (numbers', copied bytes') waits to be reused for its token
 		public void Keep( uint k, object old )
 		{
-			if ( old is float[] || (old is byte[] && !Borrowed.Contains( k )) ) Spare[k] = old;
+			if ( IsFloats( old ) || (IsBytes( old ) && !Borrowed.Contains( k )) ) Spare[k] = old;
 		}
 
-		bool Owns( uint k, object value ) => value is not byte[] || !Borrowed.Contains( k );
+		bool Owns( uint k, object value ) => !IsBytes( value ) || !Borrowed.Contains( k );
 
 		public void Own( uint k )
 		{
@@ -246,7 +250,7 @@ internal sealed class ManagedRenderAttributes
 	{
 		var store = Writing();
 		// The same numbers again change nothing, so a reader that keeps what it made from the set at a version finds it still good
-		if ( store.Values.TryGetValue( k.Value, out var held ) && held.Value is float[] same && same.AsSpan().SequenceEqual( value ) ) return;
+		if ( store.Values.TryGetValue( k.Value, out var held ) && IsFloats( held.Value ) && Unsafe.As<float[]>( held.Value ).AsSpan().SequenceEqual( value ) ) return;
 		var array = store.Array<float>( k.Value, value.Length );
 		value.CopyTo( array );
 		store.Put( k.Value, array, ++store.Version );
@@ -322,7 +326,7 @@ internal sealed class ManagedRenderAttributes
 		store.Put( k.Value, value, ++store.Version );
 
 		// Bytes from outside stay the caller's
-		if ( value is byte[] ) store.Borrowed.Add( k.Value );
+		if ( IsBytes( value ) ) store.Borrowed.Add( k.Value );
 		else store.Own( k.Value );
 	}
 
@@ -359,12 +363,9 @@ internal sealed class ManagedRenderAttributes
 		foreach ( var (k, entry) in mine.Values )
 		{
 			if ( !theirs.Values.TryGetValue( k, out var their ) ) return false;
-			var same = (entry.Value, their.Value) switch
-			{
-				(float[] a, float[] b ) => a.AsSpan().SequenceEqual( b ),
-				(byte[] a, byte[] b ) => a.AsSpan().SequenceEqual( b ),
-				var (a, b) => Equals( a, b ),
-			};
+			var same = IsFloats( entry.Value ) ? IsFloats( their.Value ) && Unsafe.As<float[]>( entry.Value ).AsSpan().SequenceEqual( Unsafe.As<float[]>( their.Value ) )
+				: IsBytes( entry.Value ) ? IsBytes( their.Value ) && Unsafe.As<byte[]>( entry.Value ).AsSpan().SequenceEqual( Unsafe.As<byte[]>( their.Value ) )
+				: Equals( entry.Value, their.Value );
 			if ( !same ) return false;
 		}
 
@@ -405,24 +406,26 @@ internal sealed class ManagedRenderAttributes
 		foreach ( var (k, entry) in from.Values )
 		{
 			// Arrays go into the other set's own, so setting them again here doesn't change them there
-			switch ( entry.Value )
+			var value = entry.Value;
+			if ( IsFloats( value ) )
 			{
-				case float[] floats:
-					to.Put( k, to.Copy( k, floats ), stamp );
-					to.Own( k );
-					break;
-				case byte[] bytes when from.Borrowed.Contains( k ):
-					to.Put( k, bytes, stamp );
-					to.Borrowed.Add( k );
-					break;
-				case byte[] bytes:
-					to.Put( k, to.Copy( k, bytes ), stamp );
-					to.Own( k );
-					break;
-				default:
-					to.Put( k, entry.Value, stamp );
-					to.Own( k );
-					break;
+				to.Put( k, to.Copy( k, Unsafe.As<float[]>( value ) ), stamp );
+				to.Own( k );
+			}
+			else if ( IsBytes( value ) && from.Borrowed.Contains( k ) )
+			{
+				to.Put( k, value, stamp );
+				to.Borrowed.Add( k );
+			}
+			else if ( IsBytes( value ) )
+			{
+				to.Put( k, to.Copy( k, Unsafe.As<byte[]>( value ) ), stamp );
+				to.Own( k );
+			}
+			else
+			{
+				to.Put( k, value, stamp );
+				to.Own( k );
 			}
 		}
 

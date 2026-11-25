@@ -367,7 +367,11 @@ internal sealed partial class BorealisGpuRenderBackend
 	static readonly int TransformBufferId = AttributeIds.Of( "g_TransformBuffer" );
 	static readonly int UncompressedTangentFrameId = AttributeIds.Of( UncompressedTangentFrame );
 
-	/// <summary>A model draw's lowered attributes, kept while block, attributes, transforms, tangent frame, device frame, lent transforms and backings are unchanged.</summary>
+	/// <summary>
+	/// A draw's or dispatch's lowered attributes, kept while block, transforms, tangent frame, device frame, lent transforms and backings are
+	/// unchanged. Attributes set again since it was made are lowered into it again alone (a dispatch's combos, a draw's one buffer),
+	/// unless something was cleared meanwhile (<see cref="ManagedRenderAttributes.RemovedAt"/>), which lowers them all.
+	/// </summary>
 	sealed class ModelAttributes
 	{
 		public readonly ShaderAttributes Set = new();
@@ -375,7 +379,7 @@ internal sealed partial class BorealisGpuRenderBackend
 		public int Version, BlockVersion, Backings, Built;
 		public ulong Frame;
 		public BufferHandle Lent, Transforms;
-		public bool Uncompressed, Pending;
+		public bool Uncompressed, Pending, Dispatch;
 	}
 
 	const int ModelAttributesKept = 12;
@@ -387,7 +391,7 @@ internal sealed partial class BorealisGpuRenderBackend
 	/// <summary>The same for draws from buffers or CPU vertices; the identity transform is added here so drawing doesn't change the kept set.</summary>
 	ShaderAttributes LoweredForPending( RenderAttributes attributes ) => LoweredFor( attributes, default, true, pending: true );
 
-	ShaderAttributes LoweredFor( RenderAttributes attributes, BufferHandle transforms, bool uncompressed, bool pending )
+	ShaderAttributes LoweredFor( RenderAttributes attributes, BufferHandle transforms, bool uncompressed, bool pending, bool dispatch = false )
 	{
 		if ( attributes?.Managed is null && attributes?.ShadowSet is { } copy ) attributes = copy;
 		if ( attributes?.Managed is null )
@@ -397,29 +401,52 @@ internal sealed partial class BorealisGpuRenderBackend
 		var block = blockAttributes?.Managed is { } b && !ReferenceEquals( b, managed ) ? b : null;
 		var frame = gpu.FrameNumber;
 		var blockVersion = block?.Version ?? 0;
+		var version = managed.Version;
+		ModelAttributes older = null;
 		foreach ( var kept in modelAttributes )
 		{
-			if ( kept is not null && ReferenceEquals( kept.Managed, managed ) && kept.Version == managed.Version && ReferenceEquals( kept.Block, block ) && kept.BlockVersion == blockVersion
-				&& kept.Frame == frame && kept.Lent == lentTransforms && kept.Transforms == transforms && kept.Uncompressed == uncompressed && kept.Pending == pending && kept.Backings == backingsVersion
-				&& kept.Built == kept.Set.Version ) return kept.Set;
+			if ( kept is not null && ReferenceEquals( kept.Managed, managed ) && ReferenceEquals( kept.Block, block ) && kept.BlockVersion == blockVersion
+				&& kept.Frame == frame && kept.Lent == lentTransforms && kept.Transforms == transforms && kept.Uncompressed == uncompressed && kept.Pending == pending && kept.Dispatch == dispatch
+				&& kept.Backings == backingsVersion && kept.Built == kept.Set.Version )
+			{
+				if ( kept.Version == version ) return kept.Set;
+				older = kept;
+			}
 		}
 
-		var made = modelAttributes[modelAttributesNext] ??= new ModelAttributes();
-		modelAttributesNext = (modelAttributesNext + 1) % ModelAttributesKept;
+		var incremental = older is not null && managed.RemovedAt <= older.Version;
+		var made = incremental ? older : modelAttributes[modelAttributesNext] ??= new ModelAttributes();
+		if ( !incremental ) modelAttributesNext = (modelAttributesNext + 1) % ModelAttributesKept;
 		var set = made.Set;
-		set.Clear();
-		if ( block is not null ) set.CopyFrom( LoweredBlock( block ) );
-		else if ( lentTransforms.IsValid ) set.SetById( TransformBufferId, lentTransforms );
-		Lower( managed, set );
+
+		// A dispatch's textures are the engine's own copies (EngineWrites)
+		loweringDispatch = dispatch;
+		try
+		{
+			if ( incremental ) Lower( managed, set, made.Version );
+			else
+			{
+				set.Clear();
+				if ( block is not null ) set.CopyFrom( LoweredBlock( block ) );
+				else if ( lentTransforms.IsValid ) set.SetById( TransformBufferId, lentTransforms );
+				Lower( managed, set );
+			}
+		}
+		finally
+		{
+			loweringDispatch = false;
+		}
+
+		// Over what the attributes set, as when made: set again, a changed value can have replaced them
 		if ( transforms.IsValid ) set.SetById( TransformBufferId, transforms );
 		if ( pending )
 		{
 			if ( set.Get( UncompressedTangentFrameId ) is null ) set.SetById( UncompressedTangentFrameId, 1.0f );
 			context.EnsureTransform( set );
 		}
-		else set.SetById( UncompressedTangentFrameId, uncompressed ? 1.0f : 0.0f );
+		else if ( !dispatch ) set.SetById( UncompressedTangentFrameId, uncompressed ? 1.0f : 0.0f );
 
-		(made.Managed, made.Version, made.Block, made.BlockVersion, made.Frame, made.Lent, made.Transforms, made.Uncompressed, made.Pending, made.Backings, made.Built) = (managed, managed.Version, block, blockVersion, frame, lentTransforms, transforms, uncompressed, pending, backingsVersion, set.Version);
+		(made.Managed, made.Version, made.Block, made.BlockVersion, made.Frame, made.Lent, made.Transforms, made.Uncompressed, made.Pending, made.Dispatch, made.Backings, made.Built) = (managed, managed.Version, block, blockVersion, frame, lentTransforms, transforms, uncompressed, pending, dispatch, backingsVersion, set.Version);
 		return set;
 	}
 

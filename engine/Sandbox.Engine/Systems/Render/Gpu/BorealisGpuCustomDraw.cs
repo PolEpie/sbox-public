@@ -2,6 +2,7 @@ using Borealis;
 using Borealis.Backend;
 using System.Runtime.InteropServices;
 using GpuContext = Borealis.Gpu.GpuContext;
+using OverlayStencil = Borealis.Gpu.OverlayStencil;
 
 namespace Sandbox;
 
@@ -77,6 +78,7 @@ internal static class BorealisGpuCustomDraw
 		// A debug view's tools pass (wireframe, overdraw, shader IDs) over the custom object's draws too
 		var drawer = backend.Context.Drawer;
 		drawer.ToolsPass = depthAlone ? ToolsPass.None : context.ToolsPass;
+		drawer.OverlayStencil = depthAlone ? context.OverlayStencil : OverlayStencil.None;
 		// A game's custom object replays what the extract recorded for this camera (Rendering.GameDrawExtract)
 		using var drawing = Rendering.GameDrawExtract.DrawingFor( cameraAttributes, overlay: false );
 		try
@@ -86,13 +88,16 @@ internal static class BorealisGpuCustomDraw
 		finally
 		{
 			drawer.ToolsPass = ToolsPass.None;
+			drawer.OverlayStencil = OverlayStencil.None;
 			view.LightingWorld = null;
 			backend.LendInstances( default, default, 0 );
 			backend.DrawMode = null;
 			backend.DepthBias = default;
 		}
 
-		context.RestoreBound();
+		// The mesh layer restores its depth target at the end of the custom run. Colour callbacks also use Draw
+		// without a custom run, so still restore for them here.
+		if ( !depthAlone ) context.RestoreBound();
 		return true;
 	}
 
@@ -131,12 +136,17 @@ internal static class BorealisGpuCustomDraw
 		var backend = (BorealisGpuRenderBackend)RenderBackend.Default;
 		var context = (BackendContext)runContext;
 		runAttributes ??= RenderAttributes.CreateManaged();
-		foreach ( var (custom, firstInstance) in run )
+		for ( int i = 0; i < run.Count; i++ )
 		{
+			var (custom, firstInstance) = run[i];
 			if ( custom is not Sandbox.Rendering.BridgeCustomObject { Source: { } source } || !source.IsValid() ) continue;
-			context.BindInstances( 1, firstInstance );
-			var (transforms, ids, offset) = context.LentInstances;
-			backend.LendInstances( transforms, ids, offset );
+			// Draw already lent the first object's instance slot when it began the block.
+			if ( i > 0 )
+			{
+				context.BindInstances( 1, firstInstance );
+				var (transforms, ids, offset) = context.LentInstances;
+				backend.LendInstances( transforms, ids, offset );
+			}
 
 			runAttributes.Clear();
 			using var scope = new Graphics.AttributeScope( runAttributes );

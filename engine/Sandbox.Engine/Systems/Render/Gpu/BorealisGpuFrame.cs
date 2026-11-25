@@ -218,7 +218,6 @@ internal sealed class BorealisGpuFrame : IDisposable
 		resolveAttributes.Set( "SourceDepth", Depth );
 		resolveAttributes.SetCombo( "D_MSAA", 1 );
 		resolveAttributes.SetCombo( "D_UPSCALE", 0 );
-		resolveAttributes.Set( "DownsampleFactor", 1 );
 
 		backend.BindRenderTarget( resolveTarget );
 		Graphics.Viewport = new Rect( 0, 0, Depth.Width, Depth.Height );
@@ -462,7 +461,7 @@ internal sealed class BorealisGpuFrame : IDisposable
 	}
 
 	// Depth targets drawn into alone (RunInDepth), one per Borealis texture (shadow maps, the prepass's depth): engine textures
-	// kept from frame to frame with their backings, each borrowed for a draw, and a target of each. Those whose Borealis texture
+	// kept from frame to frame with their backings, each borrowed for a run, and a target of each. Those whose Borealis texture
 	// was destroyed (a world's shadow maps, after a map change) go as the next one is made
 	readonly Dictionary<BackendTexture, (Texture Texture, RenderTarget Target)> depthAlone = new();
 
@@ -489,19 +488,45 @@ internal sealed class BorealisGpuFrame : IDisposable
 		view.Viewport = target.Viewport;
 		backend.LendNextBlock( list );
 		backend.DepthRange = target.MaxZ > target.MinZ ? (target.MinZ, target.MaxZ) : (0, 1);
+		var keptWritable = false;
 		try
 		{
 			using var scope = Graphics.Scope.CreateOnView( backend, view );
-			view.Bind();
-			cameraAttributes?.MergeTo( Graphics.Attributes );
-			Graphics.Attributes.SetDataShared( ViewConstantsName, viewConstants );
-			draw();
+			try
+			{
+				view.Bind();
+				var attributes = Graphics.Attributes;
+				cameraAttributes?.MergeTo( attributes );
+				attributes.SetDataShared( ViewConstantsName, viewConstants );
+				draw();
+			}
+			finally
+			{
+				// FinishReadable makes the engine's textures readable for bindless use. This attachment belongs to the
+				// frame, which transitions it at the pass that reads it. Hand back writable depth without the round trip.
+				// If the custom draw left it in another layout, let the block finish it as usual.
+				if ( backend.Context.LayoutOf( gpu.Handle ) == Borealis.Gpu.ImageLayout.DepthTarget )
+				{
+					backend.Context.Finish();
+					backend.ForgetBorrowed( gpu.Handle );
+					keptWritable = true;
+				}
+			}
 		}
 		finally
 		{
 			backend.LendNextBlock( null );
-			context.SetLayout( gpu, backend.LayoutOf( kept.Texture ) );
-			backend.ForgetBorrowed( gpu.Handle );
+			if ( keptWritable )
+			{
+				context.SetLayout( gpu, Borealis.Gpu.ImageLayout.DepthTarget );
+				// The engine's rendering scope ended. A subsequent attachment load/write still depends on its writes.
+				context.BarrierToDepthWrite( gpu );
+			}
+			else
+			{
+				context.SetLayout( gpu, backend.LayoutOf( kept.Texture ) );
+				backend.ForgetBorrowed( gpu.Handle );
+			}
 			backend.DepthRange = (0, 1);
 			view.Target = null;
 			view.DepthSlice = 0;

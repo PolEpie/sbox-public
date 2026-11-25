@@ -399,7 +399,7 @@ internal static class MirrorContent
 
 	/// <summary>
 	/// Set on <paramref name="into"/> what <paramref name="attributes"/> had set after its version was <paramref name="version"/>:
-	/// what a command list set meanwhile. Numbers, vectors, matrices, combos and the textures Borealis can read carry over.
+	/// what a command list set meanwhile. Numbers, vectors, matrices, combos, constant buffers and the textures Borealis can read carry over.
 	/// </summary>
 	public static void SetChanged( ManagedRenderAttributes attributes, int version, ShaderParameters into )
 	{
@@ -471,6 +471,8 @@ internal static class MirrorContent
 			case float[] { Length: 16 } f: parameters.Set( name, MemoryMarshal.Read<Matrix>( MemoryMarshal.AsBytes( f.AsSpan() ) ) ); break;
 			case ManagedRenderAttributes.TextureValue t when Texture( t.Texture ) is { } texture: parameters.Set( name, texture, t.Mip ); break;
 			case Sandbox.GpuBuffer b when Buffer( b ) is { } buffer: parameters.Set( name, buffer ); break;
+			// RenderAttributes.SetData: a constant buffer's bytes (a game's per-frame constants on Scene.RenderAttributes)
+			case byte[] data: parameters.SetData( name, data ); break;
 		}
 	}
 
@@ -494,7 +496,7 @@ internal static class MirrorContent
 
 	/// <summary>
 	/// An object's attributes as its draws read them: its managed copy (<c>RenderAttributes.Shadow</c>) converted, again only
-	/// when it changed. Numbers, vectors, matrices, combos, textures and buffers carry over; samplers and constant buffers
+	/// when it changed. Numbers, vectors, matrices, combos, textures, buffers and constant buffers carry over; samplers
 	/// don't yet. Values set again (a time or colour each frame, or all of them after a clear) are written into the same
 	/// parameters; a value added or gone, or a combo changed, makes new ones, so the object's draws are made again
 	/// (<c>MeshObject.Attributes</c>).

@@ -29,6 +29,10 @@ internal sealed partial class BorealisGpuWindow
 			var width = Math.Min( from.Width, to.Width );
 			var height = Math.Min( from.Height, to.Height );
 
+			// No frame begins while the main thread is away, so the lists presented again with are recycled here once the GPU is
+			// done with them; left for their frame, each held a command pool of its own (about a thousand through one load)
+			RecyclePresentedAgain( gpu );
+
 			// The output is readable between blocks (GraphicsContext.FinishReadable), and left so; the image's old contents
 			// don't matter
 			var list = gpu.BeginCommandList( QueueType.Graphics, "Present the last frame again" );
@@ -37,7 +41,8 @@ internal sealed partial class BorealisGpuWindow
 			list.Blit( output, (0, 0, width, height), image, (0, 0, width, height), Filter.Nearest );
 			list.Barrier( new TextureBarrier { Texture = output, OldLayout = ImageLayout.CopySource, NewLayout = ImageLayout.ShaderRead, SourceStage = PipelineStage.Transfer, SourceAccess = MemoryAccess.TransferRead, DestinationStage = PipelineStage.AllCommands, DestinationAccess = MemoryAccess.MemoryRead, MipCount = 1, LayerCount = 1 } );
 			list.Barrier( new TextureBarrier { Texture = image, OldLayout = ImageLayout.CopyDestination, NewLayout = ImageLayout.Present, SourceStage = PipelineStage.Transfer, SourceAccess = MemoryAccess.TransferWrite, DestinationStage = PipelineStage.AllCommands, DestinationAccess = MemoryAccess.None, MipCount = 1, LayerCount = 1 } );
-			gpu.Submit( list, default, swapChain );
+			var submitted = gpu.Submit( list, default, swapChain );
+			if ( presentedAgain.Count < MaxPresentedAgainKept ) presentedAgain.Enqueue( (list, submitted) );
 			acquiredAhead = false;
 			swapChain.Present();
 			PresentedAgain++;
@@ -51,6 +56,21 @@ internal sealed partial class BorealisGpuWindow
 			// Left for the main thread's next frame, which says it (BorealisGpuDeviceLost); an image still held is its to submit for
 			acquiredAhead = swapChain.Current.IsValid;
 			return false;
+		}
+	}
+
+	// The lists presented again with and where each was submitted, oldest first, until the GPU is done with them
+	readonly Queue<(CommandList List, SyncPoint Submitted)> presentedAgain = new();
+	const int MaxPresentedAgainKept = 8;
+
+	void RecyclePresentedAgain( Device gpu )
+	{
+		while ( presentedAgain.TryPeek( out var oldest ) && gpu.IsComplete( oldest.Submitted ) )
+		{
+			presentedAgain.Dequeue();
+
+			// False when a frame began since: that frame recycles it
+			gpu.TryRecycle( oldest.List, oldest.Submitted );
 		}
 	}
 

@@ -65,12 +65,21 @@ public partial class Texture : Resource, IDisposable
 	/// In which case we should change all this code to use that way instead of doing this.
 	/// </summary>
 	/// <summary>
-	/// What the texture was made with, kept when the process draws on a device other than Source 2's
-	/// (<see cref="RenderBackend.Default"/>) or has another device beside it, which makes its copy from them: the pixel
-	/// data, or the colour it was cleared to.
+	/// What the texture was made with, until the device that draws it has made its copy from it: a process whose only device is
+	/// Borealis.Gpu's (<see cref="RenderBackend.IsOnlyDevice"/>) lets the pixels go then, and what reads them back
+	/// (<see cref="GetPixels(int)"/> and the rest) reads that copy. Kept where another device might still make its own copy from them,
+	/// and where nothing draws (<see cref="HeadlessRenderBackend"/> reads them back): the pixel data, or the colour it was cleared to.
 	/// Null once the texture has been changed since.
 	/// </summary>
-	internal byte[] InitialPixels { get; set; }
+	internal byte[] InitialPixels { get => initialPixels; set => initialPixels = value; }
+	byte[] initialPixels;
+
+	/// <summary>
+	/// Let <see cref="InitialPixels"/> go if they're still <paramref name="consumed"/>, the array a device made its copy from:
+	/// pixels given to the texture since (<see cref="CopyFrom"/> on another thread) are kept for the copy made from them.
+	/// </summary>
+	internal void ForgetInitialPixels( byte[] consumed ) => System.Threading.Interlocked.CompareExchange( ref initialPixels, null, consumed );
+
 	internal Color? InitialColor { get; set; }
 
 	/// <summary>
@@ -96,6 +105,9 @@ public partial class Texture : Resource, IDisposable
 		MadeAtRunTime = texture.MadeAtRunTime;
 		InitialPixels = texture.InitialPixels;
 		InitialColor = texture.InitialColor;
+
+		// A device that let the pixels go once it made its copy has nothing to make this texture from: it copies that copy
+		if ( InitialPixels is null && MadeAtRunTime ) RenderBackend.AdoptEverywhere( texture, this );
 
 		if ( !native.IsNull )
 		{

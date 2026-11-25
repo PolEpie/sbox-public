@@ -132,6 +132,7 @@ public partial class SceneObject : IHandle
 		lock ( World.InternalSceneObjects )
 		{
 			World.InternalSceneObjects.Add( this );
+			World.InvalidateSceneObjects();
 		}
 
 		// Made in its renderer once its constructor is done
@@ -163,6 +164,7 @@ public partial class SceneObject : IHandle
 		lock ( World.InternalSceneObjects )
 		{
 			World.InternalSceneObjects.Remove( this );
+			World.InvalidateSceneObjects();
 		}
 
 		if ( _attributes != null )
@@ -246,8 +248,9 @@ public partial class SceneObject : IHandle
 		if ( !System.Numerics.Matrix4x4.Invert( Matrix.FromTransform( previous ), out var inverse ) ) return;
 		var move = inverse * (System.Numerics.Matrix4x4)Matrix.FromTransform( now );
 
-		foreach ( var child in _children.ToArray() )
+		for ( int i = 0; i < _children.Count; i++ )
 		{
+			var child = _children[i];
 			if ( !child.IsValid() ) continue;
 			child.Transform = ((Matrix)((System.Numerics.Matrix4x4)Matrix.FromTransform( child.Transform ) * move)).ExtractTransform();
 		}

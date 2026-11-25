@@ -129,6 +129,7 @@ public partial class SceneObject
 			custom.DepthPrepass = !flags.HasFlag( Rendering.SceneObjectFlags.NoZPrepass );
 			custom.CastShadows = CastsShadows;
 			custom.Visible = RenderingEnabled;
+			custom.IsStatic = flags.IsStatic;
 			WriteLayerFlags( custom, flags );
 			custom.LayerMatch = LayerMatchFor( LayerMatchToken );
 		}

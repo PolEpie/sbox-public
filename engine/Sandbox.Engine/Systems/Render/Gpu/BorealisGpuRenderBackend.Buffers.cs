@@ -36,6 +36,7 @@ internal sealed partial class BorealisGpuRenderBackend
 	{
 		var size = (long)buffer.ElementCount * buffer.ElementSize & ~3L;
 		if ( size == 0 ) return;
+		FromMain();
 		Fill( BufferOf( buffer ), value, 0, size );
 	}
 
@@ -115,7 +116,11 @@ internal sealed partial class BorealisGpuRenderBackend
 		gpu.Destroy( backing.Handle );
 	}
 
-	public override void SetStructureCount( GpuBuffer buffer, uint value ) => Fill( CounterOf( buffer ), value, 0, sizeof( uint ) );
+	public override void SetStructureCount( GpuBuffer buffer, uint value )
+	{
+		FromMain();
+		Fill( CounterOf( buffer ), value, 0, sizeof( uint ) );
+	}
 
 	public override void CopyStructureCount( GpuBuffer source, GpuBuffer destination, uint destinationOffset )
 	{

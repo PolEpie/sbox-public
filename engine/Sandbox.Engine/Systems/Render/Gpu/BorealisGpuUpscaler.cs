@@ -363,7 +363,6 @@ internal sealed class BorealisGpuUpscaler : IDisposable
 			depthAttributes.Set( SourceDepth, sceneDepth );
 			depthAttributes.SetCombo( "D_MSAA", false );
 			depthAttributes.SetCombo( "D_UPSCALE", false );
-			depthAttributes.Set( "DownsampleFactor", 1 );
 			Graphics.Blit( DepthResolve, depthAttributes );
 
 			Graphics.RenderTarget = motionTarget;
