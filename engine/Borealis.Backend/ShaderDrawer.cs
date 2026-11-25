@@ -676,7 +676,7 @@ public sealed partial class ShaderDrawer : IDisposable
 	}
 	// A record struct, not a tuple: a tuple of eight or more keeps the rest in a tuple of its own, which its hash and equality
 	// box until the JIT has optimised them
-	readonly record struct PipelineKey( ShaderVariant Variant, Format Color, Format Depth, int Samples, VertexStreamLayout Layout, PrimitiveTopology Topology, bool Ids, ToolsPass Tools, bool Redrawn );
+	readonly record struct PipelineKey( ShaderVariant Variant, Format Color, Format Depth, int Samples, VertexStreamLayout Layout, PrimitiveTopology Topology, bool Ids, ToolsPass Tools, bool Redrawn, OverlayStencil Stencil );
 	readonly Dictionary<PipelineKey, PipelineHandle> pipelines = new();
 
 	/// <summary>
@@ -684,6 +684,10 @@ public sealed partial class ShaderDrawer : IDisposable
 	/// its own vertex stage and the engine's tools view pixel stage (<see cref="ToolsViewStage"/>).
 	/// </summary>
 	internal ToolsPass ToolsPass { get; set; }
+
+	/// <summary>The depth prepass's overlay stencil override for custom objects.</summary>
+	internal OverlayStencil OverlayStencil { get; set; }
+
 	readonly Dictionary<ShaderVariant, PipelineHandle> computePipelines = new();
 	MaterialObjectCache cache;
 	readonly bool ownsCache;
@@ -1111,6 +1115,7 @@ public sealed partial class ShaderDrawer : IDisposable
 		public int Samples;
 		public PrimitiveTopology Topology;
 		public ToolsPass Tools;
+		public OverlayStencil Stencil;
 		public MaterialObject Found;
 	}
 
@@ -1120,10 +1125,10 @@ public sealed partial class ShaderDrawer : IDisposable
 	static int ObjectSlot( ShaderVariant variant, VertexStreamLayout layout, Format color, Format depth, int samples ) =>
 		(RuntimeHelpers.GetHashCode( variant ) + RuntimeHelpers.GetHashCode( layout ) * 31 + (int)color * 7 + (int)depth * 13 + samples) & (ObjectMemos - 1);
 
-	MaterialObject RememberedObject( ShaderVariant variant, VertexStreamLayout layout, bool ids, Format color, Format depth, int samples, PrimitiveTopology topology, ToolsPass tools, bool redrawn )
+	MaterialObject RememberedObject( ShaderVariant variant, VertexStreamLayout layout, bool ids, Format color, Format depth, int samples, PrimitiveTopology topology, ToolsPass tools, bool redrawn, OverlayStencil stencil )
 	{
 		ref readonly var memo = ref objectMemo[ObjectSlot( variant, layout, color, depth, samples )];
-		if ( ReferenceEquals( memo.Variant, variant ) && ReferenceEquals( memo.Layout, layout ) && memo.Ids == ids && memo.Color == color && memo.Depth == depth && memo.Samples == samples && memo.Topology == topology && memo.Tools == tools && memo.Redrawn == redrawn ) return memo.Found;
+		if ( ReferenceEquals( memo.Variant, variant ) && ReferenceEquals( memo.Layout, layout ) && memo.Ids == ids && memo.Color == color && memo.Depth == depth && memo.Samples == samples && memo.Topology == topology && memo.Tools == tools && memo.Redrawn == redrawn && memo.Stencil == stencil ) return memo.Found;
 		return null;
 	}
 
@@ -1133,16 +1138,17 @@ public sealed partial class ShaderDrawer : IDisposable
 		if ( BackendDevice.DrawMarkers ) list.Marker( BackendDevice.DrawMarkerName( variant ) );
 		var ids = ReadsInstanceIds( variant );
 		var redrawn = RedrawnEveryFrame.Active;
-		var tools = color == Format.Unknown ? ToolsPass.None : ToolsPass;
-		var materialObject = MaterialObjects ? RememberedObject( variant, layout, ids, color, depth, samples, topology, tools, redrawn ) : null;
+		var tools = color == Format.Unknown ? ToolsPass.None : ToolsViewStage.ReadyPass( shaders, ToolsPass );
+		var stencil = depth.HasStencil() ? OverlayStencil : OverlayStencil.None;
+		var materialObject = MaterialObjects ? RememberedObject( variant, layout, ids, color, depth, samples, topology, tools, redrawn, stencil ) : null;
 		if ( materialObject is not null ? HasPassSpace( materialObject.Layout ) : Objects( variant ) )
 		{
 			if ( materialObject is null )
 			{
-				var key = new MaterialObjectCache.Key( null, variant, LayoutKey( layout, ids ), color, depth, samples, false, false, topology, Tools: tools, Redrawn: redrawn );
-				materialObject = cache.Get( key, immediate: true, (Drawer: this, Variant: variant, Color: color, Depth: depth, Samples: samples, Layout: layout, Topology: topology, Ids: ids, Redrawn: redrawn),
-					static ( s, materialLayout ) => s.Drawer.Pipeline( s.Variant, s.Color, s.Depth, s.Samples, s.Layout, s.Topology, materialLayout.Sets, s.Ids, s.Redrawn ) );
-				objectMemo[ObjectSlot( variant, layout, color, depth, samples )] = new ObjectMemo { Variant = variant, Layout = layout, Ids = ids, Redrawn = redrawn, Color = color, Depth = depth, Samples = samples, Topology = topology, Tools = tools, Found = materialObject };
+				var key = new MaterialObjectCache.Key( null, variant, LayoutKey( layout, ids ), color, depth, samples, false, false, topology, Tools: tools, Redrawn: redrawn, Stencil: stencil );
+				materialObject = cache.Get( key, immediate: true, (Drawer: this, Variant: variant, Color: color, Depth: depth, Samples: samples, Layout: layout, Topology: topology, Tools: tools, Ids: ids, Redrawn: redrawn, Stencil: stencil),
+					static ( s, materialLayout ) => s.Drawer.Pipeline( s.Variant, s.Color, s.Depth, s.Samples, s.Layout, s.Topology, materialLayout.Sets, s.Tools, s.Ids, s.Redrawn, s.Stencil ) );
+				objectMemo[ObjectSlot( variant, layout, color, depth, samples )] = new ObjectMemo { Variant = variant, Layout = layout, Ids = ids, Redrawn = redrawn, Color = color, Depth = depth, Samples = samples, Topology = topology, Tools = tools, Stencil = stencil, Found = materialObject };
 			}
 
 			SetViewport( list, viewport );
@@ -1150,15 +1156,14 @@ public sealed partial class ShaderDrawer : IDisposable
 		}
 		else
 		{
-			list.SetPipeline( Pipeline( variant, color, depth, samples, layout, topology, null, ids, redrawn ) );
+			list.SetPipeline( Pipeline( variant, color, depth, samples, layout, topology, null, tools, ids, redrawn, stencil ) );
 			SetViewport( list, viewport );
 			Bind( list, variant, attributes, viewport );
 		}
 
-		// The stencil reference is dynamic state: a shader that tests or writes stencil (gizmos, tool overlays) sets its own
-		if ( variant.State.StencilTest && depth.HasStencil() ) list.SetStencilReference( (byte)variant.State.StencilReference );
+		BackendDevice.SetStencilReference( list, depth, stencil, variant.State );
 
-		// So is the depth bias drawing into depth alone (a shadow map's)
+		// The depth bias drawing into depth alone (a shadow map's) is dynamic
 		if ( color == Format.Unknown && depth != Format.Unknown ) list.SetDepthBias( DepthBias.Constant, DepthBias.Slope );
 		return ids;
 	}
@@ -1287,7 +1292,7 @@ public sealed partial class ShaderDrawer : IDisposable
 	/// <summary>Forget the last draws' lists, materials and attributes so their owners can be collected.</summary>
 	internal void ReleasePass()
 	{
-		passList = null;
+		passList = uploadList = null;
 		foreach ( var state in attributeStates ) state?.Forget();
 		structures.Clear();
 		Array.Clear( variantMemo );
@@ -1419,10 +1424,9 @@ public sealed partial class ShaderDrawer : IDisposable
 	/// draws <paramref name="redrawn"/> every frame (<see cref="RedrawnEveryFrame"/>) one not made yet is made on the device's
 	/// workers and its draws skipped meanwhile; those are kept apart from the ones other draws wait for.
 	/// </summary>
-	PipelineHandle Pipeline( ShaderVariant variant, Format color, Format depth, int samples, VertexStreamLayout layout, PrimitiveTopology topology, BindingLayoutHandle[] sets, bool ids = false, bool redrawn = false )
+	PipelineHandle Pipeline( ShaderVariant variant, Format color, Format depth, int samples, VertexStreamLayout layout, PrimitiveTopology topology, BindingLayoutHandle[] sets, ToolsPass tools, bool ids, bool redrawn, OverlayStencil stencil )
 	{
-		var tools = color == Format.Unknown ? ToolsPass.None : ToolsPass;
-		var key = new PipelineKey( variant, color, depth, samples, layout, topology, ids, tools, redrawn );
+		var key = new PipelineKey( variant, color, depth, samples, layout, topology, ids, tools, redrawn, stencil );
 		if ( sets is null && pipelines.TryGetValue( key, out var pipeline ) ) return pipeline;
 
 		// Inputs the stream lacks (or every input, with no stream) read the default stream. No colour format draws into
@@ -1470,6 +1474,7 @@ public sealed partial class ShaderDrawer : IDisposable
 
 		info.Topology = topology;
 		if ( sets is not null ) info.Sets = sets;
+		BackendDevice.ApplyOverlayStencil( ref info, stencil );
 		if ( tools != ToolsPass.None ) ToolsViewStage.Apply( shaders, ref info, tools, ToolsViews.ShaderColor( variant.Shader?.Name ) );
 		info.SkipUntilReady = redrawn;
 		using ( Zones.PipelineCreate.Start() ) pipeline = gpu.CreateGraphicsPipeline( info );

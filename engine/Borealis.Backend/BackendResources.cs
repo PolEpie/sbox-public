@@ -48,12 +48,16 @@ internal sealed class BackendTexture : GpuTexture
 		}
 
 		Layout = ImageLayout.ShaderRead;
+		FrameBufferMipShader = null;
 		BackendContext.ForgetMipViews( this, device.Gpu );
 		device.Gpu.Replace( Handle, image );
 	}
 
 	/// <summary>The layout the last recorded use left it in.</summary>
 	public ImageLayout Layout { get; set; }
+
+	/// <summary>The tiled shader that last made a complete frame copy mip chain; null if it must be rebuilt.</summary>
+	internal ShaderFile FrameBufferMipShader { get; set; }
 
 	/// <summary>Its shape, which a shader binding it must expect.</summary>
 	public TextureDimension Dimension { get; init; }
@@ -307,9 +311,15 @@ internal sealed class BackendParameters : ShaderParameters
 
 	public override void Set( StringToken name, GpuBuffer value ) => Store( name, value );
 
+	// Keep the ABI's marshalled size (which can differ from sizeof(T)) without asking the marshaller at every bind.
+	static class ConstantSize<T> where T : unmanaged
+	{
+		public static readonly int Marshalled = Marshal.SizeOf<T>();
+	}
+
 	public override void SetData<T>( StringToken name, in T value )
 	{
-		var size = Marshal.SizeOf<T>();
+		var size = ConstantSize<T>.Marshalled;
 		lock ( gate )
 		{
 			// The same bytes again change nothing
@@ -320,6 +330,20 @@ internal sealed class BackendParameters : ShaderParameters
 			var bytes = TakeBytes( name.Value, size );
 			bytes.AsSpan( length ).Clear();
 			MemoryMarshal.Write( bytes, in value );
+			Replace( name.Value, bytes );
+			version++;
+		}
+	}
+
+	public override void SetData( StringToken name, ReadOnlySpan<byte> data )
+	{
+		lock ( gate )
+		{
+			// The same bytes again change nothing
+			if ( values.TryGet( name.Value, out var old ) && old is byte[] current && current.AsSpan().SequenceEqual( data ) ) return;
+
+			var bytes = TakeBytes( name.Value, data.Length );
+			data.CopyTo( bytes );
 			Replace( name.Value, bytes );
 			version++;
 		}
@@ -660,6 +684,7 @@ internal sealed class BackendMaterial : GpuMaterial, IStreamDependent
 	{
 		lock ( valuesGate )
 		{
+			// Replaced whole, as the recording threads read it without a lock
 			if ( values.TryGetValue( variable, out var current ) && current is not null && current.AsSpan().SequenceEqual( value ) ) return;
 			Store( variable, value.ToArray() );
 		}
