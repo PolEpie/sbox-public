@@ -123,6 +123,16 @@ internal abstract class RenderBackend
 	internal static bool OthersExist => others.Length > 0;
 
 	/// <summary>
+	/// Whether <paramref name="backend"/> is the process's device (<see cref="Default"/>) and the only one that makes copies of
+	/// engine resources: nothing else will make one from the data a resource was made with, so it may let that data go.
+	/// </summary>
+	internal static bool IsOnlyDevice( RenderBackend backend )
+	{
+		var all = others;
+		return Default == backend && all.Length == 1 && all[0] == backend;
+	}
+
+	/// <summary>
 	/// A shader was compiled while running (<see cref="Shader.CompileAsync(string, string, System.Threading.CancellationToken)"/>,
 	/// a hotloaded <c>.shader</c>): take its compiled file under the path its materials name, replacing what this device had
 	/// for it.
@@ -176,6 +186,18 @@ internal abstract class RenderBackend
 	internal static void ReleaseEverywhere( object resource )
 	{
 		foreach ( var backend in others ) backend.Release( resource );
+	}
+
+	/// <summary>
+	/// An engine texture took another's place (<see cref="Texture.CopyFrom"/>) when the pixels the other was made with are gone:
+	/// this device's copy of <paramref name="from"/>, if it has one, becomes <paramref name="to"/>'s, which can't be made again.
+	/// </summary>
+	public virtual void Adopt( Texture from, Texture to ) { }
+
+	/// <summary>Give an engine texture's copies on every device to the texture that took its place.</summary>
+	internal static void AdoptEverywhere( Texture from, Texture to )
+	{
+		foreach ( var backend in others ) backend.Adopt( from, to );
 	}
 
 	//

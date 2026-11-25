@@ -218,7 +218,6 @@ internal sealed class BorealisGpuFrame : IDisposable
 		resolveAttributes.Set( "SourceDepth", Depth );
 		resolveAttributes.SetCombo( "D_MSAA", 1 );
 		resolveAttributes.SetCombo( "D_UPSCALE", 0 );
-		resolveAttributes.Set( "DownsampleFactor", 1 );
 
 		backend.BindRenderTarget( resolveTarget );
 		Graphics.Viewport = new Rect( 0, 0, Depth.Width, Depth.Height );

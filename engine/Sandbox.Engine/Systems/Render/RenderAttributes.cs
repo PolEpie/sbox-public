@@ -354,7 +354,7 @@ public partial class RenderAttributes
 	public unsafe void SetData<T>( in StringToken k, List<T> value ) where T : unmanaged
 	{
 		if ( !attributes.IsValid && Managed is null ) return;
-		SetData( k, value.ToArray() );
+		SetData( k, System.Runtime.InteropServices.CollectionsMarshal.AsSpan( value ) );
 	}
 
 	/// <summary>

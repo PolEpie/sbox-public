@@ -27,9 +27,12 @@ internal sealed class GpuCameraStages : IRenderStages
 	// AfterDepthPrepass stage, which starts them otherwise. The history after opaque ends a frame that traced
 	bool traced;
 
+	public bool RendersInsideFrame( RenderStage stage )
+		=> stage is RenderStage.AfterDepthPrepass or RenderStage.AfterOpaque or RenderStage.AfterSkybox;
+
 	public void Render( RenderStage stage, in StageTarget target )
 	{
-		if ( stage is not (RenderStage.AfterDepthPrepass or RenderStage.AfterOpaque or RenderStage.AfterSkybox) ) return;
+		if ( !RendersInsideFrame( stage ) ) return;
 		if ( Camera is null || Frame is null || View is null ) return;
 
 		var layer = View.LayerType;

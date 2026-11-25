@@ -82,6 +82,8 @@ public static partial class Graphics
 	/// <summary>The compiled content the process's Borealis.Gpu device reads, or null without one.</summary>
 	internal static Borealis.Source2.ContentFiles BorealisGpuContent => _borealisGpu?.Services.Content;
 
+	internal static Borealis.Gpu.Device BorealisGpuDevice => _borealisGpu?.Device;
+
 	/// <summary>
 	/// No more frames: what the process's Borealis.Gpu device kept of the last one's draws (their attributes and material)
 	/// goes, ahead of the shutdown leak check, though the device itself stays until <see cref="Shutdown"/>.

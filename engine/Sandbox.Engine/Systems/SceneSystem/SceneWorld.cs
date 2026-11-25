@@ -104,12 +104,14 @@ public sealed partial class SceneWorld : IHandle
 		{
 			lock ( InternalSceneObjects )
 			{
-				return InternalSceneObjects
-								.Where( x => x.IsValid() )
-								.ToArray(); // Ha Ha I bet no-one ever notices this
+				return _sceneObjects ??= Array.AsReadOnly( InternalSceneObjects.Where( x => x.IsValid() ).ToArray() );
 			}
 		}
 	}
+
+	System.Collections.ObjectModel.ReadOnlyCollection<SceneObject> _sceneObjects;
+
+	internal void InvalidateSceneObjects() => _sceneObjects = null;
 
 	/// <summary>
 	/// Controls gradient fog settings.
@@ -229,6 +231,7 @@ public sealed partial class SceneWorld : IHandle
 	internal void QueueDelete( SceneObject sceneObject )
 	{
 		lock ( queuedDeletes ) queuedDeletes.Add( sceneObject );
+		lock ( InternalSceneObjects ) InvalidateSceneObjects();
 	}
 
 	/// <summary>

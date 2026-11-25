@@ -207,6 +207,13 @@ internal sealed partial class BorealisGpuWindow : IDisposable
 		resizeWanted = pixelSize.x < 1 || pixelSize.y < 1;
 		if ( resizeWanted ) return false;
 
+		// A vsync change made while an image was acquired ahead (SetVSync), now that none is
+		if ( presentModeWanted && swapChain is not null && !swapChain.Current.IsValid )
+		{
+			presentModeWanted = false;
+			swapChain.SetPresentMode( vsyncWanted ? PresentMode.Fifo : BorealisGpuRenderBackend.NoVSyncMode );
+		}
+
 		// A window that couldn't be presented to tries again every two seconds (a display attached since)
 		if ( swapChain is null && sdl is not null && Environment.TickCount64 >= retryAt )
 		{
@@ -257,15 +264,28 @@ internal sealed partial class BorealisGpuWindow : IDisposable
 	/// </summary>
 	public int Samples { get; set; } = 1;
 
-	/// <summary>Whether the swap chain presents with vsync.</summary>
-	public bool VSync => swapChain is null ? vsyncWanted : swapChain.PresentMode == PresentMode.Fifo;
+	/// <summary>Whether the swap chain presents with vsync, or will once a change waiting for its acquired image applies.</summary>
+	public bool VSync => swapChain is null || presentModeWanted ? vsyncWanted : swapChain.PresentMode == PresentMode.Fifo;
 
-	/// <summary>Present with vsync or as soon as possible from now on. Recreates the swap chain's images when it changes.</summary>
+	/// <summary>
+	/// Present with vsync or as soon as possible from now on. Recreates the swap chain's images when it changes; while the
+	/// frame thread holds an image it acquired ahead (<see cref="AcquireAhead"/>), which can't be recreated, on the next
+	/// <see cref="Update"/> without one.
+	/// </summary>
 	public void SetVSync( bool vsync )
 	{
 		if ( VSync == vsync ) return;
 		vsyncWanted = vsync;
-		swapChain?.SetPresentMode( vsync ? PresentMode.Fifo : BorealisGpuRenderBackend.NoVSyncMode );
+		if ( swapChain is null ) return;
+
+		if ( swapChain.Current.IsValid )
+		{
+			presentModeWanted = true;
+			return;
+		}
+
+		presentModeWanted = false;
+		swapChain.SetPresentMode( vsync ? PresentMode.Fifo : BorealisGpuRenderBackend.NoVSyncMode );
 	}
 
 	/// <summary>
@@ -307,8 +327,8 @@ internal sealed partial class BorealisGpuWindow : IDisposable
 		return true;
 	}
 
-	// An image the frame thread acquired for the next frame, and a size change that waits for a frame without one
-	bool acquiredAhead, resizeWanted;
+	// An image the frame thread acquired for the next frame, and a size or vsync change that waits for a frame without one
+	bool acquiredAhead, resizeWanted, presentModeWanted;
 
 	// A frame drawn with no swap chain to show it in, which PresentFrame counts as presented
 	bool drawnUnshown;
@@ -320,7 +340,7 @@ internal sealed partial class BorealisGpuWindow : IDisposable
 	/// </summary>
 	internal void AcquireAhead()
 	{
-		if ( target is null || resizeWanted || Size.x < 1 || Size.y < 1 || swapChain is null || swapChain.Current.IsValid ) return;
+		if ( target is null || resizeWanted || presentModeWanted || Size.x < 1 || Size.y < 1 || swapChain is null || swapChain.Current.IsValid ) return;
 		using var timing = AcquireAheadTiming.Scope();
 		acquiredAhead = swapChain.Acquire( out _ );
 	}
@@ -338,6 +358,7 @@ internal sealed partial class BorealisGpuWindow : IDisposable
 		if ( !acquiredAhead ) return;
 		acquiredAhead = false;
 		if ( target is not null ) Draw( backend, target, Color.Black, true, static () => { }, swapChain );
+		if ( swapChain is { Current.IsValid: true } ) swapChain.Present();
 	}
 
 	static readonly Sandbox.Diagnostics.PerformanceStats.Timings AcquireAheadTiming = Sandbox.Diagnostics.PerformanceStats.Timings.Get( "Borealis.Gpu window acquire ahead" );

@@ -385,7 +385,7 @@ internal sealed partial class WorldRender
 			foreach ( var sceneObject in waiters )
 			{
 				if ( !sceneObject.IsValid() || !Added( sceneObject, out var obj ) ) continue;
-				if ( obj is MeshObject { Mesh: null } ) Later( sceneObject, SceneObjectChange.Model );
+				if ( obj is MeshObject { Mesh: null } or InstancedMeshObject { Mesh: null } ) Later( sceneObject, SceneObjectChange.Model );
 				else if ( obj is null && (sceneObject is SceneAggregateObject || sceneObject.GetType() == typeof( SceneObject )) ) remake.Add( sceneObject );
 			}
 		}
@@ -443,6 +443,10 @@ internal sealed partial class WorldRender
 			switch ( Find( sceneObject ) )
 			{
 				case MeshObject mesh when mesh.Mesh is { } drawn ? staleMeshes.Contains( drawn ) : staleFailed.Count > 0 && sceneObject.IsValid() && staleFailed.Contains( sceneObject.Model ):
+					Later( sceneObject, SceneObjectChange.Model );
+					break;
+
+				case InstancedMeshObject instanced when instanced.Mesh is { } drawn ? staleMeshes.Contains( drawn ) : staleFailed.Count > 0 && sceneObject.IsValid() && staleFailed.Contains( sceneObject.Model ):
 					Later( sceneObject, SceneObjectChange.Model );
 					break;
 

@@ -404,6 +404,8 @@ internal sealed partial class WorldRender : ISceneWorldRender, IAttributeSource,
 
 	void ISceneWorldRender.WriteMesh( SceneObject sceneObject, MeshObject mesh, SceneObjectChange change ) => ApplyMesh( sceneObject, mesh, change );
 
+	void ISceneWorldRender.WriteInstances( SceneObject sceneObject, InstancedMeshObject instances, SceneObjectChange change ) => ApplyInstances( sceneObject, instances, change );
+
 	AggregateObject ISceneWorldRender.MakeAggregate( SceneObject sceneObject, out bool waiting ) => AggregateFor( sceneObject, out waiting );
 
 	void ISceneWorldRender.WriteAggregate( SceneObject sceneObject, AggregateObject aggregate, SceneObjectChange change ) => ApplyAggregate( sceneObject, aggregate, change );
@@ -510,6 +512,10 @@ internal sealed partial class WorldRender : ISceneWorldRender, IAttributeSource,
 		{
 			Release( aggregate.Mesh );
 			aggregate.LightmapAttributes = null;
+		}
+		else if ( obj is InstancedMeshObject instanced )
+		{
+			Release( instanced.Mesh );
 		}
 
 		if ( sceneObject is SceneCubemap cubemap ) uncaptured.Remove( cubemap );
@@ -697,6 +703,43 @@ internal sealed partial class WorldRender : ISceneWorldRender, IAttributeSource,
 		}
 
 		return draws;
+	}
+
+	/// <summary>
+	/// An instanced model's mesh, tint, flags and placement: what a model's mesh object takes, but for what needs one object's
+	/// own (attributes, callbacks, pose). Its instances are written by the object itself.
+	/// </summary>
+	void ApplyInstances( SceneObject sceneObject, InstancedMeshObject instances, SceneObjectChange change )
+	{
+		const SceneObjectChange Draws = SceneObjectChange.Model | SceneObjectChange.Material | SceneObjectChange.Visibility;
+		if ( (change & Draws) != 0 )
+		{
+			var drawnModel = sceneObject.Model;
+			var drawn = sceneObject.RenderingEnabled ? VariantFor( sceneObject, ModelFor( drawnModel ) ) : null;
+			if ( drawn is null && drawnModel is not null && loading.Contains( drawnModel ) ) WaitFor( drawnModel, sceneObject );
+			if ( drawn != instances.Mesh )
+			{
+				Release( instances.Mesh );
+				Hold( drawn );
+				instances.Mesh = drawn;
+			}
+		}
+
+		if ( (change & SceneObjectChange.Tint) != 0 )
+			instances.Tint = sceneObject.ColorTint;
+
+		if ( (change & SceneObjectChange.Flags) != 0 )
+		{
+			var flags = sceneObject.Flags;
+			SceneObject.WriteLayerFlags( instances, flags );
+			instances.CastShadows = sceneObject.CastsShadows;
+			instances.IsStatic = flags.IsStatic;
+			instances.IsWorld = instances.IsStatic || flags.HasFlag( SceneObjectFlags.IsHammerGeometry );
+			instances.LayerMatch = SceneObject.LayerMatchFor( sceneObject.LayerMatchToken );
+		}
+
+		if ( (change & SceneObjectChange.Transform) != 0 )
+			instances.Transform = sceneObject.Transform;
 	}
 
 	/// <summary>

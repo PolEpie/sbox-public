@@ -195,6 +195,51 @@ public sealed partial class SceneModel
 	}
 
 	/// <summary>
+	/// The model's render-bone boxes ordered by bone, without the boxes another box of the same bone holds: the same box
+	/// again from each mesh and LOD, mostly (a human's 3508 come down to 405). A box inside another stays inside it through
+	/// any transform, so the bounds are those of every box.
+	/// </summary>
+	static AnimationBoneBox[] PruneBoneBoxes( AnimationBoneBox[] boxes )
+	{
+		if ( boxes.Length < 2 ) return boxes;
+
+		// A model without bones has its view bounds alone, which replace what came before them - left as they are
+		foreach ( ref readonly var box in boxes.AsSpan() )
+		{
+			if ( box.Bone < -1 ) return boxes;
+		}
+
+		Array.Sort( boxes, static ( a, b ) => a.Bone.CompareTo( b.Bone ) );
+
+		var kept = new List<AnimationBoneBox>( boxes.Length );
+		for ( var start = 0; start < boxes.Length; )
+		{
+			var end = start + 1;
+			while ( end < boxes.Length && boxes[end].Bone == boxes[start].Bone ) end++;
+
+			for ( var i = start; i < end; i++ )
+			{
+				var held = false;
+				for ( var j = start; j < end && !held; j++ )
+				{
+					// Of two identical boxes the first stays
+					held = j != i && Holds( boxes[j], boxes[i] ) && (j < i || !Holds( boxes[i], boxes[j] ));
+				}
+
+				if ( !held ) kept.Add( boxes[i] );
+			}
+
+			start = end;
+		}
+
+		return kept.Count == boxes.Length ? boxes : kept.ToArray();
+	}
+
+	static bool Holds( in AnimationBoneBox outer, in AnimationBoneBox inner ) =>
+		outer.Mins.x <= inner.Mins.x && outer.Mins.y <= inner.Mins.y && outer.Mins.z <= inner.Mins.z &&
+		outer.Maxs.x >= inner.Maxs.x && outer.Maxs.y >= inner.Maxs.y && outer.Maxs.z >= inner.Maxs.z;
+
+	/// <summary>
 	/// <c>AABB_t::EnsureMinSize( size * 1.25 )</c>: an eighth of the size more on each side.
 	/// </summary>
 	static BBox Grow( in BBox box )
