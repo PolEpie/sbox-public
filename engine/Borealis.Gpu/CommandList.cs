@@ -89,7 +89,7 @@ public sealed unsafe class CommandList
 
 	bool recording;
 
-	/// <summary>Whether it has begun and not yet been submitted.</summary>
+	/// <summary>Whether it has begun and has not been submitted or discarded.</summary>
 	public bool IsRecording => recording;
 
 	/// <summary>
@@ -128,7 +128,7 @@ public sealed unsafe class CommandList
 
 	// Pipeline state per bind point (graphics, compute)
 	readonly ulong[] layouts = new ulong[2];
-	readonly (ulong, ulong, ulong, ulong)[] layoutSets = new (ulong, ulong, ulong, ulong)[2];
+	readonly PipelineSetLayouts[] layoutSets = new PipelineSetLayouts[2];
 	readonly int[] dirty = new int[2];
 	// Last pipeline bound: draws in a row often share one
 	readonly ulong[] boundPipelines = new ulong[2];
@@ -150,7 +150,18 @@ public sealed unsafe class CommandList
 		Array.Clear( boundVertexBuffers );
 		boundIndexBuffer = 0;
 	}
-	ulong lastLayout;
+	int lastBindPoint;
+
+	// Push constants are shared across stages by this API. Keep the written words when graphics and compute use
+	// different layout flags, so work recorded for either bind point can use its own layout even after a partial push.
+	const int PushConstantWordCount = ShaderAbi.PushConstantSize / sizeof( uint );
+	[InlineArray( PushConstantWordCount )]
+	struct PushConstantData
+	{
+		uint word;
+	}
+	PushConstantData pushConstantData;
+	uint pushConstantWords, graphicsPushConstantWords;
 	readonly ulong[] sets = new ulong[4];
 	readonly ulong[] setLayouts = new ulong[4];
 	const int MaxDynamicOffsets = 16;
@@ -219,7 +230,8 @@ public sealed unsafe class CommandList
 		layouts[0] = layouts[1] = 0;
 		boundPipelines[0] = boundPipelines[1] = 0;
 		ForgetDynamicState();
-		lastLayout = 0;
+		lastBindPoint = -1;
+		pushConstantWords = graphicsPushConstantWords = 0;
 		dirty[0] = dirty[1] = 0;
 		Array.Clear( sets );
 		Array.Clear( setLayouts );
@@ -245,16 +257,39 @@ public sealed unsafe class CommandList
 
 	internal void End()
 	{
-		if ( !recording ) throw new InvalidOperationException( "This command list was already submitted" );
-		if ( rendering ) throw new InvalidOperationException( "Rendering wasn't ended" );
+		if ( !recording ) throw new InvalidOperationException( "This command list was already submitted or discarded" );
+		try
+		{
+			if ( rendering ) throw new InvalidOperationException( "Rendering wasn't ended" );
 
-		FlushBarriers( work: false );
-		device.Counters?.ListEnded( this );
-		if ( labelled ) EndLabel();
-		Marker( "end" );
-		EndsSuspended = suspended;
-		vk.vkEndCommandBuffer( Handle ).Check( "vkEndCommandBuffer" );
-		recording = false;
+			FlushBarriers( work: false );
+			device.Counters?.ListEnded( this );
+			if ( labelled ) EndLabel();
+			Marker( "end" );
+			EndsSuspended = suspended;
+			vk.vkEndCommandBuffer( Handle ).Check( "vkEndCommandBuffer" );
+			recording = false;
+		}
+		catch
+		{
+			Discard();
+			throw;
+		}
+	}
+
+	/// <summary>
+	/// Give up this recording without submitting it. Call only while you own the list, after all recording has stopped
+	/// and before passing it to <see cref="Device.Submit"/> or <see cref="Device.SubmitLater"/>.
+	/// </summary>
+	public void Discard()
+	{
+		lock ( device.QueueFor( Queue ).SubmitLock )
+		{
+			if ( !recording ) return;
+			device.Counters?.ListEnded( this );
+			rendering = recording = false;
+			LeaveGate();
+		}
 	}
 
 	// Its texture barriers in the order recorded, which the device applies to the textures' layouts when it's submitted
@@ -281,15 +316,8 @@ public sealed unsafe class CommandList
 	/// <summary>Its frame has finished: reset it for reuse.</summary>
 	internal void Recycle()
 	{
+		if ( recording ) throw new InvalidOperationException( "A recording command list can't be recycled" );
 		LeaveGate();
-		if ( recording )
-		{
-			// Recorded but never submitted
-			device.Counters?.ListEnded( this );
-			vk.vkEndCommandBuffer( Handle );
-			recording = false;
-			rendering = false;
-		}
 
 		vk.vkResetCommandPool( vk.Device, pool, 0 ).Check( "vkResetCommandPool" );
 
@@ -375,6 +403,16 @@ public sealed unsafe class CommandList
 	/// <summary>Begin a scope on <paramref name="targets"/> with <paramref name="flags"/> and end it at once, drawing nothing.</summary>
 	internal void RecordScope( RenderingTargets targets, uint flags )
 	{
+		// With no suspended scope to resume, this helper starts a new pass that loads the existing contents.
+		// Order it after earlier uses, even if the recorded resume had no barrier (else it couldn't resume).
+		if ( flags == Vulkan.Vk.RenderingSuspending )
+		{
+			Barrier( PipelineStage.AllCommands, MemoryAccess.MemoryWrite,
+				PipelineStage.ColorTargetOutput | PipelineStage.EarlyFragmentTests | PipelineStage.LateFragmentTests,
+				MemoryAccess.ColorTargetRead | MemoryAccess.ColorTargetWrite | MemoryAccess.DepthTargetRead | MemoryAccess.DepthTargetWrite );
+			FlushBarriers();
+		}
+
 		var attachments = stackalloc VkRenderingAttachmentInfo[RenderingTargets.Max];
 		var info = targets.Info( attachments, flags );
 		vk.vkCmdBeginRendering( Handle, &info );
@@ -546,7 +584,8 @@ public sealed unsafe class CommandList
 		boundPipelines[0] = boundPipelines[1] = 0;
 		ForgetDynamicState();
 		dirty[0] = dirty[1] = 0x3F;
-		lastLayout = 0;
+		lastBindPoint = -1;
+		pushConstantWords = graphicsPushConstantWords = 0;
 		renderStateSet = false;
 	}
 
@@ -571,16 +610,22 @@ public sealed unsafe class CommandList
 
 		var mips = barrier.MipCount > 0 ? (uint)barrier.MipCount : Vulkan.Vk.RemainingMipLevels;
 		var layers = barrier.LayerCount > 0 ? (uint)barrier.LayerCount : Vulkan.Vk.RemainingArrayLayers;
+		var baseMip = (uint)barrier.BaseMip;
+		var baseLayer = (uint)barrier.BaseLayer;
 
-		// Barriers in one batch aren't ordered among themselves: a second move of an image already moving joins the first
-		// (from where the first started to where this one ends) when they cover the same subresources, else waits for it
+		// Disjoint subresources of one image can transition together. Overlapping transitions must be ordered, except
+		// when a second move continues the first (starts in the layout it ends in): exactly the same subresources fold into
+		// the first, and overlapping mips of the same layers fold where they overlap (FoldAlongMips).
 		for ( int i = 0; i < imageBarrierCount; i++ )
 		{
 			ref var pending = ref imageBarriers[i];
 			if ( pending.image != record.Image ) continue;
 
 			var range = pending.subresourceRange;
-			if ( range.baseMipLevel == (uint)barrier.BaseMip && range.levelCount == mips && range.baseArrayLayer == (uint)barrier.BaseLayer && range.layerCount == layers && pending.newLayout == barrier.OldLayout.ToVk() )
+			if ( !Overlaps( baseMip, mips, range.baseMipLevel, range.levelCount ) ||
+				!Overlaps( baseLayer, layers, range.baseArrayLayer, range.layerCount ) ) continue;
+
+			if ( range.baseMipLevel == baseMip && range.levelCount == mips && range.baseArrayLayer == baseLayer && range.layerCount == layers && range.aspectMask == record.Aspect && pending.newLayout == barrier.OldLayout.ToVk() )
 			{
 				pending.newLayout = barrier.NewLayout.ToVk();
 				pending.dstStageMask = (ulong)barrier.DestinationStage;
@@ -588,13 +633,14 @@ public sealed unsafe class CommandList
 				return;
 			}
 
+			if ( FoldAlongMips( i, barrier, record.Image, record.Aspect, (uint)Math.Max( record.Info.Mips, 1 ), (uint)Math.Max( record.ArrayLayers, 1 ), baseMip, mips, baseLayer, layers ) ) return;
+
 			barrierDetail.SameImageSplits++;
 			FlushBarriers( work: false );
 			break;
 		}
 
-		if ( imageBarrierCount == imageBarriers.Length ) Array.Resize( ref imageBarriers, imageBarriers.Length * 2 );
-		imageBarriers[imageBarrierCount++] = new VkImageMemoryBarrier2
+		AddImageBarrier( new VkImageMemoryBarrier2
 		{
 			sType = VkStructureType.ImageMemoryBarrier2,
 			srcStageMask = (ulong)barrier.SourceStage,
@@ -606,9 +652,79 @@ public sealed unsafe class CommandList
 			srcQueueFamilyIndex = Vulkan.Vk.QueueFamilyIgnored,
 			dstQueueFamilyIndex = Vulkan.Vk.QueueFamilyIgnored,
 			image = record.Image,
-			subresourceRange = new VkImageSubresourceRange { aspectMask = record.Aspect, baseMipLevel = (uint)barrier.BaseMip, levelCount = mips, baseArrayLayer = (uint)barrier.BaseLayer, layerCount = layers },
-		};
+			subresourceRange = new VkImageSubresourceRange { aspectMask = record.Aspect, baseMipLevel = baseMip, levelCount = mips, baseArrayLayer = baseLayer, layerCount = layers },
+		} );
 	}
+
+	/// <summary>
+	/// Fold <paramref name="barrier"/> into pending move <paramref name="index"/> when it continues that move over the same
+	/// layers and overlapping mips (a mip chain reading one mip of a texture it has just moved whole, or moving the whole
+	/// texture again after reading its last mip). With nothing recorded between them the two moves are one: the mips both
+	/// cover move once, from where the pending move started to where this one ends, and the mips only one of them covers
+	/// keep that move, all in the same call, rather than a call each. False, changing nothing, when they don't line up so or
+	/// another pending move of the image overlaps this one.
+	/// </summary>
+	bool FoldAlongMips( int index, in TextureBarrier barrier, ulong image, uint aspect, uint totalMips, uint totalLayers, uint baseMip, uint mips, uint baseLayer, uint layers )
+	{
+		var pending = imageBarriers[index];
+		var range = pending.subresourceRange;
+		if ( pending.newLayout != barrier.OldLayout.ToVk() || range.aspectMask != aspect ) return false;
+
+		// VK_REMAINING_* counts made explicit, to compare the layers and cut the mips
+		var pendingLayers = range.layerCount == Vulkan.Vk.RemainingArrayLayers ? totalLayers - range.baseArrayLayer : range.layerCount;
+		var movedLayers = layers == Vulkan.Vk.RemainingArrayLayers ? totalLayers - baseLayer : layers;
+		if ( range.baseArrayLayer != baseLayer || pendingLayers != movedLayers || range.baseMipLevel >= totalMips || baseMip >= totalMips ) return false;
+		var pendingEnd = range.levelCount == Vulkan.Vk.RemainingMipLevels ? totalMips : range.baseMipLevel + range.levelCount;
+		var movedEnd = mips == Vulkan.Vk.RemainingMipLevels ? totalMips : baseMip + mips;
+
+		// Pending moves before this one don't overlap the barrier (Barrier stops at the first that does); later ones mustn't
+		for ( int j = index + 1; j < imageBarrierCount; j++ )
+		{
+			var other = imageBarriers[j].subresourceRange;
+			if ( imageBarriers[j].image == image && Overlaps( baseMip, mips, other.baseMipLevel, other.levelCount ) && Overlaps( baseLayer, layers, other.baseArrayLayer, other.layerCount ) ) return false;
+		}
+
+		var moved = pending;
+		moved.srcStageMask = (ulong)barrier.SourceStage;
+		moved.srcAccessMask = (ulong)barrier.SourceAccess;
+		moved.dstStageMask = (ulong)barrier.DestinationStage;
+		moved.dstAccessMask = (ulong)barrier.DestinationAccess;
+		moved.oldLayout = pending.newLayout;
+		moved.newLayout = barrier.NewLayout.ToVk();
+
+		// Where both move: from where the pending move starts to where this one ends, after what either waited for
+		var start = Math.Max( range.baseMipLevel, baseMip );
+		var end = Math.Min( pendingEnd, movedEnd );
+		var both = moved;
+		both.oldLayout = pending.oldLayout;
+		both.srcStageMask |= pending.srcStageMask;
+		both.srcAccessMask |= pending.srcAccessMask;
+		imageBarriers[index] = WithMips( both, start, end );
+
+		// Below and above that only one of them moves each mip, as it would have alone
+		if ( range.baseMipLevel < start ) AddImageBarrier( WithMips( pending, range.baseMipLevel, start ) );
+		else if ( baseMip < start ) AddImageBarrier( WithMips( moved, baseMip, start ) );
+		if ( pendingEnd > end ) AddImageBarrier( WithMips( pending, end, pendingEnd ) );
+		else if ( movedEnd > end ) AddImageBarrier( WithMips( moved, end, movedEnd ) );
+		return true;
+	}
+
+	static VkImageMemoryBarrier2 WithMips( VkImageMemoryBarrier2 barrier, uint start, uint end )
+	{
+		barrier.subresourceRange.baseMipLevel = start;
+		barrier.subresourceRange.levelCount = end - start;
+		return barrier;
+	}
+
+	void AddImageBarrier( in VkImageMemoryBarrier2 barrier )
+	{
+		if ( imageBarrierCount == imageBarriers.Length ) Array.Resize( ref imageBarriers, imageBarriers.Length * 2 );
+		imageBarriers[imageBarrierCount++] = barrier;
+	}
+
+	// Compare against the distance between starts so VK_REMAINING_* counts cannot overflow.
+	static bool Overlaps( uint start, uint count, uint otherStart, uint otherCount )
+		=> start <= otherStart ? otherStart - start < count : start - otherStart < otherCount;
 
 	/// <summary>
 	/// Order accesses to a buffer. Batched with neighbouring barriers.
@@ -787,12 +903,23 @@ public sealed unsafe class CommandList
 	/// <remarks>
 	/// <paramref name="flags"/> carry one scope across lists recorded apart, as one render pass on the GPU:
 	/// <see cref="RenderingFlags.Suspend"/> leaves the scope suspended when it ends, for the next list submitted to resume;
-	/// <see cref="RenderingFlags.Resume"/> continues the scope the list submitted before left suspended (its load operations
-	/// don't apply). Neither has to be matched: a scope suspended with no resume after it, or anything recorded between, is
-	/// ended there, and a resume that's not the list's first command begins an ordinary scope. Lists submitted apart
+	/// <see cref="RenderingFlags.Resume"/> continues the scope the list submitted before left suspended if the targets
+	/// and their store operations match. Its load operations don't apply. Neither has to be matched: a scope suspended
+	/// with no matching resume after it is ended there, and an unmatched resume loads the existing contents. A resume
+	/// that's not the list's first command begins an ordinary scope. Lists submitted apart
 	/// (<see cref="Device.Submit"/> and <see cref="Device.SubmitLater"/> both pair them) end and begin theirs on their own.
 	/// </remarks>
 	public void BeginRendering( ReadOnlySpan<ColorTarget> colors, in DepthTarget depth = default, RenderingFlags flags = RenderingFlags.None )
+		=> BeginRenderingCore( colors, depth, flags, 0, 0 );
+
+	/// <summary>
+	/// Begin rasterization without color or depth attachments, for draws whose only output is an occlusion query.
+	/// The render area, viewport and scissor are <paramref name="width"/> by <paramref name="height"/>.
+	/// </summary>
+	public void BeginRenderingWithoutAttachments( int width, int height )
+		=> BeginRenderingCore( [], default, RenderingFlags.None, checked((uint)width), checked((uint)height) );
+
+	void BeginRenderingCore( ReadOnlySpan<ColorTarget> colors, in DepthTarget depth, RenderingFlags flags, uint width, uint height )
 	{
 		Recording();
 		if ( rendering ) throw new InvalidOperationException( "BeginRendering isn't allowed while rendering: end rendering first" );
@@ -800,12 +927,14 @@ public sealed unsafe class CommandList
 		// Only the list's first command resumes the list before's scope; a scope suspended in this list is ended first
 		var resume = (flags & RenderingFlags.Resume) != 0 && !acted;
 		if ( suspended ) EndSuspended();
-		FlushBarriers();
+		var suspend = (flags & RenderingFlags.Suspend) != 0;
+		var carry = resume || suspend;
 
 		if ( colors.Length > 8 ) throw new ArgumentException( "At most 8 colour targets" );
 
 		var attachments = stackalloc VkRenderingAttachmentInfo[Math.Max( colors.Length, 1 )];
-		uint width = 0, height = 0;
+		var clears = stackalloc VkClearAttachment[suspend && !resume ? colors.Length + 1 : 0];
+		var clearCount = 0;
 
 		for ( int i = 0; i < colors.Length; i++ )
 		{
@@ -822,14 +951,22 @@ public sealed unsafe class CommandList
 				sType = VkStructureType.RenderingAttachmentInfo,
 				imageView = device.AttachmentView( color.Texture, color.Mip, color.Layer, color.Srgb ),
 				imageLayout = VkImageLayout.ColorAttachmentOptimal,
-				loadOp = (int)color.Load,
+				loadOp = (int)(carry ? LoadOp.Load : color.Load),
 				storeOp = (int)color.Store,
 			};
 
-			attachments[i].clearValue.color[0] = color.ClearColor.X;
-			attachments[i].clearValue.color[1] = color.ClearColor.Y;
-			attachments[i].clearValue.color[2] = color.ClearColor.Z;
-			attachments[i].clearValue.color[3] = color.ClearColor.W;
+			// Vulkan matches load ops and clear values even on independently recorded segments. Use LOAD
+			// and a zero clear value for every carried segment; only the first can clear, with a command.
+			if ( suspend && !resume && color.Load != LoadOp.Load )
+			{
+				PrepareCarryLoad( color.Texture, record.Image, color.Mip, color.Layer, ImageLayout.ColorTarget, PipelineStage.ColorTargetOutput, MemoryAccess.ColorTargetRead );
+				if ( color.Load == LoadOp.Clear )
+					clears[clearCount++] = new() { aspectMask = Vulkan.Vk.AspectColor, colorAttachment = (uint)i, clearValue = Unsafe.BitCast<System.Numerics.Vector4, VkClearValue>( color.ClearColor ) };
+			}
+			else if ( !carry && color.Load == LoadOp.Clear )
+			{
+				attachments[i].clearValue = Unsafe.BitCast<System.Numerics.Vector4, VkClearValue>( color.ClearColor );
+			}
 
 			if ( color.ResolveTarget.IsValid )
 			{
@@ -857,12 +994,21 @@ public sealed unsafe class CommandList
 				sType = VkStructureType.RenderingAttachmentInfo,
 				imageView = device.AttachmentView( depth.Texture, depth.Mip, depth.Layer, false ),
 				imageLayout = depth.ReadOnly ? VkImageLayout.ReadOnlyOptimal : VkImageLayout.DepthStencilAttachmentOptimal,
-				loadOp = (int)depth.Load,
+				loadOp = (int)(carry ? LoadOp.Load : depth.Load),
 				storeOp = (int)depth.Store,
 			};
 
-			depthAttachment.clearValue.depth = depth.ClearDepth;
-			depthAttachment.clearValue.stencil = depth.ClearStencil;
+			if ( suspend && !resume && depth.Load != LoadOp.Load )
+			{
+				PrepareCarryLoad( depth.Texture, record.Image, depth.Mip, depth.Layer, depth.ReadOnly ? ImageLayout.DepthReadOnly : ImageLayout.DepthTarget,
+					PipelineStage.EarlyFragmentTests | PipelineStage.LateFragmentTests, MemoryAccess.DepthTargetRead );
+				if ( depth.Load == LoadOp.Clear )
+					clears[clearCount++] = new() { aspectMask = record.Aspect, clearValue = new() { depth = depth.ClearDepth, stencil = depth.ClearStencil } };
+			}
+			else if ( !carry && depth.Load == LoadOp.Clear )
+			{
+				depthAttachment.clearValue = new() { depth = depth.ClearDepth, stencil = depth.ClearStencil };
+			}
 
 			// Sample zero is the one mode every device resolves depth and stencil with
 			if ( depth.ResolveTarget.IsValid )
@@ -873,9 +1019,9 @@ public sealed unsafe class CommandList
 			}
 		}
 
-		if ( width == 0 ) throw new ArgumentException( "Rendering needs a colour or depth target" );
+		if ( width == 0 || height == 0 ) throw new ArgumentException( "Rendering needs an attachment or an explicit render area" );
 
-		var suspend = (flags & RenderingFlags.Suspend) != 0;
+		FlushBarriers();
 		var info = new VkRenderingInfo
 		{
 			sType = VkStructureType.RenderingInfo,
@@ -899,6 +1045,11 @@ public sealed unsafe class CommandList
 		if ( suspend ) SuspendedTargets.Set( attachments, colors.Length, hasDepth ? &depthAttachment : null, hasStencil, width, height );
 
 		vk.vkCmdBeginRendering( Handle, &info );
+		if ( clearCount != 0 )
+		{
+			var rect = new VkClearRect { rect = info.renderArea, layerCount = info.layerCount };
+			vk.vkCmdClearAttachments( Handle, (uint)clearCount, clears, 1, &rect );
+		}
 		scopes++;
 		acted = true;
 		suspending = suspend;
@@ -907,6 +1058,26 @@ public sealed unsafe class CommandList
 
 		SetViewport( 0, 0, width, height );
 		SetScissor( 0, 0, (int)width, (int)height );
+	}
+
+	/// <summary>A carried scope loading before a clear or discard also needs that load to see preceding writes.</summary>
+	void PrepareCarryLoad( TextureHandle texture, ulong image, int mip, int layer, ImageLayout layout, PipelineStage stage, MemoryAccess read )
+	{
+		var vkLayout = layout.ToVk();
+		for ( int i = 0; i < imageBarrierCount; i++ )
+		{
+			ref var pending = ref imageBarriers[i];
+			if ( pending.image != image || pending.newLayout != vkLayout ) continue;
+			var range = pending.subresourceRange;
+			if ( (uint)mip < range.baseMipLevel || (uint)mip - range.baseMipLevel >= range.levelCount ||
+				(uint)layer < range.baseArrayLayer || (uint)layer - range.baseArrayLayer >= range.layerCount ) continue;
+			pending.dstStageMask |= (ulong)stage;
+			pending.dstAccessMask |= (ulong)read;
+			return;
+		}
+
+		Barrier( TextureBarrier.Transition( texture, layout, layout, PipelineStage.AllCommands, MemoryAccess.MemoryWrite, stage, read )
+			with { BaseMip = mip, MipCount = 1, BaseLayer = layer, LayerCount = 1 } );
 	}
 
 	/// <summary>The size of what's being rendered to, while rendering.</summary>
@@ -926,6 +1097,20 @@ public sealed unsafe class CommandList
 		rendering = false;
 		suspended = suspending;
 		suspending = false;
+	}
+
+	/// <summary>Clear depth to zero in a render-area rectangle of the current depth attachment, without clearing stencil.</summary>
+	public void ClearDepthRegion( int x, int y, int width, int height )
+	{
+		Recording();
+		if ( !rendering ) throw new InvalidOperationException( "Not rendering" );
+		var depth = new VkClearAttachment { aspectMask = Vulkan.Vk.AspectDepth };
+		var rect = new VkClearRect
+		{
+			rect = new VkRect2D { offset = new VkOffset2D { x = x, y = y }, extent = new VkExtent2D { width = (uint)width, height = (uint)height } },
+			layerCount = 1,
+		};
+		vk.vkCmdClearAttachments( Handle, 1, &depth, 1, &rect );
 	}
 
 	/// <summary>
@@ -977,7 +1162,7 @@ public sealed unsafe class CommandList
 
 		// One workers are still making (GraphicsPipelineInfo.SkipUntilReady): its draws are skipped until another is bound
 		var vkPipeline = Volatile.Read( ref record.Pipeline );
-		lastLayout = record.Layout;
+		lastBindPoint = record.BindPoint;
 		if ( vkPipeline == 0 )
 		{
 			if ( record.BindPoint == Vulkan.Vk.BindPointCompute ) throw new InvalidOperationException( "Compute pipelines are always made whole" );
@@ -997,9 +1182,20 @@ public sealed unsafe class CommandList
 
 		if ( layouts[record.BindPoint] != record.Layout )
 		{
-			layouts[record.BindPoint] = record.Layout;
-			layoutSets[record.BindPoint] = device.SetLayoutsOf( record.Layout );
-			dirty[record.BindPoint] = 0x3F;
+			var bindPoint = record.BindPoint;
+			var next = device.SetLayoutsOf( record.Layout );
+			var previous = layoutSets[bindPoint];
+
+			// Every full layout has the same push ranges and sets 4 and 5. For each lower set, compatibility also
+			// requires matching independent-sets flags and every layout through that set. Binding a changed set
+			// can disturb every higher set, even if its own layout matches.
+			dirty[bindPoint] |= layouts[bindPoint] == 0 || previous.Independent != next.Independent || previous.First.Identity != next.First.Identity ? 0x3F
+				: previous.Second.Identity != next.Second.Identity ? 0x3E
+				: previous.Third.Identity != next.Third.Identity ? 0x3C
+				: previous.Fourth.Identity != next.Fourth.Identity ? 0x38
+				: 0;
+			layouts[bindPoint] = record.Layout;
+			layoutSets[bindPoint] = next;
 		}
 	}
 
@@ -1149,6 +1345,7 @@ public sealed unsafe class CommandList
 
 	void FlushBindings( int bindPoint )
 	{
+		// Vulkan tracks descriptor sets per bind point. Only binds here with this point's layout can disturb them.
 		var layout = layouts[bindPoint];
 		if ( layout == 0 ) throw new InvalidOperationException( bindPoint == 0 ? "No graphics pipeline is bound" : "No compute pipeline is bound" );
 
@@ -1160,7 +1357,7 @@ public sealed unsafe class CommandList
 		{
 			if ( (mask & (1 << set)) == 0 || sets[set] == 0 ) continue;
 
-			var wanted = set switch { 0 => expected.Item1, 1 => expected.Item2, 2 => expected.Item3, _ => expected.Item4 };
+			var wanted = set switch { 0 => expected.First.Handle, 1 => expected.Second.Handle, 2 => expected.Third.Handle, _ => expected.Fourth.Handle };
 			if ( wanted != setLayouts[set] ) continue;
 
 			var descriptorSet = sets[set];
@@ -1190,10 +1387,50 @@ public sealed unsafe class CommandList
 	/// </summary>
 	public void PushConstants<T>( in T data, int offset = 0 ) where T : unmanaged
 	{
-		if ( lastLayout == 0 ) throw new InvalidOperationException( "Bind a pipeline before setting push constants" );
-		if ( offset + sizeof( T ) > ShaderAbi.PushConstantSize ) throw new ArgumentException( $"Push constants are {ShaderAbi.PushConstantSize} bytes" );
+		if ( lastBindPoint < 0 ) throw new InvalidOperationException( "Bind a pipeline before setting push constants" );
+		if ( (uint)offset > ShaderAbi.PushConstantSize - sizeof( T ) || ((offset | sizeof( T )) & 3) != 0 )
+			throw new ArgumentException( $"Push constants are {ShaderAbi.PushConstantSize} bytes and must be written in four-byte words" );
 
-		fixed ( T* p = &data ) vk.vkCmdPushConstants( Handle, lastLayout, device.StageAll, (uint)offset, (uint)sizeof( T ), p );
+		var layout = layouts[lastBindPoint];
+		fixed ( T* p = &data )
+		{
+			vk.vkCmdPushConstants( Handle, layout, device.StageAll, (uint)offset, (uint)sizeof( T ), p );
+			if ( device.Capabilities.PipelineLibraries )
+			{
+				var first = offset / sizeof( uint );
+				var count = sizeof( T ) / sizeof( uint );
+				new ReadOnlySpan<uint>( p, count ).CopyTo( ((Span<uint>)pushConstantData)[first..] );
+				var words = PushConstantMask( first, count );
+				pushConstantWords |= words;
+				if ( lastBindPoint == Vulkan.Vk.BindPointGraphics ) graphicsPushConstantWords |= words;
+				else graphicsPushConstantWords &= ~words;
+			}
+		}
+	}
+
+	static uint PushConstantMask( int first, int count ) => (uint.MaxValue >> (32 - count)) << first;
+
+	/// <summary>Re-establish any words last pushed with the other layout's independent-sets setting.</summary>
+	void FlushPushConstants( int bindPoint )
+	{
+		var graphics = bindPoint == Vulkan.Vk.BindPointGraphics;
+		var words = graphics ? pushConstantWords & ~graphicsPushConstantWords : graphicsPushConstantWords;
+		if ( words == 0 ) return;
+
+		var layout = layouts[bindPoint];
+		fixed ( uint* data = &pushConstantData[0] )
+		{
+			do
+			{
+				var first = System.Numerics.BitOperations.TrailingZeroCount( words );
+				var count = System.Numerics.BitOperations.TrailingZeroCount( ~(words >> first) );
+				vk.vkCmdPushConstants( Handle, layout, device.StageAll, (uint)first * sizeof( uint ), (uint)count * sizeof( uint ), data + first );
+				words &= ~PushConstantMask( first, count );
+			}
+			while ( words != 0 );
+		}
+
+		graphicsPushConstantWords = graphics ? pushConstantWords : 0;
 	}
 
 	//
@@ -1213,6 +1450,7 @@ public sealed unsafe class CommandList
 		}
 
 		FlushBindings( Vulkan.Vk.BindPointGraphics );
+		FlushPushConstants( Vulkan.Vk.BindPointGraphics );
 		draws++;
 		return true;
 	}
@@ -1305,6 +1543,7 @@ public sealed unsafe class CommandList
 		OutsideRendering();
 		FlushBarriers();
 		FlushBindings( Vulkan.Vk.BindPointCompute );
+		FlushPushConstants( Vulkan.Vk.BindPointCompute );
 		vk.vkCmdDispatch( Handle, (uint)x, (uint)y, (uint)z );
 	}
 
@@ -1314,6 +1553,7 @@ public sealed unsafe class CommandList
 		OutsideRendering();
 		FlushBarriers();
 		FlushBindings( Vulkan.Vk.BindPointCompute );
+		FlushPushConstants( Vulkan.Vk.BindPointCompute );
 		vk.vkCmdDispatchIndirect( Handle, device.Get( arguments ).Buffer, (ulong)offset );
 	}
 
@@ -1436,6 +1676,9 @@ public sealed unsafe class CommandList
 		// A volume larger than an upload page goes a page's worth of whole slices at a time, through recycled pages, rather
 		// than through an upload buffer of its own made (and its memory allocated) for it
 		ref var record = ref device.Get( texture );
+		var bytesPerBlock = record.Info.Format.BytesPerBlock();
+		// The GCD with 16 is the smaller power of two dividing the two alignments.
+		var alignment = 16 * (bytesPerBlock >> Math.Min( 4, System.Numerics.BitOperations.TrailingZeroCount( (uint)bytesPerBlock ) ));
 		var depth = VolumeDepth( in record.Info, mip );
 		if ( data.Length > PageSize && depth > 1 && data.Length % depth == 0 )
 		{
@@ -1444,7 +1687,7 @@ public sealed unsafe class CommandList
 			for ( int z = 0; z < depth; z += perChunk )
 			{
 				var slices = Math.Min( perChunk, depth - z );
-				var chunk = AllocateUpload( slice * slices, 16 );
+				var chunk = AllocateUpload( slice * slices, alignment );
 				data.Slice( z * slice, slice * slices ).CopyTo( chunk.Data );
 				CopyBufferToTexture( chunk.Buffer, chunk.Offset, texture, mip, layer, width, height, x, y, z, slices );
 			}
@@ -1452,7 +1695,7 @@ public sealed unsafe class CommandList
 			return;
 		}
 
-		var allocation = AllocateUpload( data.Length, 16 );
+		var allocation = AllocateUpload( data.Length, alignment );
 		data.CopyTo( allocation.Data );
 		CopyBufferToTexture( allocation.Buffer, allocation.Offset, texture, mip, layer, width, height, x, y );
 	}
@@ -1629,20 +1872,22 @@ public sealed unsafe class CommandList
 	}
 
 	/// <summary>
-	/// Resolve a multisampled texture into a single-sampled one of the same size, from <see cref="ImageLayout.CopySource"/>
-	/// to <see cref="ImageLayout.CopyDestination"/>.
+	/// Resolve a multisampled texture or source rectangle into a single-sampled texture at its origin, from
+	/// <see cref="ImageLayout.CopySource"/> to <see cref="ImageLayout.CopyDestination"/>.
 	/// </summary>
-	public void ResolveTexture( TextureHandle source, TextureHandle destination )
+	public void ResolveTexture( TextureHandle source, TextureHandle destination, (int X, int Y, int Width, int Height)? sourceRegion = null )
 	{
 		OutsideRendering();
 		FlushBarriers();
 		ref var src = ref device.Get( source );
 		ref var dst = ref device.Get( destination );
+		var (x, y, width, height) = sourceRegion ?? (0, 0, src.Info.Width, src.Info.Height);
 		var region = new VkImageResolve
 		{
 			srcSubresource = new VkImageSubresourceLayers { aspectMask = Vulkan.Vk.AspectColor, layerCount = 1 },
+			srcOffset = new VkOffset3D { x = x, y = y },
 			dstSubresource = new VkImageSubresourceLayers { aspectMask = Vulkan.Vk.AspectColor, layerCount = 1 },
-			extent = new VkExtent3D { width = (uint)src.Info.Width, height = (uint)src.Info.Height, depth = 1 },
+			extent = new VkExtent3D { width = (uint)width, height = (uint)height, depth = 1 },
 		};
 
 		vk.vkCmdResolveImage( Handle, src.Image, VkImageLayout.TransferSrcOptimal, dst.Image, VkImageLayout.TransferDstOptimal, 1, &region );
@@ -1712,7 +1957,7 @@ internal sealed unsafe class RenderingTargets
 		this.height = height;
 	}
 
-	/// <summary>Whether a scope on <paramref name="other"/> draws to the same views, in the same layouts, resolves and size.</summary>
+	/// <summary>Whether a scope on <paramref name="other"/> has the same rendering info apart from flags.</summary>
 	public bool Matches( RenderingTargets other )
 	{
 		if ( colors != other.colors || depth != other.depth || stencil != other.stencil || width != other.width || height != other.height ) return false;
@@ -1720,7 +1965,9 @@ internal sealed unsafe class RenderingTargets
 		{
 			ref readonly var a = ref attachments[i];
 			ref readonly var b = ref other.attachments[i];
-			if ( a.imageView != b.imageView || a.imageLayout != b.imageLayout || a.resolveMode != b.resolveMode || a.resolveImageView != b.resolveImageView ) return false;
+			// Carried scopes always use LOAD and a zero clear value.
+			if ( a.imageView != b.imageView || a.imageLayout != b.imageLayout || a.storeOp != b.storeOp ||
+				a.resolveMode != b.resolveMode || a.resolveImageView != b.resolveImageView || a.resolveImageLayout != b.resolveImageLayout ) return false;
 		}
 
 		return true;
@@ -1728,16 +1975,12 @@ internal sealed unsafe class RenderingTargets
 
 	/// <summary>
 	/// The scope's rendering info with <paramref name="flags"/>, its attachments copied into <paramref name="into"/>
-	/// (<see cref="Max"/> long). Every target loads what it holds: a scope begun alone to be resumed keeps it.
+	/// (<see cref="Max"/> long). A helper scope uses exactly the info of the segment it pairs with.
 	/// </summary>
 	public VkRenderingInfo Info( VkRenderingAttachmentInfo* into, uint flags )
 	{
 		var count = colors + (depth ? 1 : 0);
-		for ( int i = 0; i < count; i++ )
-		{
-			into[i] = attachments[i];
-			into[i].loadOp = Vulkan.Vk.LoadOpLoad;
-		}
+		for ( int i = 0; i < count; i++ ) into[i] = attachments[i];
 
 		return new VkRenderingInfo
 		{

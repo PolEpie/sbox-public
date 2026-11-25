@@ -82,6 +82,9 @@ internal sealed unsafe class DeviceQueue : IDisposable
 	/// <summary>The value the GPU had reached when last asked, without asking it.</summary>
 	public ulong CompletedSeen => Volatile.Read( ref completed );
 
+	/// <summary>Reuse the last known progress before asking Vulkan for the current counter.</summary>
+	public bool HasReached( ulong value ) => CompletedSeen >= value || Completed >= value;
+
 	/// <summary>Take the next value for a submission. Call with <see cref="SubmitLock"/> held.</summary>
 	public ulong Next() => ++submitted;
 
@@ -91,7 +94,7 @@ internal sealed unsafe class DeviceQueue : IDisposable
 	/// </summary>
 	public void Wait( ulong value )
 	{
-		if ( value == 0 || device.IsLost || Completed >= value ) return;
+		if ( device.IsLost || HasReached( value ) ) return;
 
 		// A value nothing will signal would be waited for forever
 		if ( value > Volatile.Read( ref Flushed ) ) throw new InvalidOperationException( $"{Type} {value} hasn't been submitted to the GPU (flushed {Volatile.Read( ref Flushed )}, submitted {Submitted})" );
@@ -285,8 +288,8 @@ public sealed unsafe partial class Device
 
 	/// <summary>
 	/// Close the current frame and start the next: wait until the GPU has finished the frame that last used this slot,
-	/// then recycle its command lists, upload space and descriptor sets, and free what's been destroyed since. A list of the
-	/// closing frame still recording goes with the next frame instead, once (see <see cref="CarryRecording"/>).
+	/// then recycle its command lists, upload space and descriptor sets, and free what's been destroyed since. Lists still
+	/// recording are carried forward until submitted or discarded (see <see cref="CarryRecording"/>).
 	/// </summary>
 	public void BeginFrame()
 	{
@@ -329,15 +332,15 @@ public sealed unsafe partial class Device
 
 	void SwitchFrame()
 	{
-		List<CommandList> carried;
 		var doing = Enter( "BeginFrame: flush" );
 		var compute = computeQueue != graphicsQueue ? computeQueue : null;
+		int toRecycle;
 		Monitor.Enter( graphicsQueue.SubmitLock );
 		if ( compute is not null ) Monitor.Enter( compute.SubmitLock );
 		Monitor.Enter( frameSwitch );
 		try
 		{
-			carried = CarryRecording();
+			CarryRecording();
 			RememberEvent( "frame starts:", (long)FrameNumber + 1 );
 
 			FlushLocked( graphicsQueue );
@@ -346,10 +349,11 @@ public sealed unsafe partial class Device
 			frame.Compute = computeQueue.Submitted;
 
 			// What was destroyed waits for the carried lists' frame as well: they may use it
-			if ( carried is null ) TagDestroyed();
+			if ( carried.Count == 0 ) TagDestroyed();
 
 			FrameNumber++;
 			frame = frames[FrameSlot];
+			toRecycle = frame.Lists.Count;
 		}
 		finally
 		{
@@ -366,19 +370,16 @@ public sealed unsafe partial class Device
 		doing.Dispose();
 		doing = Enter( "BeginFrame: recycle" );
 
-		// Lists another thread began in this frame since it switched stay; those of the frame that last used the slot go
+		// BeginList takes frameSwitch before adding, so lists begun after the switch are all after this prefix.
 		var recycle = recycling;
 		lock ( frame.Lists )
 		{
-			for ( int i = 0; i < frame.Lists.Count; i++ )
-			{
-				if ( frame.Lists[i].Frame == FrameNumber ) continue;
-				recycle.Add( frame.Lists[i] );
-				frame.Lists.RemoveAt( i-- );
-			}
+			recycle.AddRange( CollectionsMarshal.AsSpan( frame.Lists )[..toRecycle] );
+			frame.Lists.RemoveRange( 0, toRecycle );
 
-			if ( carried is not null ) frame.Lists.AddRange( carried );
+			frame.Lists.AddRange( carried );
 		}
+		carried.Clear();
 
 		// Spare lists before the frame's come back: those every frame in flight left unused (TrimSpares)
 		for ( int q = 0; q < freeLists.Length; q++ ) freeListsLow[q] = Math.Min( freeListsLow[q], freeLists[q].Count );
@@ -395,41 +396,36 @@ public sealed unsafe partial class Device
 
 	// The frame's lists as BeginFrame recycles them, kept
 	readonly List<CommandList> recycling = new();
+	readonly List<CommandList> carried = new();
 
-	/// <summary>Lists carried into the frame after the one they began in, for the tests.</summary>
+	/// <summary>Lists carried out of the frame in which they began recording, for the tests.</summary>
 	internal int ListsCarried { get; private set; }
 
 	bool warnedCarried;
 
 	/// <summary>
-	/// Take the closing frame's lists that began in it and are still recording: one begun before something closed the
-	/// frame in the middle of its recording is submitted in the next frame, so it's recycled with that one. Recycled with
-	/// its own, its command buffer and upload pages would be reused while the GPU may still be running it. A list still
-	/// recording a frame later was never submitted, and is recycled as before.
+	/// Move still-recording lists to the next frame so their command buffers and upload pages aren't recycled before the
+	/// GPU has finished the frame in which they are eventually submitted.
 	/// </summary>
-	List<CommandList> CarryRecording()
+	void CarryRecording()
 	{
-		List<CommandList> carried = null;
 		lock ( frame.Lists )
 		{
 			for ( int i = 0; i < frame.Lists.Count; i++ )
 			{
 				var list = frame.Lists[i];
-				if ( !list.IsRecording || list.Frame != FrameNumber ) continue;
-				(carried ??= new()).Add( list );
+				if ( !list.IsRecording ) continue;
+				if ( list.Frame == FrameNumber ) ListsCarried++;
+				carried.Add( list );
 				frame.Lists.RemoveAt( i-- );
 			}
 		}
 
-		if ( carried is null ) return null;
-		ListsCarried += carried.Count;
-		if ( !warnedCarried )
+		if ( carried.Count > 0 && !warnedCarried )
 		{
 			warnedCarried = true;
-			message?.Invoke( new DeviceMessage( MessageSeverity.Warning, "Borealis.Gpu.ListCarried", $"Frame {FrameNumber} closed while '{carried[0].Name}' was recording; it goes with the next frame. Start frames before recording into them." ) );
+			message?.Invoke( new DeviceMessage( MessageSeverity.Warning, "Borealis.Gpu.ListCarried", $"Frame {FrameNumber} closed while '{carried[0].Name}' was recording; it will go with the frame when it is submitted. Start frames before recording into them." ) );
 		}
-
-		return carried;
 	}
 
 	/// <summary>
@@ -613,8 +609,8 @@ public sealed unsafe partial class Device
 	internal int FreeCommandLists( QueueType queue ) => freeLists[(int)queue].Count;
 
 	/// <summary>
-	/// A command list to record into, from the current frame. Submit it with <see cref="Submit"/> in the same frame; it's
-	/// recycled once that frame's work has finished.
+	/// A command list to record into. Pass it to <see cref="Submit"/> or <see cref="SubmitLater"/> when done, or call
+	/// <see cref="CommandList.Discard"/> to give it up. The list is then recycled once its frame has finished on the GPU.
 	/// </summary>
 	public CommandList BeginCommandList( QueueType queue = QueueType.Graphics, string name = null ) => BeginList( queue, name, gate: true );
 
@@ -628,14 +624,22 @@ public sealed unsafe partial class Device
 
 		if ( !freeLists[(int)queue].TryTake( out var list ) ) list = new CommandList( this, QueueFor( queue ), queue );
 
+		try
+		{
+			list.Begin( name, gate );
+		}
+		catch
+		{
+			list.Destroy();
+			throw;
+		}
+
 		// Not while another thread switches frames (BeginFrame): in the frame and with the frame number it's recycled by
 		lock ( frameSwitch )
 		{
-			lock ( frame.Lists ) frame.Lists.Add( list );
 			list.Frame = FrameNumber;
+			lock ( frame.Lists ) frame.Lists.Add( list );
 		}
-
-		list.Begin( name, gate );
 		return list;
 	}
 
@@ -646,50 +650,58 @@ public sealed unsafe partial class Device
 	/// </summary>
 	public SyncPoint Submit( CommandList list, ReadOnlySpan<SyncPoint> waits = default, SwapChain swapChain = null )
 	{
-		list.End();
-		ThrowIfLost( "vkQueueSubmit2" );
-
 		var queue = QueueFor( list.Queue );
 		var waitInfos = stackalloc VkSemaphoreSubmitInfo[waits.Length + 1];
 		var waitCount = 0u;
 
-		foreach ( var wait in waits )
+		try
 		{
-			if ( !wait.IsValid ) continue;
-			var from = QueueFor( wait.Queue );
+			foreach ( var wait in waits )
+			{
+				if ( !wait.IsValid ) continue;
+				var from = QueueFor( wait.Queue );
 
-			// Barriers already order work on one queue
-			if ( from == queue || from.Completed >= wait.Value ) continue;
+				// Barriers already order work on one queue
+				if ( from == queue || from.HasReached( wait.Value ) ) continue;
 
-			// What it waits for has to reach the GPU first
-			if ( wait.Value > Volatile.Read( ref from.Flushed ) ) Flush( from );
-			waitInfos[waitCount++] = new VkSemaphoreSubmitInfo { sType = VkStructureType.SemaphoreSubmitInfo, semaphore = from.Timeline, value = wait.Value, stageMask = Vulkan.Vk.Stage2AllCommands };
+				// What it waits for has to reach the GPU first
+				if ( wait.Value > Volatile.Read( ref from.Flushed ) ) Flush( from );
+				waitInfos[waitCount++] = new VkSemaphoreSubmitInfo { sType = VkStructureType.SemaphoreSubmitInfo, semaphore = from.Timeline, value = wait.Value, stageMask = Vulkan.Vk.Stage2AllCommands };
+			}
+		}
+		catch
+		{
+			list.Discard();
+			throw;
 		}
 
 		var signals = stackalloc VkSemaphoreSubmitInfo[2];
 		var signalCount = 1u;
 
-		// A second submission for the same acquired image would wait for an acquire already waited for, and signal a present
-		// semaphore already signalled: the queue would wait forever. It goes as an ordinary submission
-		if ( swapChain is not null && swapChain.SubmitsForImage > 0 )
-		{
-			swapChain.RepeatedSubmits++;
-			RememberEvent( "repeated submission for a swap chain image:", swapChain.SubmitsForImage );
-			Warn( "Borealis.Gpu.RepeatedSwapChainSubmit", "A swap chain image was submitted for twice before it was presented; the second went as an ordinary submission" + (swapChain.RepeatedSubmits == 1 ? " (first time, from:\n" + Environment.StackTrace + ")" : "") );
-			swapChain = null;
-		}
-
-		if ( swapChain is not null )
-		{
-			if ( !swapChain.HasImage ) throw new InvalidOperationException( "The swap chain has no acquired image to submit for" );
-			swapChain.SubmitsForImage++;
-			RememberEvent( "submitting for a swap chain image, list marker slot:", list.MarkerSlot );
-			waitInfos[waitCount++] = new VkSemaphoreSubmitInfo { sType = VkStructureType.SemaphoreSubmitInfo, semaphore = swapChain.AcquireSemaphoreHandle, stageMask = Vulkan.Vk.Stage2AllCommands };
-			signals[signalCount++] = new VkSemaphoreSubmitInfo { sType = VkStructureType.SemaphoreSubmitInfo, semaphore = swapChain.PresentSemaphore, stageMask = Vulkan.Vk.Stage2AllCommands };
-		}
-
 		lock ( queue.SubmitLock )
 		{
+			list.End();
+			ThrowIfLost( "vkQueueSubmit2" );
+
+			// A second submission for the same acquired image would wait for an acquire already waited for, and signal a present
+			// semaphore already signalled: the queue would wait forever. It goes as an ordinary submission
+			if ( swapChain is not null && swapChain.SubmitsForImage > 0 )
+			{
+				swapChain.RepeatedSubmits++;
+				RememberEvent( "repeated submission for a swap chain image:", swapChain.SubmitsForImage );
+				Warn( "Borealis.Gpu.RepeatedSwapChainSubmit", "A swap chain image was submitted for twice before it was presented; the second went as an ordinary submission" + (swapChain.RepeatedSubmits == 1 ? " (first time, from:\n" + Environment.StackTrace + ")" : "") );
+				swapChain = null;
+			}
+
+			if ( swapChain is not null )
+			{
+				if ( !swapChain.HasImage ) throw new InvalidOperationException( "The swap chain has no acquired image to submit for" );
+				swapChain.SubmitsForImage++;
+				RememberEvent( "submitting for a swap chain image, list marker slot:", list.MarkerSlot );
+				waitInfos[waitCount++] = new VkSemaphoreSubmitInfo { sType = VkStructureType.SemaphoreSubmitInfo, semaphore = swapChain.AcquireSemaphoreHandle, stageMask = Vulkan.Vk.Stage2AllCommands };
+				signals[signalCount++] = new VkSemaphoreSubmitInfo { sType = VkStructureType.SemaphoreSubmitInfo, semaphore = swapChain.PresentSemaphore, stageMask = Vulkan.Vk.Stage2AllCommands };
+			}
+
 			// Lists waiting to go with this one go first, in one submission, unless this one waits: its waits are its own
 			if ( waitCount > 0 || swapChain is not null ) FlushLocked( queue );
 			PairScopes( queue, list );
@@ -737,11 +749,10 @@ public sealed unsafe partial class Device
 	/// </summary>
 	public SyncPoint SubmitLater( CommandList list )
 	{
-		list.End();
-
 		var queue = QueueFor( list.Queue );
 		lock ( queue.SubmitLock )
 		{
+			list.End();
 			PairScopes( queue, list );
 			var value = queue.Next();
 			Remember( queue, value, list, -1 );
@@ -755,8 +766,8 @@ public sealed unsafe partial class Device
 
 	/// <summary>
 	/// Before <paramref name="list"/> goes after the pending lists (with <see cref="DeviceQueue.SubmitLock"/> held): a
-	/// rendering scope the last one left suspended that this one doesn't resume on the same targets is ended, and a scope this
-	/// one resumes that nothing left suspended is begun, each by a list of its own between them.
+	/// rendering scope the last one left suspended that this one doesn't resume with matching rendering info is ended, and
+	/// a scope this one resumes that nothing left suspended is begun, each by a list of its own between them.
 	/// </summary>
 	void PairScopes( DeviceQueue queue, CommandList list )
 	{
@@ -775,7 +786,15 @@ public sealed unsafe partial class Device
 	CommandList ScopeList( DeviceQueue queue, RenderingTargets targets, uint flags )
 	{
 		var list = BeginList( queue.Type, "Rendering scope pairing", gate: false );
-		list.RecordScope( targets, flags );
+		try
+		{
+			list.RecordScope( targets, flags );
+		}
+		catch
+		{
+			list.Discard();
+			throw;
+		}
 		list.End();
 		Interlocked.Increment( ref scopePairings );
 		lock ( recentSubmissions ) Tally( list );
@@ -1072,7 +1091,7 @@ public sealed unsafe partial class Device
 	}
 
 	/// <summary>Whether the GPU has reached <paramref name="point"/>.</summary>
-	public bool IsComplete( SyncPoint point ) => QueueFor( point.Queue ).Completed >= point.Value;
+	public bool IsComplete( SyncPoint point ) => QueueFor( point.Queue ).HasReached( point.Value );
 
 	/// <summary>The last point sent to the GPU on a queue: lists waiting to go with the next submission aren't in it.</summary>
 	public SyncPoint LastFlushed( QueueType queue ) => new( queue, Volatile.Read( ref QueueFor( queue ).Flushed ) );
@@ -1085,7 +1104,7 @@ public sealed unsafe partial class Device
 	public bool TryWait( SyncPoint point, TimeSpan timeout )
 	{
 		var queue = QueueFor( point.Queue );
-		if ( IsLost || queue.Completed >= point.Value ) return true;
+		if ( IsLost || queue.HasReached( point.Value ) ) return true;
 		if ( point.Value > Volatile.Read( ref queue.Flushed ) ) throw new InvalidOperationException( $"{queue.Type} {point.Value} hasn't been sent to the GPU" );
 
 		var semaphore = queue.Timeline;
@@ -1148,7 +1167,15 @@ public sealed unsafe partial class Device
 			deferredList = null;
 			if ( list is null ) return;
 
-			list.Barrier( PipelineStage.Transfer, MemoryAccess.TransferWrite, PipelineStage.AllCommands, MemoryAccess.MemoryRead );
+			try
+			{
+				list.Barrier( PipelineStage.Transfer, MemoryAccess.TransferWrite, PipelineStage.AllCommands, MemoryAccess.MemoryRead );
+			}
+			catch
+			{
+				list.Discard();
+				throw;
+			}
 			device.SubmitLater( list );
 		}
 	}
@@ -1176,6 +1203,10 @@ public sealed unsafe partial class Device
 	public void WriteBuffer( BufferHandle buffer, ReadOnlySpan<byte> data, long offset = 0 )
 	{
 		ref var record = ref Get( buffer );
+		ArgumentOutOfRangeException.ThrowIfNegative( offset );
+		ArgumentOutOfRangeException.ThrowIfGreaterThan( offset, record.Size );
+		ArgumentOutOfRangeException.ThrowIfGreaterThan( (long)data.Length, record.Size - offset, nameof( data ) );
+
 		if ( record.Memory.Mapped != 0 )
 		{
 			data.CopyTo( new Span<byte>( (void*)(record.Memory.Mapped + (nint)offset), data.Length ) );
@@ -1190,7 +1221,15 @@ public sealed unsafe partial class Device
 		}
 
 		var list = BeginCommandList( QueueType.Graphics, "WriteBuffer" );
-		list.UpdateBuffer( buffer, data, offset );
+		try
+		{
+			list.UpdateBuffer( buffer, data, offset );
+		}
+		catch
+		{
+			list.Discard();
+			throw;
+		}
 		SubmitAndRecycle( list );
 	}
 
@@ -1200,14 +1239,33 @@ public sealed unsafe partial class Device
 	/// </summary>
 	void SubmitAndRecycle( CommandList list )
 	{
-		Wait( Submit( list ) );
+		var point = Submit( list );
+		Wait( point );
+		TryRecycle( list, point );
+	}
 
-		bool owned;
-		lock ( frame.Lists ) owned = frame.Lists.Remove( list );
-		if ( !owned ) return;
+	/// <summary>
+	/// Recycle a list submitted at <paramref name="submitted"/> (what <see cref="Submit"/> returned) now rather than with its
+	/// frame, once the GPU has finished it. False when it hasn't, or the list began before the current frame (its frame
+	/// recycles it). For lists submitted while no frame begins: a window presenting its last output again through a long load
+	/// took a list each time, each holding a command pool of its own until the next frame (about a thousand in one load).
+	/// </summary>
+	public bool TryRecycle( CommandList list, SyncPoint submitted )
+	{
+		if ( !submitted.IsValid || !IsComplete( submitted ) ) return false;
+
+		// Under the frame switch, and only a list begun in the current frame: never one a switch going on is recycling
+		lock ( frameSwitch )
+		{
+			lock ( frame.Lists )
+			{
+				if ( list.Submitted != submitted || list.Frame != FrameNumber || !frame.Lists.Remove( list ) ) return false;
+			}
+		}
 
 		list.Recycle();
 		freeLists[(int)list.Queue].Add( list );
+		return true;
 	}
 
 	/// <summary>
@@ -1225,37 +1283,45 @@ public sealed unsafe partial class Device
 	{
 		var deferred = DeferredUploads();
 		var list = deferred ?? BeginCommandList( QueueType.Graphics, "WriteTexture" );
-		var info = InfoOf( texture );
-		list.Barrier( new TextureBarrier
+		try
 		{
-			Texture = texture,
-			OldLayout = from,
-			NewLayout = ImageLayout.CopyDestination,
-			SourceStage = PipelineStage.AllCommands,
-			SourceAccess = MemoryAccess.MemoryWrite,
-			DestinationStage = PipelineStage.Transfer,
-			DestinationAccess = MemoryAccess.TransferWrite,
-			BaseMip = mip,
-			MipCount = 1,
-			BaseLayer = layer,
-			LayerCount = 1,
-		} );
+			var info = InfoOf( texture );
+			list.Barrier( new TextureBarrier
+			{
+				Texture = texture,
+				OldLayout = from,
+				NewLayout = ImageLayout.CopyDestination,
+				SourceStage = PipelineStage.AllCommands,
+				SourceAccess = MemoryAccess.MemoryWrite,
+				DestinationStage = PipelineStage.Transfer,
+				DestinationAccess = MemoryAccess.TransferWrite,
+				BaseMip = mip,
+				MipCount = 1,
+				BaseLayer = layer,
+				LayerCount = 1,
+			} );
 
-		list.UpdateTexture( texture, data, mip, layer, Math.Max( info.Width >> mip, 1 ), Math.Max( info.Height >> mip, 1 ) );
-		list.Barrier( new TextureBarrier
+			list.UpdateTexture( texture, data, mip, layer, Math.Max( info.Width >> mip, 1 ), Math.Max( info.Height >> mip, 1 ) );
+			list.Barrier( new TextureBarrier
+			{
+				Texture = texture,
+				OldLayout = ImageLayout.CopyDestination,
+				NewLayout = ImageLayout.ShaderRead,
+				SourceStage = PipelineStage.Transfer,
+				SourceAccess = MemoryAccess.TransferWrite,
+				DestinationStage = PipelineStage.AllCommands,
+				DestinationAccess = MemoryAccess.MemoryRead,
+				BaseMip = mip,
+				MipCount = 1,
+				BaseLayer = layer,
+				LayerCount = 1,
+			} );
+		}
+		catch
 		{
-			Texture = texture,
-			OldLayout = ImageLayout.CopyDestination,
-			NewLayout = ImageLayout.ShaderRead,
-			SourceStage = PipelineStage.Transfer,
-			SourceAccess = MemoryAccess.TransferWrite,
-			DestinationStage = PipelineStage.AllCommands,
-			DestinationAccess = MemoryAccess.ShaderRead,
-			BaseMip = mip,
-			MipCount = 1,
-			BaseLayer = layer,
-			LayerCount = 1,
-		} );
+			if ( deferred is null ) list.Discard();
+			throw;
+		}
 
 		if ( deferred is null ) SubmitAndRecycle( list );
 		else Interlocked.Add( ref deferredBytes, data.Length );

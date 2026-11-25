@@ -269,7 +269,7 @@ public sealed unsafe partial class Device
 	/// </summary>
 	public PipelineHandle CreateGraphicsPipeline( in GraphicsPipelineInfo info )
 	{
-		var layout = PipelineLayout( info.Sets );
+		var layout = PipelineLayout( info.Sets, graphics: true );
 		if ( info.MeshShader.IsValid && !Capabilities.MeshShaders ) throw new InvalidOperationException( $"{info.Name}: the device has no mesh shaders" );
 		// One linked optimised at once is made on the builders too: that link takes as long as making the parts
 		if ( info.SkipUntilReady && SkipDrawsUntilReady && !(UsesLibraries( info ) && PartsReady( info, layout ) && !LinksOptimisedAtOnce( info )) ) return Defer( info, layout );
@@ -339,7 +339,7 @@ public sealed unsafe partial class Device
 	void PrepareParts( in GraphicsPipelineInfo info, PipelineParts parts, bool guess )
 	{
 		if ( !UsesLibraries( info ) ) return;
-		var layout = PipelineLayout( info.Sets );
+		var layout = PipelineLayout( info.Sets, graphics: true );
 		using ( Zone( ZonePipeline ) )
 		{
 			if ( (parts & PipelineParts.PreRasterization) != 0 ) Part( preRasterizationParts, Vulkan.Vk.LibraryPreRasterization, PreRasterizationKey( info, layout ), info, layout, PreRasterizationShader( info ), use: false, guess );
