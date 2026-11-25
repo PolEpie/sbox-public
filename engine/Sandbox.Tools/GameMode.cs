@@ -39,8 +39,7 @@ public static class GameMode
 		widget.MouseMove += OnPlayWidgetMouseMove;
 
 		_playWindow = widget._widget.winId();
-		NativeEngine.InputSystem.RegisterWindowWithSDL( _playWindow );
-		PlayWindow = NativeEngine.GameWindowNative.FromNativeHandle( _playWindow );
+		PlayWindow = Sandbox.Engine.QtSdlBridge.Register( _playWindow );
 		NativeEngine.GameWindowNative.SetRenderTarget( PlayWindow, default );
 
 		_inPlay = widget;
@@ -73,9 +72,9 @@ public static class GameMode
 		}
 
 		// Teardown also runs after Qt destroys the widget, when winId() is no longer safe.
-		Sandbox.Engine.WindowInput.OnEditorGameFocusChange( _playWindow, false );
+		Sandbox.Engine.WindowInput.OnEditorGameFocusChange( PlayWindow, false );
 		NativeEngine.GameWindowNative.SetRenderTarget( IntPtr.Zero, default );
-		NativeEngine.InputSystem.UnregisterWindowFromSDL( _playWindow );
+		Sandbox.Engine.QtSdlBridge.Unregister( _playWindow );
 		_playWindow = default;
 		PlayWindow = default;
 	}
@@ -88,7 +87,7 @@ public static class GameMode
 		if ( _inPlay is null )
 			return;
 
-		Sandbox.Engine.WindowInput.OnEditorGameFocusChange( _playWindow, true );
+		Sandbox.Engine.WindowInput.OnEditorGameFocusChange( PlayWindow, true );
 	}
 
 	/// <summary>
@@ -99,7 +98,7 @@ public static class GameMode
 		if ( _inPlay is null )
 			return;
 
-		Sandbox.Engine.WindowInput.OnEditorGameFocusChange( _playWindow, false );
+		Sandbox.Engine.WindowInput.OnEditorGameFocusChange( PlayWindow, false );
 	}
 
 	private static void OnPlayWidgetMouseMove( Vector2 local )
