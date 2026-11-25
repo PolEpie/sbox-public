@@ -10,7 +10,7 @@ namespace Borealis.Backend;
 /// <summary>The record definitions these structs were generated from: the hash of sbox/records.slangh.</summary>
 internal static class RecordDefinitionsHash
 {
-	public const string Value = "F61FA1DA25CA8BEE";
+	public const string Value = "F09BA68F4598DA03";
 }
 
 /// <summary>A GPU-driven draw: what a fragment draws with, made once (GpuDrivenTables.Draw).</summary>
@@ -269,7 +269,7 @@ internal partial struct CullViewRecord
 
 	/// <summary>Byte offset of <see cref="Flags"/> in the record.</summary>
 	public const int FlagsOffset = 112;
-	/// <summary>Bit 0: a shadow view; bits 1-2: its resident filter (GpuContext.ResidentFilter); bit 3: two-phase Hi-Z occlusion.</summary>
+	/// <summary>Bit 0: a shadow view; bits 1-2: its resident filter (GpuContext.ResidentFilter); bit 3: two-phase Hi-Z occlusion; bit 4: the culls count what they let through (CullStats); bit 5: a depth pass (no colour); bits 8-15: the stats slot.</summary>
 	public uint Flags;
 
 	/// <summary>Byte offset of <see cref="KeepsSmallMeshes"/> in the record.</summary>

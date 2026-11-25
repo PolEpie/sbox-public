@@ -18,7 +18,8 @@ internal readonly record struct PooledGeometry( uint GeometryRecord, BufferHandl
 /// The buffers GPU-driven drawing reads (<c>borealis_gpu_driven.fxc</c>, docs/reference/borealis-gpu-driven.md): meshes'
 /// vertices and indices in shared pages, and the geometry, draw and material tables, all reached through the bindless raw
 /// buffer array (<c>g_bindless_VertexBuffers</c>, binding 63). Tables only grow: a record, once written, is read by every
-/// later frame, so nothing is uploaded per frame but each frame's instance records and indirect commands.
+/// later frame, so nothing is uploaded per frame but each frame's instance records and indirect commands, and the material
+/// records of stages that ring (<see cref="Rings(GpuMaterial)"/>), rewritten in their frame slot's copies.
 /// <para>
 /// Segments record on several threads at once. Locks are taken in one order: an owner's draws, then the draw records,
 /// then a table, then the device's own. Callbacks that write records (<see cref="Material"/>, <see cref="FragmentsOf"/>)
@@ -158,13 +159,8 @@ internal sealed class GpuDrivenTables : IDisposable
 	readonly Table geometry, draws, materials, fragments, lighting;
 	readonly Dictionary<(int Page, long Offset, VertexLayout Layout, int Count), uint> geometryRecords = new();
 	// Draw and material records are found without a lock by every recording thread, many times a frame (a lock per draw
-	// kept recording threads waiting on each other); added to under a lock of their own
-	// A record struct, not a tuple: a tuple of eight keeps its last in a tuple of its own, which its hash and equality box
-	// until the JIT has optimised them
-	readonly System.Collections.Concurrent.ConcurrentDictionary<DrawRecordKey, uint> drawRecords = new();
-	readonly record struct DrawRecordKey( uint Geometry, uint Vertex, uint Pixel, uint Flags, uint FirstIndex, uint IndexCount, int BaseVertex, int IndexPage );
-	// Added to under a lock per stripe of keys: many new records at once (a map's first frames) waited on one lock
-	readonly object[] drawLocks = Enumerable.Range( 0, 16 ).Select( _ => new object() ).ToArray();
+	// kept recording threads waiting on each other); added to under locks of their own (draws: one per shard of keys)
+	readonly DrawRecordIndex drawRecords = new();
 	readonly System.Collections.Concurrent.ConcurrentDictionary<MaterialRecordKey, uint> materialRecords = new();
 
 	/// <summary>A material record: per material and its version, stage, and the attribute values its constants read.</summary>
@@ -380,10 +376,10 @@ internal sealed class GpuDrivenTables : IDisposable
 		lock ( pagesLock )
 		{
 			var room = LevelRoom > 0 ? ((long)(rangeBytes * (double)LevelRoom) + 15) & ~15L : 0;
-			indexPages.TryGetValue( format, out var page );
-			page = Place( ref page, data.Length, IndexPageSize, BufferUsage.Index | BufferUsage.Storage, $"Borealis index page {format}", room );
+			indexPages.TryGetValue( format, out var current );
+			var page = Place( ref current, data.Length, IndexPageSize, BufferUsage.Index | BufferUsage.Storage, $"Borealis index page {format}", room );
 			page.Reserved += room;
-			indexPages[format] = page;
+			if ( ReferenceEquals( page, current ) ) indexPages[format] = current;
 			indexPagesBySlot[page.Slot] = page;
 			var offset = page.Used;
 			if ( data.Length > 0 ) gpu.WriteBuffer( page.Buffer, data, offset );
@@ -462,12 +458,8 @@ internal sealed class GpuDrivenTables : IDisposable
 					}
 				}
 
-				// Nothing makes a draw over a freed page's slot meanwhile: its meshes have gone. The concurrent dictionary's
-				// enumerator sees removals safely
-				foreach ( var (key, _) in drawRecords )
-				{
-					if ( key.IndexPage == slot ) drawRecords.TryRemove( key, out _ );
-				}
+				// Nothing makes a draw over a freed page's slot meanwhile: its meshes have gone
+				drawRecords.RemovePage( slot );
 
 				if ( vertexPagesBySlot.Remove( slot ) is false && indexPagesBySlot.Remove( slot, out var index ) ) levelBytes -= index.Size - index.Limit;
 				owned.Remove( page.Buffer );
@@ -630,19 +622,16 @@ internal sealed class GpuDrivenTables : IDisposable
 	public uint Draw( uint geometryRecord, uint vertexMaterial, uint pixelMaterial, uint flags, uint firstIndex, uint indexCount, int baseVertex, int indexPage )
 	{
 		var key = new DrawRecordKey( geometryRecord, vertexMaterial, pixelMaterial, flags, firstIndex, indexCount, baseVertex, indexPage );
-		if ( drawRecords.TryGetValue( key, out var known ) ) return known;
-		uint index;
-		lock ( drawLocks[(key.GetHashCode() & int.MaxValue) % drawLocks.Length] )
+		var index = drawRecords.FindOrAdd( key, (this, key), static s =>
 		{
-			if ( drawRecords.TryGetValue( key, out var found ) ) return found;
+			var k = s.key;
+			var record = new DrawRecord { Geometry = k.Geometry, VertexMaterial = k.Vertex, PixelMaterial = k.Pixel, Flags = k.Flags, FirstIndex = k.FirstIndex, IndexCount = k.IndexCount, BaseVertex = k.BaseVertex, IndexPage = k.IndexPage };
+			return s.Item1.draws.Append( MemoryMarshal.AsBytes( new Span<DrawRecord>( ref record ) ) ) / DrawStride;
+		}, out var made );
+		if ( !made ) return index;
 
-			var record = new DrawRecord { Geometry = geometryRecord, VertexMaterial = vertexMaterial, PixelMaterial = pixelMaterial, Flags = flags, FirstIndex = firstIndex, IndexCount = indexCount, BaseVertex = baseVertex, IndexPage = indexPage };
-			index = draws.Append( MemoryMarshal.AsBytes( new Span<DrawRecord>( ref record ) ) ) / DrawStride;
-			drawRecords[key] = index;
-		}
-
-		// Registered by the thread that made it, outside the stripe's lock: a level's record made while registering takes
-		// another stripe's
+		// Registered by the thread that made it, outside its shard's lock: a level's record made while registering may take
+		// the same shard's
 		var range = new Borealis.Backend.Meshlets.MeshletStore.Range( indexPage, firstIndex, indexCount, baseVertex );
 		Meshlets?.RegisterDraw( index, range );
 		Lods?.RegisterDraw( index, range );
@@ -1026,45 +1015,316 @@ internal sealed class GpuDrivenTables : IDisposable
 	/// <summary>The fragment table's slot in the raw buffer array.</summary>
 	public int FragmentSlot => fragments.Slot;
 
-	/// <summary>A stage's material record when it's made.</summary>
-	public bool TryMaterial( in MaterialRecordKey key, out uint record ) => materialRecords.TryGetValue( key, out record );
+	/// <summary>A stage's material record when it's made, or this frame's copy of a ringing stage's (<see cref="Rings(GpuMaterial)"/>).</summary>
+	public bool TryMaterial( in MaterialRecordKey key, out uint record ) => materialRecords.TryGetValue( key, out record ) || (Volatile.Read( ref ringing ) > 0 && frameRecords.TryGetValue( key, out record ));
 
-	/// <summary>A stage's material record, made once by <paramref name="write"/> (which fills the bytes it's given).</summary>
+	/// <summary>
+	/// A stage's material record, made once by <paramref name="write"/> (which fills the bytes it's given); for a stage that
+	/// rings (<see cref="Rings(GpuMaterial)"/>), this frame's copy of it, written again each frame it's asked for.
+	/// </summary>
 	public uint Material<T>( in MaterialRecordKey key, int size, T state, Action<T, Span<byte>> write )
 	{
-		if ( materialRecords.TryGetValue( key, out var known ) ) return known;
+		if ( TryMaterial( key, out var known ) ) return known;
 
 		// Written outside the lock: writing reads the material's and attributes' values, which take their own locks
 		var record = new byte[Math.Max( size, 16 )];
 		write( state, record );
 		lock ( materialRecords )
 		{
-			if ( materialRecords.TryGetValue( key, out var found ) ) return found;
+			if ( TryMaterial( key, out var found ) ) return found;
 			var stage = (key.Material, key.Stage);
-			var made = recordsPerStage[stage] = recordsPerStage.GetValueOrDefault( stage ) + 1;
-			if ( made == MaxRecordsPerStage ) Interlocked.Increment( ref churning );
+			if ( key.Material is { } material && (!latestVersions.TryGetValue( material, out var latest ) || key.Version > latest) )
+			{
+				if ( latestVersions.ContainsKey( material ) )
+				{
+					superseded.Add( material );
+					Volatile.Write( ref forgetPending, true );
+				}
+				latestVersions[material] = key.Version;
+			}
+
+			var made = recordsPerStage.GetOrAdd( stage, static _ => new StageRecords() );
+			var frame = Interlocked.Read( ref frameNumber );
+			if ( made.Ring && !made.Classic )
+			{
+				if ( TryFrameCopy( made, frame, key, record, out var copy ) ) return copy;
+
+				// More values in a frame than its copies hold: it draws classic, and this one record is kept as any other
+				made.Classic = true;
+				Interlocked.Increment( ref churning );
+			}
+
+			made.Made++;
+			if ( made.Frame != frame )
+			{
+				made.Frames = made.Made > 1 && frame - made.Frame <= ChurnGap ? made.Frames + 1 : 1;
+				made.Frame = frame;
+			}
+
+			if ( !made.Ring && !made.Classic && (made.Made >= MaxRecordsPerStage || (made.Made >= ChurnRecords && made.Frames >= ChurnFrames)) )
+			{
+				made.Ring = true;
+				made.Changed = frame;
+				Interlocked.Increment( ref ringing );
+				ringMaterials.AddOrUpdate( key.Material, 1, static ( _, n ) => n + 1 );
+				newlyRinging.Add( stage );
+				ringingStages.Add( (key.Material, key.Stage, made) );
+				calmCheckAt = Math.Min( calmCheckAt, frame + CalmFrames );
+				Volatile.Write( ref forgetPending, true );
+			}
+
 			return materialRecords[key] = materials.Append( record );
 		}
 	}
 
 	/// <summary>
-	/// Material records one material's stage may make (<see cref="Churns"/>): about a megabyte of a large stage's. Records
-	/// never go, and each new value of an attribute its constants read, or each new version of the material, makes one.
+	/// This frame's copy of a ringing stage's record for <paramref name="key"/>: the next of the copies its frame slot has
+	/// (made the first time a frame needs that many), written with <paramref name="record"/>. A frame slot's copies are
+	/// rewritten only <see cref="FrameSlots"/> frames on, once the frame that last read them is done, as the frame chunks
+	/// are reused. False past <see cref="MaxCopiesPerFrame"/> in a frame, or for a record of another size. Under materialRecords' lock.
+	/// </summary>
+	bool TryFrameCopy( StageRecords made, long frame, in MaterialRecordKey key, byte[] record, out uint copy )
+	{
+		copy = 0;
+		if ( made.CopiesFrame != frame )
+		{
+			// The values the frame it was last drawn read, against the frame before's: the same ones again calm it (CalmRinging)
+			if ( made.Keys != made.LastKeys ) made.Changed = made.CopiesFrame;
+			made.LastKeys = made.Keys;
+			made.Keys = 0;
+			made.CopiesFrame = frame;
+			made.CopiesUsed = 0;
+		}
+
+		if ( made.CopiesUsed >= MaxCopiesPerFrame ) return false;
+		if ( made.CopySize == 0 ) made.CopySize = record.Length;
+		else if ( made.CopySize != record.Length ) return false;
+
+		var copies = made.Copies[(int)(frame % FrameSlots)] ??= new();
+		if ( made.CopiesUsed < copies.Count )
+		{
+			copy = copies[made.CopiesUsed];
+			materials.Write( copy, record );
+		}
+		else
+		{
+			copy = materials.Append( record );
+			copies.Add( copy );
+		}
+
+		made.CopiesUsed++;
+		// Summed, so the order a frame asks for its values in doesn't count
+		made.Keys += (ulong)(uint)key.GetHashCode() * 0x9E3779B97F4A7C15ul;
+		frameRecords[key] = copy;
+		Volatile.Write( ref framesCopied, true );
+		return true;
+	}
+
+	/// <summary>
+	/// Material records one material's stage may make before it rings (<see cref="Rings(GpuMaterial)"/>): about a megabyte of
+	/// a large stage's. Records never go, and each new value of an attribute its constants read, or each new version of the
+	/// material, makes one.
 	/// </summary>
 	public const int MaxRecordsPerStage = 256;
 
-	// Material records made per material and stage (null for a surface's one record), added to under materialRecords' lock
-	readonly System.Collections.Concurrent.ConcurrentDictionary<(GpuMaterial Material, ShaderStage Stage), int> recordsPerStage = new();
+	/// <summary>
+	/// A stage that has made <see cref="ChurnRecords"/> material records or more rings once it has made one in each of
+	/// <see cref="ChurnFrames"/> frames in a row, frames at most <see cref="ChurnGap"/> apart: an attribute a game sets each
+	/// frame (wind's time) makes one a frame, or a few (one per pass), and each made draw records for every range drawn with
+	/// it (a forest's 50 materials made 5.1 million draw records over 32 thousand ranges, and a 1 GB LOD table). Objects with
+	/// values of their own make theirs as they come into view and then stop; under <see cref="ChurnRecords"/> of them never ring.
+	/// </summary>
+	public const int ChurnRecords = 32, ChurnFrames = 16;
+
+	/// <summary>Frames between two that made a stage's records that still count as a row (<see cref="ChurnFrames"/>): a value set at a game's tick rate changes every few frames.</summary>
+	public const long ChurnGap = 8;
 
 	/// <summary>
-	/// Whether a material's stage has made <see cref="MaxRecordsPerStage"/> records: what it reads changes all the time (an
-	/// attribute a game sets each frame, wind on a map's trees, or the material itself), so drawn GPU-driven it would add a
-	/// record each time until the table ran out of memory. Its draws stay classic.
+	/// Values a ringing stage may read in one frame (passes, and objects' own attributes), a copy each in each frame slot,
+	/// made as frames first need them: as many as the records it may make (<see cref="MaxRecordsPerStage"/>), so objects with
+	/// values of their own that rang as they came into view keep drawing GPU-driven. Past it the stage draws classic (<see cref="Churns"/>).
 	/// </summary>
-	public bool Churns( GpuMaterial material, ShaderStage stage ) => Volatile.Read( ref churning ) > 0 && recordsPerStage.TryGetValue( (material, stage), out var made ) && made >= MaxRecordsPerStage;
+	public const int MaxCopiesPerFrame = MaxRecordsPerStage;
 
-	// Stages that have reached the limit: none, mostly, and then nothing is looked up per draw
-	int churning;
+	/// <summary>
+	/// Frames a ringing stage reads the same values in before it stops ringing (<see cref="CalmRinging"/>): stages ring as
+	/// they load (texture streaming moves a material's version on every few frames) and then never change again, and a
+	/// ringing stage's calls make their plans again each frame.
+	/// </summary>
+	public const long CalmFrames = 120;
+
+	/// <summary>
+	/// A material stage's records: how many it has made, the last frame that made one, and how many frames in a row have;
+	/// whether it rings, and its copies by frame slot, of one size, with how many the frame that last asked has used; and
+	/// while it rings, the values that frame and the one before read (their keys' hashes, summed), and the last frame
+	/// they differed.
+	/// </summary>
+	sealed class StageRecords
+	{
+		public int Made, Frames;
+		public long Frame;
+		public volatile bool Ring, Classic;
+		public readonly List<uint>[] Copies = new List<uint>[FrameSlots];
+		public int CopySize, CopiesUsed;
+		public long CopiesFrame = -1;
+		public ulong Keys, LastKeys;
+		public long Changed;
+	}
+
+	// Records made per material and stage (null for a surface's one record), added to under materialRecords' lock
+	readonly System.Collections.Concurrent.ConcurrentDictionary<(GpuMaterial Material, ShaderStage Stage), StageRecords> recordsPerStage = new();
+
+	// Ringing stages' copies handed out this frame, cleared as a frame begins; added to under materialRecords' lock
+	readonly System.Collections.Concurrent.ConcurrentDictionary<MaterialRecordKey, uint> frameRecords = new();
+
+	// Materials with a ringing stage, and how many; and the stages that began ringing since the frame began, whose made
+	// records and draw records go at the next (ForgetRingingDraws). Under materialRecords' lock
+	readonly System.Collections.Concurrent.ConcurrentDictionary<GpuMaterial, int> ringMaterials = new();
+	readonly List<(GpuMaterial Material, ShaderStage Stage)> newlyRinging = new();
+
+	/// <summary>
+	/// Whether a material's stage draws classic: it rang (<see cref="Rings(GpuMaterial)"/>) and then read more values in a
+	/// frame than its copies hold (<see cref="MaxCopiesPerFrame"/>), each object with its own value of an attribute set each
+	/// frame, so neither made records nor copies keep up.
+	/// </summary>
+	public bool Churns( GpuMaterial material, ShaderStage stage ) => Volatile.Read( ref churning ) > 0 && recordsPerStage.TryGetValue( (material, stage), out var made ) && made.Classic;
+
+	/// <summary>
+	/// Whether one of a material's stages rings: what it reads changes all the time (an attribute a game sets each frame,
+	/// wind on a map's trees, or the material itself), so its records are copies rewritten each frame, a few per frame slot,
+	/// rather than a record made per value: its draw records stay the same few per range, and it stays GPU-driven. What a
+	/// call keeps of its records for the next frame (plans, record memos) doesn't hold for it.
+	/// </summary>
+	public bool Rings( GpuMaterial material ) => Volatile.Read( ref ringing ) > 0 && material is not null && ringMaterials.ContainsKey( material );
+
+	/// <summary>Whether this stage of a material rings (<see cref="Rings(GpuMaterial)"/>), for tests.</summary>
+	internal bool Rings( GpuMaterial material, ShaderStage stage ) => recordsPerStage.TryGetValue( (material, stage), out var made ) && made.Ring && !made.Classic;
+
+	// Stages that draw classic, and stages that ring: none, mostly, and then nothing is looked up per draw
+	int churning, ringing;
+
+	/// <summary>Draw records forgotten for naming stale material records (<see cref="ForgetStale"/>), for tests and reports.</summary>
+	public long DrawRecordsForgotten { get; private set; }
+
+	/// <summary>Frames between two walks of the tables for stale records (<see cref="ForgetStale"/>): nothing asks for them again, so they may wait.</summary>
+	const long ForgetEvery = 32;
+
+	// Whether a stage began ringing or a material was superseded since the last walk; the frame the next walk may be at the
+	// earliest, and the frame before which no ringing stage can have calmed (the last under materialRecords' lock)
+	bool forgetPending;
+	long forgetAfter, calmCheckAt = long.MaxValue;
+
+	// The stages that ring, which CalmRinging looks at rather than at every stage there is. Under materialRecords' lock
+	readonly List<(GpuMaterial Material, ShaderStage Stage, StageRecords Made)> ringingStages = new();
+
+	// Whether this frame's copies of ringing stages' records were made, so frameRecords has something to clear at the next frame's start
+	bool framesCopied;
+
+	/// <summary>
+	/// Forget what is stale, in one walk of the draw records: the records the stages that began ringing made, which take
+	/// frame copies from now on, so nothing asks for those again; the records of a material's older versions, once a
+	/// record was made at a newer one; and the copies of stages that calmed (<see cref="CalmRinging"/>). Each draw record
+	/// that names one would otherwise stay in <see cref="drawRecords"/> for good. Their bytes stay in the tables, where
+	/// frames still in flight read them. At a frame's start, and not before one of the last <see cref="ForgetEvery"/> frames
+	/// has walked: a draw made meanwhile with one of the records is made again if asked for, and a call this frame may still
+	/// look up the version it read before the newer one.
+	/// </summary>
+	void ForgetStale()
+	{
+		var frame = Interlocked.Read( ref frameNumber );
+		var due = Volatile.Read( ref forgetPending ) && frame >= forgetAfter;
+		if ( !due && frame < Volatile.Read( ref calmCheckAt ) ) return;
+
+		HashSet<uint> records = null;
+		lock ( materialRecords )
+		{
+			if ( due )
+			{
+				forgetAfter = frame + ForgetEvery;
+				Volatile.Write( ref forgetPending, false );
+				ForgetRinging( ref records );
+				ForgetSuperseded( ref records );
+			}
+
+			CalmRinging( frame, ref records );
+		}
+
+		if ( records is not null ) DrawRecordsForgotten += drawRecords.RemoveMaterials( records );
+	}
+
+	// The records the stages that began ringing made. Under materialRecords' lock
+	void ForgetRinging( ref HashSet<uint> records )
+	{
+		if ( newlyRinging.Count == 0 ) return;
+		var stages = newlyRinging.ToHashSet();
+		newlyRinging.Clear();
+		foreach ( var (key, record) in materialRecords )
+		{
+			if ( !stages.Contains( (key.Material, key.Stage) ) ) continue;
+			(records ??= new()).Add( record );
+			materialRecords.TryRemove( key, out _ );
+		}
+	}
+
+	// Each material's newest version a record was made at, and the materials a newer one has come to since the last walk,
+	// whose older records go at the next (ForgetSuperseded). Under materialRecords' lock
+	readonly Dictionary<GpuMaterial, int> latestVersions = new( ReferenceEqualityComparer.Instance );
+	readonly HashSet<GpuMaterial> superseded = new( ReferenceEqualityComparer.Instance );
+
+	// The records of a superseded material's older versions. Texture streaming moves a material's version on with each mip
+	// it gets, too slowly to churn: rocks on odyssey kept 14 versions each, their draw records growing from 102k to 366k in
+	// three minutes. Under materialRecords' lock
+	void ForgetSuperseded( ref HashSet<uint> records )
+	{
+		if ( superseded.Count == 0 ) return;
+		foreach ( var (key, record) in materialRecords )
+		{
+			if ( key.Material is not { } material || !superseded.Contains( material ) || key.Version >= latestVersions[material] ) continue;
+			(records ??= new()).Add( record );
+			materialRecords.TryRemove( key, out _ );
+		}
+
+		superseded.Clear();
+	}
+
+	/// <summary>Ringing stages that stopped (<see cref="CalmRinging"/>), for tests and reports.</summary>
+	public int RingingCalmed { get; private set; }
+
+	// Stop the ringing of stages that read the same values for CalmFrames: they make records again, counted afresh, so they
+	// ring again if they churn again. Their copies' draw records go, as nothing asks for the copies until then; the copies
+	// stay theirs. A stage can't calm before its last change plus CalmFrames, so no stage is looked at before the earliest
+	// of those. Under materialRecords' lock
+	void CalmRinging( long frame, ref HashSet<uint> records )
+	{
+		if ( frame < calmCheckAt ) return;
+
+		var next = long.MaxValue;
+		for ( int i = ringingStages.Count - 1; i >= 0; i-- )
+		{
+			var (material, _, made) = ringingStages[i];
+			if ( made.Classic ) continue;
+			if ( frame - made.Changed < CalmFrames )
+			{
+				next = Math.Min( next, made.Changed + CalmFrames );
+				continue;
+			}
+
+			made.Ring = false;
+			made.Made = made.Frames = 0;
+			made.Keys = made.LastKeys = 0;
+			Interlocked.Decrement( ref ringing );
+			if ( ringMaterials.AddOrUpdate( material, 0, static ( _, n ) => n - 1 ) == 0 ) ringMaterials.TryRemove( material, out _ );
+			foreach ( var slot in made.Copies )
+			{
+				if ( slot is not null ) (records ??= new()).UnionWith( slot );
+			}
+
+			ringingStages.RemoveAt( i );
+			RingingCalmed++;
+		}
+
+		calmCheckAt = next;
+	}
 
 	/// <summary>
 	/// Forget the records of materials that were freed: their keys held the materials, and through them their textures, for
@@ -1081,12 +1341,28 @@ internal sealed class GpuDrivenTables : IDisposable
 				if ( key.Material is { } material && freed.Contains( material ) ) materialRecords.TryRemove( key, out _ );
 			}
 
+			foreach ( var key in frameRecords.Keys )
+			{
+				if ( key.Material is { } material && freed.Contains( material ) ) frameRecords.TryRemove( key, out _ );
+			}
+
 			foreach ( var (stage, made) in recordsPerStage )
 			{
 				if ( stage.Material is null || !freed.Contains( stage.Material ) ) continue;
 				recordsPerStage.TryRemove( stage, out _ );
-				if ( made >= MaxRecordsPerStage ) Interlocked.Decrement( ref churning );
+				if ( made.Classic ) Interlocked.Decrement( ref churning );
+				if ( made.Ring ) Interlocked.Decrement( ref ringing );
 			}
+
+			foreach ( var material in freed )
+			{
+				ringMaterials.TryRemove( material, out _ );
+				latestVersions.Remove( material );
+				superseded.Remove( material );
+			}
+
+			newlyRinging.RemoveAll( stage => stage.Material is not null && freed.Contains( stage.Material ) );
+			ringingStages.RemoveAll( stage => stage.Material is not null && freed.Contains( stage.Material ) );
 		}
 	}
 
@@ -1117,21 +1393,36 @@ internal sealed class GpuDrivenTables : IDisposable
 	/// <summary>Turns of its frame slot a frame chunk past a slot's first can go unused before it's freed (a map's busy frames grew them).</summary>
 	internal const int IdleChunkTurns = 200;
 
+	/// <summary>
+	/// Turns a cull region chunk bigger than <see cref="ChunkBytes"/> (made for one cull's region) goes unused before it's
+	/// freed: a cull that outgrew it took a bigger one (a map loading grows them frame by frame), and held for
+	/// <see cref="IdleChunkTurns"/> the ones it outgrew took gigabytes of video memory, which pushed the map's own textures
+	/// and geometry to system memory.
+	/// </summary>
+	const int IdleLargeCullChunkTurns = 2;
+
+	/// <summary>Bytes of a frame chunk, unless one allocation needs more.</summary>
+	const long ChunkBytes = 4L << 20;
+
 	/// <summary>Frame chunks there are, for tests.</summary>
 	internal int FrameChunks
 	{
 		get
 		{
-			lock ( frames ) return frames.Sum( f => f.Count );
+			lock ( uploads ) lock ( cullRegions ) return uploads.Frames.Sum( f => f.Count ) + cullRegions.Frames.Sum( f => f.Count );
 		}
 	}
 
-	const int FrameSlots = 3;
-	readonly List<Chunk>[] frames = [new(), new(), new()];
-	int frame;
+	/// <summary>Frames whose chunks and ringing stages' copies are kept apart: the device has finished the frame this many back when one begins.</summary>
+	internal const int FrameSlots = 3;
+	sealed class FrameChunksByMemory
+	{
+		public readonly List<Chunk>[] Frames = [new(), new(), new()];
+		public Chunk Current;
+	}
 
-	/// <summary>The chunk this frame's calls take room from without a lock, until it's full.</summary>
-	Chunk current;
+	readonly FrameChunksByMemory uploads = new(), cullRegions = new();
+	int frame;
 
 	/// <summary>Start a frame: reuse the chunks of the frame <see cref="FrameSlots"/> back, which the device has finished.</summary>
 	public void BeginFrame()
@@ -1181,25 +1472,9 @@ internal sealed class GpuDrivenTables : IDisposable
 			AgeVisibility();
 		}
 
-		lock ( frames )
-		{
-			frame = (frame + 1) % FrameSlots;
-			var chunks = frames[frame];
-			for ( int i = chunks.Count - 1; i >= 0; i-- )
-			{
-				var chunk = chunks[i];
-				chunk.IdleTurns = chunk.Used == 0 ? chunk.IdleTurns + 1 : 0;
-				chunk.Used = 0;
-				if ( i == 0 || chunk.IdleTurns <= IdleChunkTurns ) continue;
-
-				// The frame that last used it is done (FrameSlots back); its buffer goes once the GPU is
-				chunks.RemoveAt( i );
-				lock ( pagesLock ) owned.Remove( chunk.Buffer );
-				gpu.Destroy( chunk.Buffer );
-			}
-
-			Volatile.Write( ref current, frames[frame].Count > 0 ? frames[frame][0] : null );
-		}
+		frame = (frame + 1) % FrameSlots;
+		Recycle( uploads, keepFirst: true );
+		Recycle( cullRegions, keepFirst: false );
 
 		lock ( frameVisibility )
 		{
@@ -1208,6 +1483,40 @@ internal sealed class GpuDrivenTables : IDisposable
 			LastFrameVisibilityBits = frameVisibilityBits;
 			frameVisibilityBits = 0;
 		}
+
+		// Ringing stages' copies are this frame's afresh: last frame's were handed out of another frame slot
+		if ( Volatile.Read( ref framesCopied ) )
+		{
+			// Flag first: a copy made meanwhile sets it again, so the next frame clears that too
+			Volatile.Write( ref framesCopied, false );
+			frameRecords.Clear();
+		}
+
+		ForgetStale();
+	}
+
+	void Recycle( FrameChunksByMemory chunksByMemory, bool keepFirst )
+	{
+		lock ( chunksByMemory )
+		{
+			var chunks = chunksByMemory.Frames[frame];
+			for ( int i = chunks.Count - 1; i >= 0; i-- )
+			{
+				var chunk = chunks[i];
+				chunk.IdleTurns = chunk.Used == 0 ? chunk.IdleTurns + 1 : 0;
+				chunk.Used = 0;
+				if ( i == 0 && keepFirst ) continue;
+				var idleTurns = !keepFirst && chunk.Size > ChunkBytes ? IdleLargeCullChunkTurns : IdleChunkTurns;
+				if ( chunk.IdleTurns <= idleTurns ) continue;
+
+				// The frame that last used it is done; its buffer goes once the GPU is done like anything destroyed.
+				chunks.RemoveAt( i );
+				lock ( pagesLock ) owned.Remove( chunk.Buffer );
+				gpu.Destroy( chunk.Buffer );
+			}
+
+			Volatile.Write( ref chunksByMemory.Current, chunks.Count > 0 ? chunks[0] : null );
+		}
 	}
 
 	/// <summary>
@@ -1215,18 +1524,24 @@ internal sealed class GpuDrivenTables : IDisposable
 	/// as storage and indirect arguments; write it through <see cref="Device.Map"/>. Every recording thread asks, so room
 	/// comes from the current chunk by an atomic add, and only a full chunk takes the lock to move on.
 	/// </summary>
-	public (BufferHandle Buffer, int Slot, long Offset) Allocate( int bytes )
+	public (BufferHandle Buffer, int Slot, long Offset) Allocate( int bytes ) => Allocate( bytes, uploads, MemoryLocation.Upload );
+
+	/// <summary>Room for GPU-written cull output; its CPU-written input must be copied from staging.</summary>
+	internal (BufferHandle Buffer, int Slot, long Offset) AllocateDeviceCull( int bytes ) => Allocate( bytes, cullRegions, MemoryLocation.Device );
+
+	(BufferHandle Buffer, int Slot, long Offset) Allocate( int bytes, FrameChunksByMemory chunksByMemory, MemoryLocation memory )
 	{
 		var aligned = (bytes + 15L) & ~15L;
 		long offset;
-		if ( Volatile.Read( ref current ) is { } chunk && Take( chunk, aligned, out offset ) ) return (chunk.Buffer, chunk.Slot, offset);
+		if ( Volatile.Read( ref chunksByMemory.Current ) is { } chunk && Take( chunk, aligned, out offset ) ) return (chunk.Buffer, chunk.Slot, offset);
 
-		lock ( frames )
+		lock ( chunksByMemory )
 		{
 			// Another chunk of the frame's with room, else a new one; it becomes the current one
 			Chunk found = null;
 			offset = 0;
-			foreach ( var c in frames[frame] )
+			var chunks = chunksByMemory.Frames[frame];
+			foreach ( var c in chunks )
 			{
 				if ( Take( c, aligned, out offset ) )
 				{
@@ -1237,15 +1552,15 @@ internal sealed class GpuDrivenTables : IDisposable
 
 			if ( found is null )
 			{
-				var size = Math.Max( 4L << 20, aligned );
-				var buffer = gpu.CreateBuffer( new BufferInfo { Size = size, Usage = BufferUsage.Storage | BufferUsage.Indirect, Memory = MemoryLocation.Upload, Name = "Borealis GPU-driven frame" } );
+				var size = Math.Max( ChunkBytes, aligned );
+				var buffer = gpu.CreateBuffer( new BufferInfo { Size = size, Usage = BufferUsage.Storage | BufferUsage.Indirect, Memory = memory, Name = memory == MemoryLocation.Upload ? "Borealis GPU-driven frame" : "Borealis GPU-driven cull regions" } );
 				lock ( pagesLock ) owned.Add( buffer );
 				found = new Chunk { Buffer = buffer, Slot = gpu.BindlessIndex( buffer ), Size = size };
-				frames[frame].Add( found );
+				chunks.Add( found );
 				Take( found, aligned, out offset );
 			}
 
-			Volatile.Write( ref current, found );
+			Volatile.Write( ref chunksByMemory.Current, found );
 			return (found.Buffer, found.Slot, offset);
 		}
 	}

@@ -132,7 +132,8 @@ internal sealed class LodStore : IDisposable
 	/// <summary>
 	/// Forget the ranges in the index page at <paramref name="slot"/>, whose meshes have all gone (the page is being freed,
 	/// and its slot may name another page later), with their levels; false while one is being built or waits to be placed,
-	/// to be asked again next frame.
+	/// to be asked again next frame. A range built but asked for only by depth passes is never placed (no colour pass
+	/// draws it: <see cref="Request"/>), so it's dropped with its staging rather than waited for.
 	/// </summary>
 	public bool TryForgetPage( int slot )
 	{
@@ -140,7 +141,16 @@ internal sealed class LodStore : IDisposable
 		{
 			foreach ( var (range, entry) in entries )
 			{
-				if ( range.PageSlot == slot && entry.State is Phase.Building or Phase.Built ) return false;
+				if ( range.PageSlot == slot && (entry.State is Phase.Building || entry.State is Phase.Built && entry.Color) ) return false;
+			}
+
+			for ( int i = ready.Count - 1; i >= 0; i-- )
+			{
+				var entry = ready[i];
+				if ( entry.Range.PageSlot != slot ) continue;
+				if ( entry.Staging.IsValid ) gpu.Destroy( entry.Staging );
+				entry.Staging = default;
+				ready.RemoveAt( i );
 			}
 
 			foreach ( var range in entries.Keys.Where( r => r.PageSlot == slot ).ToList() ) entries.Remove( range );
@@ -339,7 +349,19 @@ internal sealed class LodStore : IDisposable
 			entries[range] = entry;
 			if ( waitingDraws.Remove( range, out var draws ) ) entry.Draws.AddRange( draws );
 			Requested++;
-			Task.Run( () => BuildOn( entry ) );
+			Interlocked.Increment( ref buildsRunning );
+			Task.Run( async () =>
+			{
+				try
+				{
+					await workers.WaitAsync();
+					BuildOn( entry );
+				}
+				finally
+				{
+					Interlocked.Decrement( ref buildsRunning );
+				}
+			} );
 		}
 	}
 
@@ -449,7 +471,6 @@ internal sealed class LodStore : IDisposable
 
 	void BuildOn( Entry entry )
 	{
-		workers.Wait();
 		try
 		{
 			using var zone = Zones.LodBuild.Start();
@@ -917,6 +938,13 @@ internal sealed class LodStore : IDisposable
 
 	/// <summary>Device memory it holds: the LOD table and the levels views keep.</summary>
 	public long Bytes => tableRecords * RecordBytes + StateHeaderBytes + (long)StateSlices * StateSliceBytes;
+
+	int buildsRunning;
+
+	public void FinishBuilds()
+	{
+		while ( Volatile.Read( ref buildsRunning ) > 0 ) Thread.Sleep( 1 );
+	}
 
 	public void Dispose()
 	{

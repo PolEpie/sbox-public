@@ -91,7 +91,7 @@ struct CullViewRecord
 	float4 Planes[6];
 	/// The camera's position, and the squared size threshold (negative: a sun cascade's squared radius by its texel size).
 	float4 CameraAndThreshold;
-	/// Bit 0: a shadow view; bits 1-2: its resident filter (GpuContext.ResidentFilter); bit 3: two-phase Hi-Z occlusion.
+	/// Bit 0: a shadow view; bits 1-2: its resident filter (GpuContext.ResidentFilter); bit 3: two-phase Hi-Z occlusion; bit 4: the culls count what they let through (CullStats); bit 5: a depth pass (no colour); bits 8-15: the stats slot.
 	uint Flags;
 	/// Non-zero: resident meshes skip the size test (a static shadow cache, kept while the camera moves).
 	uint KeepsSmallMeshes;

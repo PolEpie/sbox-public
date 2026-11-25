@@ -257,7 +257,19 @@ internal sealed class MeshletStore : IDisposable
 			}
 
 			Requested++;
-			Task.Run( () => BuildOn( entry ) );
+			Interlocked.Increment( ref buildsRunning );
+			Task.Run( async () =>
+			{
+				try
+				{
+					await workers.WaitAsync();
+					BuildOn( entry );
+				}
+				finally
+				{
+					Interlocked.Decrement( ref buildsRunning );
+				}
+			} );
 		}
 	}
 
@@ -333,7 +345,6 @@ internal sealed class MeshletStore : IDisposable
 
 	void BuildOn( Entry entry )
 	{
-		workers.Wait();
 		try
 		{
 			using var zone = Zones.MeshletBuild.Start();
@@ -892,6 +903,13 @@ internal sealed class MeshletStore : IDisposable
 		corners = buffer;
 		cornerBytes = size;
 		cornerSlot = gpu.BindlessIndex( buffer );
+	}
+
+	int buildsRunning;
+
+	public void FinishBuilds()
+	{
+		while ( Volatile.Read( ref buildsRunning ) > 0 ) Thread.Sleep( 1 );
 	}
 
 	public void Dispose()

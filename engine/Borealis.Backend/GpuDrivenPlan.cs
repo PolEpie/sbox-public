@@ -69,12 +69,13 @@ internal sealed class GpuDrivenPlans
 /// What a GPU-culled call of a resident list made, kept for the next call of the same kind while the list's version is
 /// the same: its buckets, each batch's 32-byte record, its multi-draws, and which batches it drew. Before it's used, each
 /// bucket's variant and attribute hashes are worked out again from its first batch (what the pass's attributes decide), and
-/// each material's version is compared; any difference makes the plan again. Read by every worker; never changed once made.
+/// each material's version is compared; any difference makes the plan again. Read by every worker; never changed once made
+/// but for what a check notes of it (<see cref="Reads"/>).
 /// </summary>
 internal sealed class GpuDrivenPlan
 {
 	/// <summary>What a call's kind is: the same key, the same buckets and records for the same list.</summary>
-	public readonly record struct CallKey( uint Mode, Format Color, Format Depth, int Samples, bool NoColor, bool Ids, bool Lists, bool Visibility, bool Positions, bool KeepsOrder, bool Meshlets = false, bool MeshTasks = false );
+	public readonly record struct CallKey( uint Mode, Format Color, Format Depth, int Samples, bool NoColor, bool Ids, bool Lists, bool Visibility, bool Positions, bool KeepsOrder, GpuContext.ResidentFilter Filter, bool Meshlets = false, bool MeshTasks = false, OverlayStencil Stencil = OverlayStencil.None );
 
 	public CallKey Key;
 	public int Version;
@@ -103,6 +104,9 @@ internal sealed class GpuDrivenPlan
 
 	/// <summary>Every geometry the batches draw: the plan is made again once one of them is freed (<see cref="IBackendGeometry.Use"/>).</summary>
 	public IBackendGeometry[] Geometries;
+
+	/// <summary>What its bucket checks read of the pass's attributes, made once a check has passed (<see cref="GpuDrivenPlanReads"/>); null until then.</summary>
+	public GpuDrivenPlanReads Reads;
 
 	public uint[] BatchRecords;
 
@@ -141,4 +145,25 @@ internal sealed class GpuDrivenPlan
 
 	/// <summary>Replaced or dropped from its list's plans: no call finds it again.</summary>
 	public volatile bool Retired;
+}
+
+/// <summary>
+/// What a plan's bucket checks (<see cref="BackendContext"/>'s PlanCurrent) read that its versions don't tell: the pass's
+/// combos its variants' keys and surfaces' passes take, the integers their specialization takes, and the attributes its
+/// stages' records read (their hashes, as the records' keys take them), as they were before the last check that passed
+/// in full; and each surface bucket's material and program. A pass's attributes are made again each frame, so their
+/// version moves on every frame, but the few values the checks read mostly don't: with those the same and the plan's
+/// materials and object attributes at their versions, every bucket checks as it did, and isn't worked out again.
+/// <see cref="Values"/> and <see cref="Passed"/> are read and written under its lock, by any worker.
+/// </summary>
+internal sealed class GpuDrivenPlanReads
+{
+	public StringToken[] Combos, Integers, Hashed;
+	public (SurfaceMaterial Material, SurfaceProgram Program)[] Surfaces;
+
+	/// <summary>By name, combos then integers then hashes: a combo or integer with 1 in the high word when it's set, a hash as it is.</summary>
+	public long[] Values;
+
+	/// <summary>Whether <see cref="Values"/> are those of a check that passed.</summary>
+	public bool Passed;
 }

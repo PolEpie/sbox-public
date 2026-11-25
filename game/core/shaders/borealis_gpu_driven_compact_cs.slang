@@ -59,6 +59,10 @@ cbuffer BorealisGpuDrivenCull_t
 	uint g_nCullListed;			// byte offset of the listed fragments: dispatch arguments, then 32 bytes each
 	uint g_nCullMeshletRuns;		// bindless slot of the meshlet runs (16 bytes per draw record) where the view's prepass culls meshlets; else None
 	uint g_nCullLodCount;
+	uint g_nCullLodFadeNow;
+	uint g_nCullLodFadeTicks;
+	uint g_nCullPad0;
+	uint g_nCullPad1;
 };
 
 static const uint None = 0xffffffffu;
@@ -95,8 +99,8 @@ uint TakeSlot( uint nRun )
 // Triangles a lane takes at once in each scan
 static const uint Batch = 8;
 
-// Threads a listed fragment gets: most fragments are a few hundred triangles
-static const uint GroupSize = 1024;
+// Most fragments are a few hundred triangles. Smaller groups leave room for several fragments per SM.
+static const uint GroupSize = 256;
 
 groupshared uint gs_Owned;
 groupshared uint gs_Start;
@@ -116,6 +120,31 @@ uint TriangleIndex( ByteAddressBuffer page, uint nFirst, bool b32, bool bPrepass
 
 	uint nWord = g_PrepassCompacted16.Load( ( i * 2 ) & ~3u );
 	return ( i & 1 ) != 0 ? nWord >> 16 : nWord & 0xffff;
+}
+
+bool OwnsSample( uint nBit )
+{
+	return ( ( g_Mask.Load( ( nBit >> 5 ) * 4 ) >> ( nBit & 31 ) ) & 1 ) != 0;
+}
+
+// A wave takes room for all its kept triangles in one atomic, then writes their indices.
+void CopyTriangle( bool bOwned, uint nStart, ByteAddressBuffer page, uint nFirst, bool b32, bool bPrepass, uint t, uint nFirstIndex, uint nListed )
+{
+	uint nWave = WaveActiveCountBits( bOwned );
+	if ( nWave == 0 )
+		return;
+
+	uint nBase = 0;
+	if ( WaveIsFirstLane() )
+		InterlockedAdd( gs_Cursor, nWave * 3, nBase );
+	nBase = WaveReadLaneFirst( nBase );
+	if ( !bOwned )
+		return;
+
+	uint nAt = nStart + nBase + WavePrefixCountBits( bOwned ) * 3;
+	g_Compacted.Store( ( nAt + 0 ) * 4, nFirstIndex );
+	g_Compacted.Store( ( nAt + 1 ) * 4, TriangleIndex( page, nFirst, b32, bPrepass, t, 1, nListed ) );
+	g_Compacted.Store( ( nAt + 2 ) * 4, TriangleIndex( page, nFirst, b32, bPrepass, t, 2, nListed ) );
 }
 
 // A listed fragment: transform, draw record, its vertices' first bit (with the base vertex), its multi-draw and its
@@ -175,24 +204,37 @@ uint TriangleIndex( ByteAddressBuffer page, uint nFirst, bool b32, bool bPrepass
 		}
 	}
 
-	// Eight triangles a lane at a time, their index loads and then their mask loads issued together: the count waits on
-	// memory, not arithmetic, and a large fragment's one group would otherwise wait on its loads one batch after another
+	// For fragments of at most one triangle per lane, keep the first index and visibility in registers for the copy.
+	// Larger fragments still scan eight triangles per lane to overlap their index and mask loads.
+	bool bSingle = nScan <= GroupSize;
+	uint nFirstIndex = 0;
 	uint nMine = 0;
-	for ( uint t0 = nThread; t0 < nScan; t0 += GroupSize * Batch )
+	if ( bSingle )
 	{
-		uint vBit[Batch];
-		[unroll] for ( uint k = 0; k < Batch; k++ )
-			vBit[k] = nVertexBase + TriangleIndex( page, nFirst, b32, bPrepass, min( t0 + GroupSize * k, nScan - 1 ), 0, nListed );
-		uint vWord[Batch];
-		[unroll] for ( uint k = 0; k < Batch; k++ )
-			vWord[k] = g_Mask.Load( ( vBit[k] >> 5 ) * 4 );
-		[unroll] for ( uint k = 0; k < Batch; k++ )
-			nMine += t0 + GroupSize * k < nScan ? ( vWord[k] >> ( vBit[k] & 31 ) ) & 1 : 0;
+		if ( nThread < nScan )
+		{
+			nFirstIndex = TriangleIndex( page, nFirst, b32, bPrepass, nThread, 0, nListed );
+			nMine = OwnsSample( nVertexBase + nFirstIndex ) ? 1 : 0;
+		}
+	}
+	else
+	{
+		for ( uint t0 = nThread; t0 < nScan; t0 += GroupSize * Batch )
+		{
+			uint vBit[Batch];
+			[unroll] for ( uint k = 0; k < Batch; k++ )
+				vBit[k] = nVertexBase + TriangleIndex( page, nFirst, b32, bPrepass, min( t0 + GroupSize * k, nScan - 1 ), 0, nListed );
+			uint vWord[Batch];
+			[unroll] for ( uint k = 0; k < Batch; k++ )
+				vWord[k] = g_Mask.Load( ( vBit[k] >> 5 ) * 4 );
+			[unroll] for ( uint k = 0; k < Batch; k++ )
+				nMine += t0 + GroupSize * k < nScan ? ( vWord[k] >> ( vBit[k] & 31 ) ) & 1 : 0;
+		}
 	}
 
-	nMine = WaveActiveSum( nMine );
-	if ( WaveIsFirstLane() )
-		InterlockedAdd( gs_Owned, nMine );
+	uint nWaveOwned = WaveActiveSum( nMine );
+	if ( nWaveOwned != 0 && WaveIsFirstLane() )
+		InterlockedAdd( gs_Owned, nWaveOwned );
 	GroupMemoryBarrierWithGroupSync();
 	uint nOwned = gs_Owned;
 	if ( nOwned == 0 )
@@ -228,6 +270,12 @@ uint TriangleIndex( ByteAddressBuffer page, uint nFirst, bool b32, bool bPrepass
 	if ( nStart == None )
 		return;
 
+	if ( bSingle )
+	{
+		CopyTriangle( nMine != 0, nStart, page, nFirst, b32, bPrepass, nThread, nFirstIndex, nListed );
+		return;
+	}
+
 	// Each owned triangle takes the next three indices (order within the fragment doesn't matter): eight a lane at a time,
 	// loads issued together as in the count, each wave taking its owned triangles' room with one atomic
 	for ( uint t0 = nThread; t0 < nScan; t0 += GroupSize * Batch )
@@ -243,21 +291,7 @@ uint TriangleIndex( ByteAddressBuffer page, uint nFirst, bool b32, bool bPrepass
 		{
 			uint t = t0 + GroupSize * k;
 			bool bOwned = t < nScan && ( ( vWord[k] >> ( ( nVertexBase + vFirst[k] ) & 31 ) ) & 1 ) != 0;
-			uint nWave = WaveActiveCountBits( bOwned );
-			if ( nWave == 0 )
-				continue;
-
-			uint nBase = 0;
-			if ( WaveIsFirstLane() )
-				InterlockedAdd( gs_Cursor, nWave * 3, nBase );
-			nBase = WaveReadLaneFirst( nBase );
-			if ( !bOwned )
-				continue;
-
-			uint nAt = nStart + nBase + WavePrefixCountBits( bOwned ) * 3;
-			g_Compacted.Store( ( nAt + 0 ) * 4, vFirst[k] );
-			g_Compacted.Store( ( nAt + 1 ) * 4, TriangleIndex( page, nFirst, b32, bPrepass, t, 1, nListed ) );
-			g_Compacted.Store( ( nAt + 2 ) * 4, TriangleIndex( page, nFirst, b32, bPrepass, t, 2, nListed ) );
+			CopyTriangle( bOwned, nStart, page, nFirst, b32, bPrepass, t, vFirst[k], nListed );
 		}
 	}
 }

@@ -13,9 +13,8 @@ internal sealed record TextureMip( GpuTexture Texture, int Mip );
 /// what Borealis's shared passes run, the depth chain among them. Each binds through a <see cref="ShaderDrawer"/> of the
 /// device's, with material objects (persistent sets, as the engine's dispatches bind): the parameters over this context's
 /// attributes, found by the tokens and attribute ids worked out once a variant (<see cref="DispatchPlan"/>), single mips as
-/// views of one mip, and the textures it writes moved to <see cref="ImageLayout.General"/> (a mip it reads of a texture it writes moved to
-/// <see cref="ImageLayout.ShaderRead"/> for the dispatch alone), the textures it only reads to
-/// <see cref="ImageLayout.ShaderRead"/>.
+/// views of one mip, and the textures it writes moved to <see cref="ImageLayout.General"/>. Textures or mips it only
+/// reads are bound in <see cref="ImageLayout.ShaderRead"/>.
 /// </summary>
 internal sealed partial class BackendContext
 {
@@ -31,9 +30,13 @@ internal sealed partial class BackendContext
 	readonly List<(BackendTexture Texture, int Mip)> dispatchSampledMips = new();
 
 	public override void Dispatch( GpuMaterial computeShader, ShaderParameters parameters, int x, int y, int z )
+		=> Dispatch( computeShader, parameters, x, y, z, mipChain: null );
+
+	// The frame copy mip chain owns the layout transitions of its own texture.
+	bool Dispatch( GpuMaterial computeShader, ShaderParameters parameters, int x, int y, int z, BackendTexture mipChain )
 	{
-		if ( recording is null || computeShader is not BackendMaterial { Shader: { } shader } ) return;
-		if ( shader[ShaderProgramType.Compute] is not { } program || shader.Modes.Count == 0 ) return;
+		if ( recording is null || computeShader is not BackendMaterial { Shader: { } shader } ) return false;
+		if ( shader[ShaderProgramType.Compute] is null || shader.Modes.Count == 0 ) return false;
 		var given = parameters as BackendParameters;
 
 		object Value( StringToken token ) => given?.Get( token ) ?? Lookup( token );
@@ -50,7 +53,7 @@ internal sealed partial class BackendContext
 			}
 
 			var variant = drawer.Variant( shader, attributes );
-			if ( variant?.Compute?.Bytecode is null ) return;
+			if ( variant?.Compute?.Bytecode is null ) return false;
 
 			var plan = dispatchPlans.GetValue( variant, DispatchPlan.Of );
 			foreach ( var (token, id) in plan.Constants ) SetDispatchFloats( attributes, id, Value( token ) );
@@ -91,22 +94,25 @@ internal sealed partial class BackendContext
 			}
 
 			// Writes in General; reads in ShaderRead, a read mip of a written texture only for this dispatch
-			foreach ( var texture in written ) Transition( texture, ImageLayout.General );
+			foreach ( var texture in written ) if ( texture != mipChain ) Transition( texture, ImageLayout.General );
 			foreach ( var texture in sampled ) if ( !written.Contains( texture ) ) Transition( texture, ImageLayout.ShaderRead );
 			foreach ( var (texture, mip) in sampledMips )
 			{
+				if ( texture == mipChain ) continue;
 				if ( written.Contains( texture ) ) List.Barrier( MipBarrier( texture.Handle, mip, ImageLayout.General, ImageLayout.ShaderRead ) );
 				else Transition( texture, ImageLayout.ShaderRead );
 			}
 
-			drawer.Dispatch( List, shader, attributes, x, y, z );
+			drawer.Dispatch( List, variant, attributes, x, y, z );
 			recording.Pipeline = default;
 			recording.Binder = null;
 
 			foreach ( var (texture, mip) in sampledMips )
 			{
-				if ( written.Contains( texture ) ) List.Barrier( MipBarrier( texture.Handle, mip, ImageLayout.ShaderRead, ImageLayout.General ) );
+				if ( texture != mipChain && written.Contains( texture ) ) List.Barrier( MipBarrier( texture.Handle, mip, ImageLayout.ShaderRead, ImageLayout.General ) );
 			}
+
+			return true;
 		}
 	}
 
@@ -132,7 +138,10 @@ internal sealed partial class BackendContext
 			var span = variant.ResourceSpan;
 			for ( int i = 0; i < span.Length; i++ )
 			{
-				if ( span[i].Name is { } name ) resources.Add( (i, Token( name ), AttributeIds.Of( name )) );
+				if ( span[i].Name is not { } name ) continue;
+				// An append buffer's hidden counter is set under its counter's name, where the drawer looks for it
+				if ( span[i].Kind == ShaderResourceKind.Counter ) name = ShaderResource.CounterName( name );
+				resources.Add( (i, Token( name ), AttributeIds.Of( name )) );
 			}
 
 			return new DispatchPlan { Constants = [.. constants], Resources = [.. resources] };
@@ -177,11 +186,11 @@ internal sealed partial class BackendContext
 	/// samples averaged as a resolve averages them, so most of its samples (where the mask takes last frame's) aren't read.
 	/// A frame of another format (converted by the copy) isn't made this way. False when it wasn't.
 	/// </summary>
-	bool CopyFrameBufferMasked( BackendTexture source, BackendTexture copy, Rect viewport )
+	bool CopyFrameBufferMasked( BackendTexture source, BackendTexture copy, Rect viewport, ref (int X0, int Y0, int X1, int Y1) dirty )
 	{
 		if ( !device.FrameBufferCopyMasked || source is null || source.Format != copy.Format ) return false;
 		if ( source.Width < copy.Width || source.Height < copy.Height ) return false;
-		return MaskFrameBufferCopy( copy, viewport, source );
+		return MaskFrameBufferCopy( copy, viewport, source, ref dirty );
 	}
 
 	/// <summary>
@@ -191,7 +200,7 @@ internal sealed partial class BackendContext
 	/// <c>framecopy_mask_cs</c> does, and copies the frame everywhere else, over the readers' region. False when the shader
 	/// isn't there.
 	/// </summary>
-	bool MaskFrameBufferCopy( BackendTexture copy, Rect viewport, BackendTexture source )
+	bool MaskFrameBufferCopy( BackendTexture copy, Rect viewport, BackendTexture source, ref (int X0, int Y0, int X1, int Y1) dirty )
 	{
 		var shader = source is null ? "shaders/depthaware_mask_cs.shader" : "shaders/framecopy_mask_cs.shader";
 		if ( device.MaterialFromShader( shader ) is not BackendMaterial { Shader: not null } mask ) return false;
@@ -206,16 +215,17 @@ internal sealed partial class BackendContext
 		}
 		else
 		{
-			var (x0, y0, x1, y1) = ReadRegion( Math.Min( copy.Width, (int)viewport.Width ), Math.Min( copy.Height, (int)viewport.Height ) );
+			dirty = ReadRegion( Math.Min( copy.Width, (int)viewport.Width ), Math.Min( copy.Height, (int)viewport.Height ) );
+			var (x0, y0, x1, y1) = dirty;
 			parameters.Set( MaskRegion, new Vector4( x0, y0, x1, y1 ) );
-			parameters.SetCombo( MaskCopies, source.Samples > 1 ? 2 : 1 );
-			if ( source.Samples > 1 ) parameters.Set( MaskSource, source );
+			var samples = source.Samples;
+			parameters.SetCombo( MaskCopies, samples switch { 1 => 1, 4 => 3, _ => 2 } );
+			if ( samples > 1 ) parameters.Set( MaskSource, source );
 			else parameters.Set( MaskSource, source, 0 );
-			parameters.Set( MaskSamples, (float)source.Samples );
+			if ( samples > 1 && samples != 4 ) parameters.Set( MaskSamples, (float)samples );
 			Dispatch( mask, parameters, x1 - x0, y1 - y0, 1 );
 		}
 
-		List.Barrier( PipelineStage.ComputeShader, MemoryAccess.ShaderWrite, PipelineStage.ComputeShader, MemoryAccess.ShaderRead | MemoryAccess.ShaderWrite );
 		EndGpuScope( scope );
 		return true;
 	}
@@ -245,31 +255,66 @@ internal sealed partial class BackendContext
 	/// mask: a gaussian dispatch a mip, each from the one above, over the viewport's part. <c>framecopy_mips_cs</c> makes
 	/// <c>downsample_cs</c>'s gaussian mip a 16x16 tile a group, so each texel takes 2.25 taps of the mip above, not 4
 	/// (<see cref="BackendDevice.FrameBufferCopyTiledMips"/>).
+	/// Returns the first mip that still needs to be transitioned to ShaderRead.
 	/// </summary>
-	void GenerateFrameBufferCopyMips( BackendTexture copy, Rect viewport )
+	int GenerateFrameBufferCopyMips( BackendTexture copy, Rect viewport, (int X0, int Y0, int X1, int Y1) dirty )
 	{
-		if ( copy.Mips <= 1 ) return;
 		var tiled = device.FrameBufferCopyTiledMips && device.MaterialFromShader( "shaders/framecopy_mips_cs.shader" ) is BackendMaterial { Shader: not null } tiles ? tiles : null;
 		var downsample = tiled ?? device.MaterialFromShader( "shaders/downsample_cs.shader" ) as BackendMaterial;
-		if ( downsample is not { Shader: not null } ) return;
+		var previousMipShader = copy.FrameBufferMipShader;
+		copy.FrameBufferMipShader = null;
+		if ( downsample is not { Shader: not null } ) return 0;
+
+		Transition( copy, ImageLayout.General );
+
+		var width = (int)viewport.Width;
+		var height = (int)viewport.Height;
+		var canKeepMips = tiled is not null && width == copy.Width && height == copy.Height;
+		var (x0, y0, x1, y1) = dirty;
+		var partial = canKeepMips && tiled.Shader == previousMipShader && (x0 != 0 || y0 != 0 || x1 != width || y1 != height);
+		bool complete = true;
 
 		var parameters = mipParameters;
 		parameters.SetCombo( DownsampleMethod, 1 );
 		for ( int i = 0; i < copy.Mips - 1; i++ )
 		{
-			var width = Math.Max( 1, (int)viewport.Width >> (i + 1) );
-			var height = Math.Max( 1, (int)viewport.Height >> (i + 1) );
+			width = Math.Max( 1, width >> 1 );
+			height = Math.Max( 1, height >> 1 );
+			if ( partial )
+			{
+				// A changed source texel can affect neighbouring bilinear taps and the four Gaussian
+				// taps on either side. Allow two extra pixels for bilinear sampling and the shift
+				// from odd-sized source levels. Outside the result, the previous mip is still exact.
+				x0 = Math.Max( 0, (x0 >> 1) - 6 );
+				y0 = Math.Max( 0, (y0 >> 1) - 6 );
+				x1 = Math.Min( width, ((x1 + 1) >> 1) + 6 );
+				y1 = Math.Min( height, ((y1 + 1) >> 1) + 6 );
+			}
+			else
+			{
+				x0 = y0 = 0;
+				x1 = width;
+				y1 = height;
+			}
+
 			parameters.Set( MipLevel0, copy, i );
 			parameters.Set( MipLevel1, copy, i + 1 );
 			parameters.Set( TextureSize, new Vector2( width, height ) );
 			parameters.Set( InvTextureSize, new Vector2( 1.0f / width, 1.0f / height ) );
-			parameters.Set( MipRegion, new Vector4( 0, 0, width, height ) );
+			parameters.Set( MipRegion, new Vector4( x0, y0, x1, y1 ) );
 
+			// This mip was just written and will only be read for the rest of the chain and the draws.
+			// Its transition makes those writes visible without a separate global compute barrier.
+			List.Barrier( MipBarrier( copy.Handle, i, ImageLayout.General, ImageLayout.ShaderRead ) );
 			// A thread a texel for downsample_cs; tiled, an 8x8 group a 16x16 tile
-			if ( tiled is not null ) Dispatch( downsample, parameters, (width + 15) / 16 * 8, (height + 15) / 16 * 8, 1 );
-			else Dispatch( downsample, parameters, width, height, 1 );
-			List.Barrier( PipelineStage.ComputeShader, MemoryAccess.ShaderWrite, PipelineStage.ComputeShader, MemoryAccess.ShaderRead | MemoryAccess.ShaderWrite );
+			if ( tiled is not null ) complete &= Dispatch( downsample, parameters, (x1 - x0 + 15) / 16 * 8, (y1 - y0 + 15) / 16 * 8, 1, copy );
+			else Dispatch( downsample, parameters, width, height, 1, copy );
 		}
+
+		if ( complete && canKeepMips ) copy.FrameBufferMipShader = tiled.Shader;
+
+		// Only the final write is still in General. Reunite the layouts before this list leaves the copy to draws.
+		return copy.Mips - 1;
 	}
 
 	/// <summary>

@@ -18,6 +18,7 @@ Mode( Default );
 #if ( PROGRAM == VFX_PROGRAM_CS )
 #include "sbox/view.slangh"
 #include "borealis_records.fxc"
+#include "borealis_lod_fade.fxc"
 
 // The raw buffer array in the bindless set (binding 63): the fragment and draw tables
 #ifndef BINDLESS_VERTEX_BUFFERS_DECLARED
@@ -37,6 +38,9 @@ RWByteAddressBuffer g_Compacted < Attribute( "BorealisCullCompacted" ); >;
 // Generated LODs: the counters of level changes, then the levels views keep, a byte per visibility fragment
 RWByteAddressBuffer g_Levels < Attribute( "BorealisCullLevels" ); >;
 
+// What the culls let through, for the draw counters (Borealis.Backend/CullStats.cs)
+RWByteAddressBuffer g_Stats < Attribute( "BorealisCullStats" ); >;
+
 cbuffer BorealisGpuDrivenCull_t
 {
 	uint g_nCullInput;			// byte offset of the view record, then a batch record each
@@ -55,9 +59,33 @@ cbuffer BorealisGpuDrivenCull_t
 	uint g_nCullListed;			// byte offset of the fragments forward compacts: dispatch arguments, then 32 bytes each
 	uint g_nCullMeshletRuns;		// a prepass that culls meshlets: bindless slot of the meshlet runs (16 bytes per draw record); else None
 	uint g_nCullLodCount;		// draw records the LOD table covers
+	uint g_nCullLodFadeNow;		// this frame's stamp for LOD fades: time in ticks of 1/256 s (bits 0-13) and frame (bits 14-23) (borealis_lod_fade.fxc)
+	uint g_nCullLodFadeTicks;	// how long a LOD fade lasts, in ticks; 0: LODs switch at once
+	uint g_nCullPad0;
+	uint g_nCullPad1;
 };
 
 static const uint None = 0xffffffffu;
+
+// What the culls let through, counted for the draw counters (Borealis.Backend/CullStats.cs): cumulative words in g_Stats, a
+// slot a render system (view flags bits 8-15) and a kind of pass each (shadow; else depth, view flag 32; else forward): batches
+// with a survivor, survivors, then triangles' low and high words
+static const uint StatsSlotBytes = 64;
+
+void CountSurvivors( uint nViewFlags, uint nBatches, uint nSurvivors, uint nTriangles )
+{
+	uint nKind = ( nViewFlags & 1 ) != 0 ? 2 : ( ( nViewFlags >> 5 ) & 1 );
+	uint nAt = ( ( nViewFlags >> 8 ) & 0xff ) * StatsSlotBytes + nKind * 16;
+	uint nOld;
+	g_Stats.InterlockedAdd( nAt, nBatches, nOld );
+	g_Stats.InterlockedAdd( nAt + 4, nSurvivors, nOld );
+	g_Stats.InterlockedAdd( nAt + 8, nTriangles, nOld );
+	if ( nOld + nTriangles < nOld )
+		g_Stats.InterlockedAdd( nAt + 12, 1, nOld );
+}
+
+groupshared uint g_nGroupSurvivors;
+groupshared uint g_nGroupTriangles;
 
 bool Inside( float4 vPlane, float3 vCenter, float3 vExtents )
 {
@@ -342,7 +370,9 @@ uint TakeSlot( uint nRun )
 	uint4 vVisibility = uint4( g_Frame.Load( nBatchAt + BatchRecord_FirstVisibility ), g_Frame.Load( nBatchAt + BatchRecord_Moved ), g_Frame.Load( nBatchAt + BatchRecord_Flags ), g_Frame.Load( nBatchAt + BatchRecord_FirstVertexBit ) );
 	bool bInstances = ( vVisibility.z & 4 ) != 0;
 	bool bMeshes = ( vVisibility.z & 8 ) != 0;
-	uint nBatchLod = ( vVisibility.z >> 4 ) & 15;
+	// Resident meshes: bit 7 means the draw dithers its LOD cross-fades (then below LOD 8)
+	bool bBatchDithers = ( vVisibility.z & 0x88u ) == 0x88u;
+	uint nBatchLod = ( vVisibility.z >> 4 ) & ( bBatchDithers ? 7u : 15u );
 	uint nStride = vVisibility.z >> 8;
 
 	ByteAddressBuffer fragments = g_bindless_VertexBuffers[ g_nCullFragments ];
@@ -354,6 +384,17 @@ uint TakeSlot( uint nRun )
 	{
 		LoadMeshHeader( fragments, vBatch.x * ResidentMeshHeader_Size, vHeader0, vHeader1 );
 	}
+
+	// Counted for the draw counters (view flag 16), but not a mesh draw's instances, which the CPU culled and counts
+	bool bCount = ( vViewFlags.x & 16 ) != 0 && !bInstances;
+	uint nSurvivors = 0;
+	uint nTriangles = 0;
+	if ( nThread == 0 )
+	{
+		g_nGroupSurvivors = 0;
+		g_nGroupTriangles = 0;
+	}
+	GroupMemoryBarrierWithGroupSync();
 
 	for ( uint nBase = 0; nBase < vBatch.y; nBase += 64 )
 	{
@@ -393,8 +434,23 @@ uint TakeSlot( uint nRun )
 				if ( bMeshSize && vCamera.w < 0 && flRadiusSquared < -vCamera.w )
 					bVisible = false;
 
-				bVisible = bVisible && MeshLod( vHeader0, vHeader1, vCenter, asfloat( fragments.Load( nMeshAt + ResidentMeshRecord_LodScale ) ), vLodCamera, flLodWidth, bLodTexels ) == nBatchLod;
+				// Fading in the view that owns LOD fades (flag 64): in its old LOD's batch too, the transform word carrying how
 				nTransform = fragments.Load( nMeshAt + ResidentMeshRecord_Transform );
+				if ( bVisible )
+				{
+					float flLodScale = asfloat( fragments.Load( nMeshAt + ResidentMeshRecord_LodScale ) );
+					uint nLod = MeshLod( vHeader0, vHeader1, vCenter, flLodScale, vLodCamera, flLodWidth, bLodTexels );
+					uint nFade = 0;
+					if ( ( vViewFlags.x & 64 ) != 0 && ( vHeader0.x & 0x10000u ) != 0 )
+					{
+						uint nNear = MeshLod( vHeader0, vHeader1, vCenter, flLodScale, vLodCamera, flLodWidth * ( 1 + LodFadeHysteresis ), bLodTexels );
+						uint nFar = MeshLod( vHeader0, vHeader1, vCenter, flLodScale, vLodCamera, flLodWidth * ( 1 - LodFadeHysteresis ), bLodTexels );
+						bVisible = LodFadeKeep( nTransform, nLod, nNear, nFar, nBatchLod, bBatchDithers, g_nCullLodFadeNow, g_nCullLodFadeTicks, nFade );
+					}
+					else
+						bVisible = nLod == nBatchLod;
+					nTransform |= nFade << 24;
+				}
 				nDrawRecord = ( vBatch.z & 0x80000000u ) != 0 ? fragments.Load( ( vBatch.z & 0x7fffffffu ) * FragmentRecord_Size + i * 4 ) : vBatch.z;
 
 				// A model without LODs of its own: its draw's generated level, as a fragment's
@@ -443,12 +499,20 @@ uint TakeSlot( uint nRun )
 			uint nFragment = vVisibility.x != None ? vVisibility.x + i : None;
 			uint nVertexBase = vVisibility.w != None ? vVisibility.w + i * nStride : None;
 
+			// A fragment the view's tests and filter keep, not one left for the Hi-Z's second phase
+			bool bDeferred = g_nCullRuns != 0 && bVisible && HiZDeferred( vViewFlags, vVisibility, vBoxCenter, vBoxExtents, nTransform, nDrawRecord, vDraw, nVertexBase, nFragment, vBatch.w );
+			if ( bCount && bVisible && !bDeferred )
+			{
+				nSurvivors++;
+				nTriangles += vDraw.y / 3;
+			}
+
 			if ( g_nCullRuns == 0 )
 			{
 				// Without compacting every fragment keeps its slot, with no instance where it's culled
 				WriteDraw( vBatch.w + i, nTransform, nDrawRecord, vDraw.y, bVisible ? 1u : 0u, vDraw.x, vDraw.z );
 			}
-			else if ( bVisible && !HiZDeferred( vViewFlags, vVisibility, vBoxCenter, vBoxExtents, nTransform, nDrawRecord, vDraw, nVertexBase, nFragment, vBatch.w ) )
+			else if ( bVisible && !bDeferred )
 			{
 				// Forward over a fragment the prepass drew ids for this frame: listed for the compaction pass
 				bool bListed = false;
@@ -517,6 +581,16 @@ uint TakeSlot( uint nRun )
 		}
 
 	}
+
+	// The group's survivors: one atomic a batch, in the pass kind and slot the view says
+	if ( nSurvivors > 0 )
+	{
+		InterlockedAdd( g_nGroupSurvivors, nSurvivors );
+		InterlockedAdd( g_nGroupTriangles, nTriangles );
+	}
+	GroupMemoryBarrierWithGroupSync();
+	if ( nThread == 0 && g_nGroupSurvivors > 0 )
+		CountSurvivors( vViewFlags.x, 1, g_nGroupSurvivors, g_nGroupTriangles );
 }
 
 #endif // CS
