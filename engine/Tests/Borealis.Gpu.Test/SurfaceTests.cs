@@ -8,210 +8,16 @@ using Sandbox;
 using Sandbox.BorealisLab.Surfaces;
 using Sandbox.ShaderCompiler;
 using System.IO;
+using static BorealisGpuTests.SurfaceFixtures;
 
 namespace BorealisGpuTests;
 
-/// <summary>
-/// The Slang material tier: Sandbox.ShaderCompiler's source rewrites and reflection, and new-tier materials drawn on
-/// Borealis.Gpu against the same material written as today's .shader. See docs/reference/borealis-slang-materials.md.
-/// </summary>
+/// <summary>New-tier materials drawn on Borealis.Gpu against the same material written as today's .shader.</summary>
 [TestClass]
 [DoNotParallelize]
-public class SurfaceTests : GpuTest
+public class SurfaceTests : RenderGpuTest
 {
 	const int Width = 256, Height = 160;
-
-	static string Core => ContentFiles.FindGame().Roots.FirstOrDefault();
-
-	static string Surfaces => Path.GetFullPath( Path.Combine( Core, "..", "..", "engine", "Launcher", "BorealisLab", "Surfaces" ) );
-
-	/// <summary>
-	/// The engine's Slang over the core shaders, with the backend's disk cache (<see cref="Fixtures.SurfaceCache"/>): a surface
-	/// compiles once until it or anything it reads changes. Tests of compiling itself make compilers of their own.
-	/// </summary>
-	static SlangCompiler Compiler()
-	{
-		if ( Core is null ) Assert.Inconclusive( "No game content" );
-		var bin = EngineFolders.NativeIn( Path.GetDirectoryName( Core ) );
-		if ( !File.Exists( Path.Combine( bin, EngineFolders.Library( "slang" ) ) ) ) Assert.Inconclusive( "The engine's Slang isn't built" );
-		return new SlangCompiler( bin, [Path.Combine( Core, "shaders" )] ) { CacheFolder = Fixtures.SurfaceCache };
-	}
-
-	/// <summary>vfx's include rewrite: static sets become defines, annotations are recorded per variable.</summary>
-	[TestMethod]
-	public void VfxIncludesRewriteSetsAndReadAnnotations()
-	{
-		var annotations = new Dictionary<string, Annotations>();
-		var text = VfxIncludes.Rewrite( "ExternalDescriptorSet g_viewSet Slot 2;\n"
-			+ "float3 FogSunColor < Attribute( \"FogSunColor\" ); Default3( 0.5, 1, 0 ); >;\n"
-			+ "CreateTexture3DWithoutSampler( g_tFogVolume ) : register( t11 ) < Attribute( \"FogVolume\" ); SrgbRead( false ); > ;\n"
-			+ "StructuredBuffer< TransformBufferData_t > g_TransformData  < Attribute( \"g_TransformBuffer\" ); >;\n"
-			+ "SamplerComparisonState ShadowDepthPCFSampler < Filter( COMPARISON_MIN_MAG_MIP_LINEAR ); AddressU( CLAMP ); ComparisonFunc( GREATER_EQUAL ); >;\n"
-			+ "int DDGIEnabled < Attribute( \"DDGI_Enabled\" ); Default( 0 ); SpecializedConstant(); >;\n", annotations );
-
-		Assert.IsTrue( text.StartsWith( "#define g_viewSet 5\n", StringComparison.Ordinal ), text );
-		Assert.AreEqual( "FogSunColor", annotations["FogSunColor"].Attribute );
-		CollectionAssert.AreEqual( new[] { 0.5f, 1, 0 }, annotations["FogSunColor"].Default );
-		Assert.AreEqual( "FogVolume", annotations["g_tFogVolume"].Attribute );
-		Assert.AreEqual( "g_TransformBuffer", annotations["g_TransformData"].Attribute );
-
-		// As vfx compiles them: a specialization constant, so the pipeline folds the branches it guards, and a constant buffer
-		// member of the same name, so the layout matches the compiled shader's
-		StringAssert.Contains( text, $"int DDGIEnabled; [vk::constant_id( {VfxIncludes.SpecializationId( "DDGIEnabled" )} )] const int DDGIEnabled__Spec = 0;\n#define DDGIEnabled DDGIEnabled__Spec" );
-		Assert.AreEqual( "DDGI_Enabled", annotations["DDGIEnabled"].Attribute );
-
-		var sampler = BackendContext.SurfaceSampler( annotations["ShadowDepthPCFSampler"] );
-		Assert.AreEqual( CompareFunction.GreaterEqual, sampler.Compare );
-		Assert.AreEqual( AddressMode.Clamp, sampler.AddressU );
-		Assert.AreEqual( Filter.Linear, sampler.MipFilter );
-	}
-
-	/// <summary>
-	/// A sampler without a filter is native's default sampler state (<c>DefaultSamplerStateDesc</c>): anisotropic and
-	/// wrapped. blendable.shader samples every layer with such a sampler (<c>g_sDefault</c>), so blendable.slang's
-	/// sampler filters anisotropically too, or ground seen at a glancing angle (Construct's grass) blurs along depth.
-	/// </summary>
-	[TestMethod]
-	public void SamplersWithoutAFilterAreAnisotropic()
-	{
-		var annotations = new Dictionary<string, Annotations>();
-		VfxIncludes.Rewrite( "SamplerState Clamped < AddressU( CLAMP ); >;\n"
-			+ "SamplerState Trilinear < Filter( TRILINEAR ); MaxAniso( 8 ); >;\n"
-			+ "SamplerState Aniso < Filter( ANISOTROPIC ); MaxAniso( 8 ); >;\n", annotations );
-
-		Assert.AreEqual( BackendContext.DefaultAnisotropy, BackendContext.SurfaceSampler( null ).MaxAnisotropy );
-		var clamped = BackendContext.SurfaceSampler( annotations["Clamped"] );
-		Assert.AreEqual( BackendContext.DefaultAnisotropy, clamped.MaxAnisotropy );
-		Assert.AreEqual( AddressMode.Clamp, clamped.AddressU );
-		Assert.AreEqual( AddressMode.Wrap, clamped.AddressV );
-		Assert.AreEqual( 1, BackendContext.SurfaceSampler( annotations["Trilinear"] ).MaxAnisotropy );
-		Assert.AreEqual( 8, BackendContext.SurfaceSampler( annotations["Aniso"] ).MaxAnisotropy );
-
-		var blendable = Compiler().CompileSurface( Path.Combine( Core, "shaders", "blendable.slang" ) );
-		var filtering = blendable.Pass( ShaderPasses.Forward ).Pixel.Bindings.First( b => b.Kind == BindingKind.Sampler && b.Variable == "g_BlendableFiltering" );
-		var state = BackendContext.SurfaceSampler( filtering.Annotations );
-		Assert.AreEqual( BackendContext.DefaultAnisotropy, state.MaxAnisotropy );
-		Assert.AreEqual( AddressMode.Wrap, state.AddressU );
-	}
-
-	/// <summary>
-	/// Material.CommonInputs.hlsl's <c>TextureFiltering</c> takes its filter from the material's <c>F_TEXTURE_FILTERING</c>, as
-	/// vfx evaluates annotations with the material's features: anisotropic x8 by default, then bilinear, trilinear, point.
-	/// </summary>
-	[TestMethod]
-	public void TextureFilteringFollowsTheMaterialsFeature()
-	{
-		var annotations = new Dictionary<string, Annotations>();
-		var line = File.ReadAllLines( Path.Combine( Core, "shaders", "common", "utils", "Material.CommonInputs.hlsl" ) ).Single( l => l.Contains( "SamplerState TextureFiltering", StringComparison.Ordinal ) );
-		VfxIncludes.Rewrite( line + "\n", annotations );
-		var filtering = annotations["TextureFiltering"];
-		StringAssert.Contains( filtering.Filter, "F_TEXTURE_FILTERING == 0 ? ANISOTROPIC" );
-
-		SamplerInfo With( int value ) => BackendContext.SurfaceSampler( filtering, name => name == "F_TEXTURE_FILTERING" ? value : null );
-		var anisotropic = BackendContext.SurfaceSampler( filtering );
-		Assert.AreEqual( 8, anisotropic.MaxAnisotropy, "a feature at its default (0) is anisotropic" );
-		Assert.AreEqual( Filter.Linear, anisotropic.MipFilter );
-		Assert.AreEqual( 8, With( 0 ).MaxAnisotropy );
-		Assert.AreEqual( (1f, Filter.Linear, Filter.Nearest), (With( 1 ).MaxAnisotropy, With( 1 ).MinFilter, With( 1 ).MipFilter), "bilinear" );
-		Assert.AreEqual( (1f, Filter.Linear, Filter.Linear), (With( 2 ).MaxAnisotropy, With( 2 ).MinFilter, With( 2 ).MipFilter), "trilinear" );
-		Assert.AreEqual( (Filter.Nearest, Filter.Nearest), (With( 3 ).MinFilter, With( 3 ).MagFilter), "point" );
-		Assert.AreEqual( (Filter.Nearest, Filter.Nearest), (With( 4 ).MinFilter, With( 4 ).MagFilter), "nearest" );
-	}
-
-	/// <summary>
-	/// A shader's own shorthand for annotations (macros a package's expanded includes define, as vfx's preprocessor expands
-	/// them) reads as what it stands for; macros that aren't annotations are left alone.
-	/// </summary>
-	[TestMethod]
-	public void VfxIncludesExpandAnnotationMacros()
-	{
-		var annotations = new Dictionary<string, Annotations>();
-		VfxIncludes.Rewrite( "#define SrgbRead(bArg) string _SrgbRead = #bArg\n"
-			+ "#define SRGB SrgbRead(true)\n"
-			+ "#define Address(arg) AddressU(arg); AddressV(arg); AddressW(arg)\n"
-			+ "#define TINT 3\n"
-			+ "Texture2D Frame < Attribute(\"Frame\"); SRGB; > ;\n"
-			+ "SamplerState S < Filter(BILINEAR); Address(CLAMP); > ;\n", annotations );
-
-		Assert.IsTrue( annotations["Frame"].SrgbRead );
-		Assert.AreEqual( "Frame", annotations["Frame"].Attribute );
-		Assert.AreEqual( "CLAMP", annotations["S"].AddressU );
-		Assert.AreEqual( "CLAMP", annotations["S"].AddressW );
-		Assert.AreEqual( "BILINEAR", annotations["S"].Filter );
-
-		// A module's active lines, read again per compile, have no #defines: the macros come from its whole text
-		var macros = "#define SRGB SrgbRead(true)\n";
-		VfxIncludes.Rewrite( "Texture2D Next < Attribute(\"Next\"); SRGB; > ;\n", annotations, macros );
-		Assert.IsTrue( annotations["Next"].SrgbRead );
-	}
-
-	/// <summary>Texture2D fields of [Material] structs become bindless slots; other Texture2Ds and lines stay.</summary>
-	[TestMethod]
-	public void MaterialStructTexturesBecomeSlots()
-	{
-		var source = "Texture2D Outside;\n[Material]\npublic struct Leaf : ISurface\n{\n\t[Group( \"Color\" ), Srgb] Texture2D Color;\n\tTexture2D<float4> Mask;\n\tfloat3 Tint;\n\tMaterial Evaluate( SurfaceInput i ) { Texture2D t; return {}; }\n}\n";
-		var text = MaterialSource.Rewrite( source, out var materials );
-
-		Assert.AreEqual( 1, materials.Count );
-		Assert.AreEqual( "Leaf", materials[0].Name );
-		CollectionAssert.AreEqual( new[] { "ISurface" }, materials[0].Interfaces );
-		StringAssert.Contains( text, "[Group( \"Color\" ), Srgb] public MaterialTexture2D Color;" );
-		StringAssert.Contains( text, "\tpublic MaterialTexture2D Mask;" );
-		StringAssert.Contains( text, "\tpublic float3 Tint;" );
-		StringAssert.Contains( text, "Texture2D Outside;" );
-		StringAssert.Contains( text, "{ Texture2D t; return {}; }" );
-		Assert.AreEqual( source.Count( c => c == '\n' ), text.Count( c => c == '\n' ) );
-	}
-
-	/// <summary>
-	/// A surface compiles into forward, alpha-tested forward, depth and alpha-tested depth passes; its record is the
-	/// struct in order with textures as four-byte slots; the alpha-tested depth pass reads only what opacity needs.
-	/// </summary>
-	[TestMethod]
-	public void SurfaceCompilesEveryPass()
-	{
-		var rock = Compiler().CompileSurface( Path.Combine( Surfaces, "rock.slang" ) );
-
-		Assert.AreEqual( ShaderTier.Surface, rock.Tier );
-		Assert.AreEqual( 28, rock.Material.Size );
-		CollectionAssert.AreEqual( new[] { "Color@0", "Normal@4", "Rma@8", "Tint@12", "RoughnessScale@24" }, rock.Material.Fields.Select( f => $"{f.Name}@{f.Offset}" ).ToArray() );
-		Assert.IsTrue( rock.Material.Field( "Color" ).Srgb );
-		Assert.AreEqual( 2f, rock.Material.Field( "RoughnessScale" ).Max );
-
-		Assert.IsNull( rock.Pass( ShaderPasses.Depth ).Pixel );
-		var forward = rock.Pass( ShaderPasses.Forward ).Pixel;
-
-		// Opaque depth's vertex stage reads the position alone (and the instance id), so it can draw from positions-only
-		// vertices; translucent forward compiles with S_TRANSLUCENT, which keeps opacity in alpha
-		var depthInputs = rock.Pass( ShaderPasses.Depth ).Vertex.Inputs.Select( i => i.Semantic + i.SemanticIndex ).ToArray();
-		Assert.IsTrue( depthInputs.All( i => i is "POSITION0" or "TEXCOORD13" or "BLENDINDICES0" ), string.Join( ", ", depthInputs ) );
-		Assert.IsTrue( rock.Pass( ShaderPasses.Forward ).Vertex.Inputs.Any( i => i.Semantic == "NORMAL" ) );
-		Assert.IsNotNull( rock.Pass( ShaderPasses.Forward + "Translucent" )?.Pixel );
-		Assert.IsTrue( forward.Bindings.Any( b => b.Kind == BindingKind.MaterialRecords && b.Set == 1 ) );
-		Assert.IsTrue( forward.Bindings.Any( b => b.Variable == "g_MaterialTextures2D" && b.Set == 4 && b.Binding == ShaderAbi.BindlessTextures ) );
-		Assert.IsTrue( forward.Bindings.Any( b => b.Name == "PerViewConstantBuffer_t" && b.Kind == BindingKind.ConstantBuffer && b.Size > 0 ) );
-		Assert.IsTrue( forward.Bindings.All( b => b.Set is 1 or ShaderAbi.BindlessSet or ShaderAbi.ViewSet ) );
-
-		// Per-view lighting and fog come from the view set, as the core shaders read them
-		Assert.IsTrue( forward.Bindings.Any( b => b.Set == ShaderAbi.ViewSet && b.Name == ShaderAbi.ViewEnvironment ) );
-		Assert.IsTrue( forward.Specializations.Any( s => s.Attribute == "ShadowFilterQuality" ) );
-		Assert.IsTrue( forward.Globals.Members.Any( m => m.Name == "UserShadowFilterQuality" ), "the specialization constant keeps its member, as vfx does" );
-		Assert.IsTrue( rock.Pass( ShaderPasses.Forward ).Vertex.Bindings.All( b => b.Set is 0 or ShaderAbi.BindlessSet or ShaderAbi.ViewSet ) );
-
-		// Alpha-tested passes compile with today's alpha test (S_ALPHA_TEST: its cutoff and edge strength are globals), the
-		// depth one in Depth mode as well (S_MODE_DEPTH), where Shade returns the coverage before lighting
-		var alphaTested = rock.Pass( ShaderPasses.Forward + "AlphaTest" ).Pixel;
-		Assert.IsTrue( alphaTested.Globals.Members.Any( m => m.Name == "g_flAlphaTestReference" ) );
-		Assert.IsFalse( forward.Globals.Members.Any( m => m.Name == "g_flAlphaTestReference" ) );
-		var depth = rock.Pass( ShaderPasses.DepthAlphaTest ).Pixel;
-		Assert.IsTrue( depth.Globals.Members.Any( m => m.Name == "g_flAlphaTestReference" ) );
-		StringAssert.Contains( rock.Generated, "SurfaceForward<Rock, true>( i.Pixel, m, m.Color.Slot )" );
-
-		// Material textures are read with the module's sampler, its state from its annotations
-		var sampler = forward.Bindings.Single( b => b.Kind == BindingKind.Sampler && b.Variable == "g_MaterialFiltering" );
-		Assert.AreEqual( "ANISOTROPIC", sampler.Annotations?.Filter );
-		Assert.IsFalse( rock.Generated.Contains( "SURFACE_LIGHT_HOOK", StringComparison.Ordinal ) );
-	}
 
 	/// <summary>
 	/// A program guesses the parts of the passes its materials noted (SurfaceShaders.NoteMaterial), not every pass it has:
@@ -237,24 +43,6 @@ public class SurfaceTests : GpuTest
 		var both = Names( SurfacePassNotes.Of( opaque, SurfaceDrawKinds.Static ) | SurfacePassNotes.Of( opaque with { AlphaTest = true }, SurfaceDrawKinds.Skinned ), true );
 		Assert.AreEqual( 4, both.Length, string.Join( ", ", both ) );
 		Assert.IsFalse( both.Any( n => n.Contains( "AlphaTestGpuDriven", StringComparison.Ordinal ) ), "an opaque static material and an alpha-tested skinned one make no alpha-tested GPU-driven guesses" );
-	}
-
-	/// <summary>
-	/// An interpolated surface (blendable.slang) reads its Varyings from the mesh by semantic and passes them to the pixel
-	/// stage; its fields say which .vmat value they take.
-	/// </summary>
-	[TestMethod]
-	public void InterpolatedSurfaceReadsItsVaryings()
-	{
-		var blendable = Compiler().CompileSurface( Path.Combine( Core, "shaders", "blendable.slang" ) );
-		var inputs = blendable.Pass( ShaderPasses.Forward ).Vertex.Inputs;
-		Assert.IsTrue( inputs.Any( i => i.Semantic == "TEXCOORD" && i.SemanticIndex == 4 && i.Components == 4 ) );
-		Assert.IsTrue( inputs.Any( i => i.Semantic == "TEXCOORD" && i.SemanticIndex == 5 && i.Components == 4 ) );
-		StringAssert.Contains( blendable.Generated, "SurfaceWithVaryings<Blendable>" );
-		Assert.AreEqual( "F_MULTIBLEND", blendable.Material.Field( "ExtraLayers" ).Source );
-		Assert.AreEqual( "ShaderVersion", blendable.Material.Field( "Version" ).Source );
-		Assert.IsNull( blendable.Material.Field( "ColorA" ).Source );
-		Assert.IsTrue( blendable.Pass( ShaderPasses.Forward ).Pixel.Bindings.Any( b => b.Kind == BindingKind.Sampler && b.Variable == "g_BlendableFiltering" ) );
 	}
 
 	/// <summary>
@@ -407,273 +195,6 @@ public class SurfaceTests : GpuTest
 		}
 	}
 
-	/// <summary>
-	/// Every pass comes again for lightmapped draws, with the vertex stage that reads the mesh's lightmap uv (TEXCOORD3);
-	/// the plain one doesn't read it.
-	/// </summary>
-	[TestMethod]
-	public void LightmappedPassesReadTheLightmapUv()
-	{
-		var rock = Compiler().CompileSurface( Path.Combine( Surfaces, "rock.slang" ) );
-		static bool ReadsLightmapUv( CompiledStage vertex ) => vertex.Inputs.Any( i => i.Semantic == "TEXCOORD" && i.SemanticIndex == 3 );
-
-		// Opaque depth reads the position alone, lightmapped or not
-		Assert.AreSame( rock.Pass( ShaderPasses.Depth ).Vertex, rock.Pass( ShaderPasses.Depth + ShaderPasses.Lightmapped ).Vertex );
-		foreach ( var name in new[] { ShaderPasses.Forward, ShaderPasses.Forward + "AlphaTest", ShaderPasses.Forward + "Translucent", ShaderPasses.DepthAlphaTest } )
-		{
-			var plain = rock.Pass( name );
-			var lightmapped = rock.Pass( name + ShaderPasses.Lightmapped );
-			Assert.IsFalse( ReadsLightmapUv( plain.Vertex ), name );
-			Assert.IsTrue( ReadsLightmapUv( lightmapped.Vertex ), name + ShaderPasses.Lightmapped );
-			Assert.AreSame( plain.Pixel, lightmapped.Pixel, "the pixel stage is shared" );
-		}
-	}
-
-	/// <summary>
-	/// Every pass also comes GPU-driven, the translucent forward pass too: its vertex stage pulls its vertices (no vertex
-	/// inputs), and neither stage reads the classic records' buffer.
-	/// </summary>
-	[TestMethod]
-	public void SurfacesHaveGpuDrivenPasses()
-	{
-		foreach ( var path in new[] { Path.Combine( Surfaces, "rock.slang" ), Path.Combine( Core, "shaders", "foliage.slang" ), Path.Combine( Core, "shaders", "blendable.slang" ) } )
-		{
-			var surface = Compiler().CompileSurface( path );
-			Assert.IsNull( surface.GpuDrivenError, surface.GpuDrivenError );
-			foreach ( var name in new[] { ShaderPasses.Forward, ShaderPasses.Forward + "AlphaTest", ShaderPasses.Forward + "Translucent", ShaderPasses.Depth, ShaderPasses.DepthAlphaTest } )
-			{
-				foreach ( var suffix in new[] { ShaderPasses.GpuDriven, ShaderPasses.GpuDriven + ShaderPasses.Lightmapped } )
-				{
-					var pass = surface.Pass( name + suffix );
-					Assert.IsNotNull( pass, $"{Path.GetFileName( path )} {name}{suffix}" );
-					Assert.AreEqual( 0, pass.Vertex.Inputs.Count, $"{name}{suffix} reads vertex inputs" );
-					foreach ( var stage in new[] { pass.Vertex, pass.Pixel } )
-						Assert.IsFalse( stage is not null && stage.Bindings.Any( b => b.Kind == BindingKind.MaterialRecords ), $"{name}{suffix} reads the classic records" );
-				}
-			}
-		}
-	}
-
-	/// <summary>
-	/// The disk cache: a second compile of an unchanged module comes from it with the same SPIR-V; a change to the module
-	/// (or anything it read) compiles again.
-	/// </summary>
-	[TestMethod]
-	[TestCategory( "Slow" )]
-	public void CompileCacheKeepsUnchangedModules()
-	{
-		Compiler();
-		var folder = Path.Combine( Path.GetTempPath(), "borealis-surface-cache-test-" + Guid.NewGuid().ToString( "N" ) );
-		Directory.CreateDirectory( folder );
-		try
-		{
-			var module = Path.Combine( folder, "cached_rock.slang" );
-			File.WriteAllText( module, File.ReadAllText( Path.Combine( Surfaces, "rock.slang" ) ).Replace( "public struct Rock", "public struct CachedRock", StringComparison.Ordinal ) );
-			var bin = EngineFolders.NativeIn( Path.GetDirectoryName( Core ) );
-			var compiler = new SlangCompiler( bin, [Path.Combine( Core, "shaders" )] ) { CacheFolder = Path.Combine( folder, "cache" ) };
-
-			var first = compiler.CompileSurface( module );
-			var second = compiler.CompileSurface( module );
-			Assert.IsFalse( first.FromCache );
-			Assert.IsTrue( second.FromCache );
-			Assert.IsTrue( first.Dependencies.Any( d => d.EndsWith( "lighting.slangh", StringComparison.OrdinalIgnoreCase ) ), "the core includes are dependencies" );
-			CollectionAssert.AreEquivalent( first.Passes.Keys.ToArray(), second.Passes.Keys.ToArray() );
-			foreach ( var (name, pass) in first.Passes )
-			{
-				CollectionAssert.AreEqual( pass.Vertex.Spirv, second.Pass( name ).Vertex.Spirv, name );
-				if ( pass.Pixel is not null ) CollectionAssert.AreEqual( pass.Pixel.Spirv, second.Pass( name ).Pixel.Spirv, name );
-			}
-
-			Assert.AreSame( second.Pass( ShaderPasses.Forward ).Pixel, second.Pass( ShaderPasses.Forward + ShaderPasses.Lightmapped ).Pixel, "shared stages stay shared" );
-			Assert.AreEqual( first.Material.Size, second.Material.Size );
-
-			File.AppendAllText( module, "\n// changed\n" );
-			Assert.IsFalse( compiler.CompileSurface( module ).FromCache, "a changed module compiles again" );
-		}
-		finally
-		{
-			Directory.Delete( folder, true );
-		}
-	}
-
-	/// <summary>
-	/// The caches are keyed on what a compile reads and the compiler's <see cref="SlangCompiler.Version"/>, not on this
-	/// assembly's build: an engine build, or a Debug build beside a Release one, keeps them.
-	/// </summary>
-	[TestMethod]
-	public void CacheKeyIsNotTheAssemblysBuild()
-	{
-		var bin = EngineFolders.NativeIn( Path.GetDirectoryName( Core ) );
-		var identity = CompileCache.Identity( bin );
-		StringAssert.StartsWith( identity, $"{SlangCompiler.Version}:" );
-		Assert.IsFalse( identity.Contains( typeof( SlangCompiler ).Assembly.ManifestModule.ModuleVersionId.ToString(), StringComparison.OrdinalIgnoreCase ) );
-	}
-
-	/// <summary>
-	/// What the compiler generates for fixed inputs is as it was when <see cref="SlangCompiler.Version"/> was last raised: a
-	/// change to it must raise the version, or caches would keep shaders compiled the old way.
-	/// </summary>
-	[TestMethod]
-	public void GeneratedCodeNeedsAVersion()
-	{
-		var fingerprint = SlangCompiler.Fingerprint();
-		Assert.AreEqual( SlangCompiler.GeneratedFingerprint, fingerprint, $"What SlangCompiler generates changed: raise SlangCompiler.Version and set GeneratedFingerprint to \"{fingerprint}\"" );
-	}
-
-	/// <summary>
-	/// Surfaces compiled at once from several threads (their stages on the compile threads together) come out as each does
-	/// alone.
-	/// </summary>
-	[TestMethod]
-	[TestCategory( "Slow" )]
-	public void ParallelCompilesMatchSerialOnes()
-	{
-		Compiler();
-		var bin = EngineFolders.NativeIn( Path.GetDirectoryName( Core ) );
-		var files = new[] { Path.Combine( Surfaces, "rock.slang" ), Path.Combine( Core, "shaders", "glass.slang" ), Path.Combine( Surfaces, "rock_raw.slang" ) };
-		var compiler = new SlangCompiler( bin, [Path.Combine( Core, "shaders" )] );
-		CompiledShader Compile( string file ) => file.EndsWith( "_raw.slang", StringComparison.Ordinal ) ? compiler.CompileRaw( file ) : compiler.CompileSurface( file );
-		var alone = files.Select( Compile ).ToArray();
-		var together = files.AsParallel().AsOrdered().WithDegreeOfParallelism( files.Length ).Select( Compile ).ToArray();
-		for ( int i = 0; i < files.Length; i++ )
-		{
-			CollectionAssert.AreEquivalent( alone[i].Passes.Keys.ToArray(), together[i].Passes.Keys.ToArray(), files[i] );
-			foreach ( var (name, pass) in alone[i].Passes )
-			{
-				CollectionAssert.AreEqual( pass.Vertex.Spirv, together[i].Pass( name ).Vertex.Spirv, $"{files[i]} {name}" );
-				if ( pass.Pixel is not null ) CollectionAssert.AreEqual( pass.Pixel.Spirv, together[i].Pass( name ).Pixel.Spirv, $"{files[i]} {name}" );
-			}
-
-			CollectionAssert.AreEqual( alone[i].Dependencies.ToArray(), together[i].Dependencies.ToArray(), files[i] );
-		}
-	}
-
-	/// <summary>
-	/// The alpha-tested depth pass writes nothing but coverage: it skips the decals (which don't change opacity), for the
-	/// plain shading model and the final combiner alike, so neither reads the decal buffer.
-	/// </summary>
-	[TestMethod]
-	public void AlphaTestedDepthSkipsDecals()
-	{
-		var compiler = Compiler();
-		var rock = compiler.CompileSurface( Path.Combine( Surfaces, "rock.slang" ) );
-		var standard = compiler.CompileSurface( Path.Combine( Core, "shaders", "standard.slang" ) );
-		foreach ( var (name, shader) in new[] { ("rock", rock), ("standard", standard) } )
-		{
-			Assert.IsTrue( shader.Pass( ShaderPasses.Forward ).Pixel.Bindings.Any( b => b.Variable == "DecalBuffer" ), $"{name} forward applies decals" );
-			Assert.IsFalse( shader.Pass( ShaderPasses.DepthAlphaTest ).Pixel.Bindings.Any( b => b.Variable == "DecalBuffer" ), $"{name} depth" );
-			Assert.IsFalse( shader.Pass( ShaderPasses.DepthAlphaTest + ShaderPasses.GpuDriven ).Pixel.Bindings.Any( b => b.Variable == "DecalBuffer" ), $"{name} GPU-driven depth" );
-		}
-	}
-
-	/// <summary>
-	/// vfx's spirv-opt recipe runs over what Slang emits (SpirvOptimizer): code after a constant return is gone, and so is
-	/// the binding only it read, as a .shader's compile drops it.
-	/// </summary>
-	[TestMethod]
-	public void OptimizerStripsDeadCodeAndItsBindings()
-	{
-		Compiler();
-		var bin = EngineFolders.NativeIn( Path.GetDirectoryName( Core ) );
-		if ( !SpirvOptimizer.Available( bin ) ) Assert.Inconclusive( "spirv_optimizer isn't built" );
-
-		var folder = Path.Combine( Path.GetTempPath(), "borealis-optimizer-test-" + Guid.NewGuid().ToString( "N" ) );
-		Directory.CreateDirectory( folder );
-		try
-		{
-			var path = Path.Combine( folder, "dead_binding.slang" );
-			File.WriteAllText( path, """
-				// MODES: Default();
-				#include "sbox/pass.slangh"
-				#include "system.fxc"
-				#include "common.fxc"
-
-				struct PS_INPUT { float4 vPositionSs : SV_Position; };
-
-				#if ( PROGRAM == VFX_PROGRAM_PS )
-				Texture2D g_tLive < Attribute( "Live" ); >;
-				Texture2D g_tDead < Attribute( "Dead" ); >;
-				static const bool kEarly = true;
-
-				[shader( "pixel" )] float4 MainPs( PS_INPUT i ) : SV_Target0
-				{
-					float4 color = g_tLive.Load( int3( i.vPositionSs.xy, 0 ) );
-					if ( kEarly ) return color;
-					return color + g_tDead.Load( int3( i.vPositionSs.xy, 0 ) );
-				}
-				#endif
-				""" );
-
-			var compiler = new SlangCompiler( bin, [Path.Combine( Core, "shaders" )] );
-			var stage = compiler.CompilePass( PassModule.Read( path, [Path.Combine( Core, "shaders" )] ), StageKind.Pixel, new Dictionary<string, int>() ).Stage;
-			Assert.IsTrue( stage.Bindings.Any( b => b.Variable == "g_tLive" ) );
-			Assert.IsFalse( stage.Bindings.Any( b => b.Variable == "g_tDead" ), "the binding only dead code read is stripped" );
-		}
-		finally
-		{
-			Directory.Delete( folder, true );
-		}
-	}
-
-	/// <summary>
-	/// The converter turns pixel.hlsl-style .shaders into surfaces that compile: the template (Material::Init), bark (a test
-	/// copy in Data: the game no longer has it)
-	/// (Material.CommonInputs, a helper, a feature global, and its vertex sway as Displace with trunk_bending.hlsl's
-	/// functions copied) and water_simple (engine-bound textures as module globals, a helper taking the input, and the
-	/// refraction after shading as Composite).
-	/// </summary>
-	[TestMethod]
-	[TestCategory( "Slow" )]
-	public void ConverterTurnsPixelShadersIntoSurfaces()
-	{
-		Compiler();
-		var game = Path.GetDirectoryName( Core );
-		var folder = Path.Combine( Path.GetTempPath(), "borealis-surface-convert-test-" + Guid.NewGuid().ToString( "N" ) );
-		Directory.CreateDirectory( folder );
-		try
-		{
-			var bin = EngineFolders.NativeIn( game );
-			var shaders = Path.Combine( Core, "shaders" );
-			var compiler = new SlangCompiler( bin, [shaders] );
-			string Include( string path ) => File.Exists( Path.Combine( shaders, path ) ) ? File.ReadAllText( Path.Combine( shaders, path ) ) : null;
-			foreach ( var (relative, name) in new[] { (Path.Combine( AppContext.BaseDirectory, "Data", "material.shader" ), "material"), (Path.Combine( AppContext.BaseDirectory, "Data", "bark.shader" ), "bark"), (Path.Combine( AppContext.BaseDirectory, "Data", "water_simple.shader" ), "water_simple") } )
-			{
-				var result = ShaderConverter.Convert( File.ReadAllText( Path.Combine( game, relative ) ), name, Include );
-				Assert.IsNotNull( result.Source, name );
-				var path = Path.Combine( folder, name + ".slang" );
-				File.WriteAllText( path, result.Source );
-				var compiled = compiler.CompileSurface( path );
-				Assert.IsNotNull( compiled.Pass( ShaderPasses.Forward ), name );
-				if ( name == "bark" )
-				{
-					StringAssert.Contains( result.Source, "IVertexSurface" );
-					StringAssert.Contains( result.Source, "public float3 Displace( VertexSurfaceInput v )" );
-					Assert.IsFalse( result.Notes.Any( n => n.Contains( "vertex shader", StringComparison.Ordinal ) ), string.Join( "; ", result.Notes ) );
-					Assert.IsTrue( compiled.Generated.Contains( "SurfaceVertexDisplaced", StringComparison.Ordinal ) );
-					Assert.IsNotNull( compiled.Material.Field( "SpecularOcclusion" ) );
-					Assert.IsNotNull( compiled.Material.Field( "Color" ) );
-				}
-
-				if ( name == "water_simple" )
-				{
-					StringAssert.Contains( result.Source, "ICompositeSurface" );
-					Assert.IsTrue( compiled.Generated.Contains( "SurfaceForwardComposite", StringComparison.Ordinal ) );
-
-					// The refraction and reflection textures are bound by attribute, not material fields
-					var forward = compiled.Pass( ShaderPasses.Forward ).Pixel;
-					Assert.IsTrue( forward.Bindings.Any( b => b.Name == "RefractionTexture" ), "no RefractionTexture binding" );
-					Assert.IsTrue( forward.Bindings.Any( b => b.Name == "ReflectionTexture" ), "no ReflectionTexture binding" );
-					Assert.IsNull( compiled.Material.Field( "RefractionTexture" ) );
-					Assert.IsNotNull( compiled.Material.Field( "BigWaveScale" ) );
-				}
-			}
-		}
-		finally
-		{
-			Directory.Delete( folder, true );
-		}
-	}
-
 	/// <summary>Hotload: changing a surface's module drops its program, and the next compile is a fresh one.</summary>
 	[TestMethod]
 	[TestCategory( "Slow" )]
@@ -751,127 +272,6 @@ public class SurfaceTests : GpuTest
 		}
 		finally
 		{
-			Directory.Delete( folder, true );
-		}
-	}
-
-	/// <summary>
-	/// A pass module keeps what it read from its preprocessed lines (<see cref="PassModule.DerivedCacheFolder"/>): the next
-	/// run's module reads the same entry and render states without preprocessing, and one whose include was edited
-	/// preprocesses again. Before, every run preprocessed each module once per combo values.
-	/// </summary>
-	[TestMethod]
-	[DoNotParallelize]
-	public void PassModuleKeepsItsReadsBetweenRuns()
-	{
-		var folder = Path.Combine( Path.GetTempPath(), "borealis-pass-derived-test-" + Guid.NewGuid().ToString( "N" ) );
-		Directory.CreateDirectory( folder );
-		var interval = PassModule.IncludeCheckMs;
-		PassModule.IncludeCheckMs = 0;
-		try
-		{
-			var include = Path.Combine( folder, "states.slangh" );
-			File.WriteAllText( include, "RenderState( DepthBias, 4 );\n" );
-			var path = Path.Combine( folder, "kept.slang" );
-			var text = "#include \"states.slangh\"\n[shader( \"pixel\" )] float4 MainPs() : SV_Target0 { return 1; }\n";
-			var cache = Path.Combine( folder, "derived" );
-			PassModule Run()
-			{
-				var module = PassModule.FromText( path, text, [folder] );
-				module.DerivedCacheFolder = cache;
-				return module;
-			}
-
-			var values = new Dictionary<string, int>();
-			var first = Run();
-			CollectionAssert.AreEqual( new[] { ("DepthBias", "4") }, first.RenderStates( values ).ToArray() );
-			Assert.IsTrue( first.Has( StageKind.Pixel, values ) );
-			first.SaveDerived();
-
-			var before = PassModule.Preprocesses;
-			var second = Run();
-			CollectionAssert.AreEqual( new[] { ("DepthBias", "4") }, second.RenderStates( values ).ToArray(), "the kept render states" );
-			Assert.IsTrue( second.Has( StageKind.Pixel, values ), "the kept entry" );
-			Assert.AreEqual( before, PassModule.Preprocesses, "read, not preprocessed" );
-
-			// Edited within the file system's clock tick: the same time, a different length
-			var written = File.GetLastWriteTimeUtc( include );
-			File.WriteAllText( include, "RenderState( DepthBias, 16 );\n// longer\n" );
-			File.SetLastWriteTimeUtc( include, written );
-			CollectionAssert.AreEqual( new[] { ("DepthBias", "16") }, Run().RenderStates( values ).ToArray(), "an edited include preprocesses again" );
-		}
-		finally
-		{
-			PassModule.IncludeCheckMs = interval;
-			Directory.Delete( folder, true );
-		}
-	}
-
-	/// <summary>
-	/// A pass module keeps what it preprocessed per combo values only while the includes it read are unchanged: an edited
-	/// include's render states are read again (hotload), once its check interval has passed (none here).
-	/// </summary>
-	[TestMethod]
-	[DoNotParallelize]
-	public void PassModuleRereadsAnEditedInclude()
-	{
-		var folder = Path.Combine( Path.GetTempPath(), "borealis-pass-include-test-" + Guid.NewGuid().ToString( "N" ) );
-		Directory.CreateDirectory( folder );
-		var interval = PassModule.IncludeCheckMs;
-		PassModule.IncludeCheckMs = 0;
-		try
-		{
-			var include = Path.Combine( folder, "states.slangh" );
-			File.WriteAllText( include, "RenderState( DepthBias, 4 );\n" );
-			var path = Path.Combine( folder, "edited.slang" );
-			var module = PassModule.FromText( path, "#include \"states.slangh\"\n[shader( \"pixel\" )] float4 MainPs() : SV_Target0 { return 1; }\n", [folder] );
-			var values = new Dictionary<string, int>();
-			CollectionAssert.AreEqual( new[] { ("DepthBias", "4") }, module.RenderStates( values ).ToArray() );
-			CollectionAssert.AreEqual( new[] { ("DepthBias", "4") }, module.RenderStates( values ).ToArray(), "kept" );
-
-			// Edited within the file system's clock tick (a write takes the clock's last tick as its time): the same time, a
-			// different length
-			var written = File.GetLastWriteTimeUtc( include );
-			File.WriteAllText( include, "RenderState( DepthBias, 16 );\n// longer\n" );
-			File.SetLastWriteTimeUtc( include, written );
-			CollectionAssert.AreEqual( new[] { ("DepthBias", "16") }, module.RenderStates( values ).ToArray(), "the edited include is read again" );
-		}
-		finally
-		{
-			PassModule.IncludeCheckMs = interval;
-			Directory.Delete( folder, true );
-		}
-	}
-
-	/// <summary>
-	/// A cache check trusts a file's last look for <see cref="PassModule.IncludeCheckMs"/>: a variant's stages each check every
-	/// include their compile read, and a map's first frame spent ~100 ms asking the file system. A watcher's change
-	/// (<see cref="SlangCompiler.SourceChanged"/>) looks again at once.
-	/// </summary>
-	[TestMethod]
-	[DoNotParallelize]
-	public void FileHashLooksAtAFileOncePerInterval()
-	{
-		var folder = Path.Combine( Path.GetTempPath(), "borealis-file-hash-test-" + Guid.NewGuid().ToString( "N" ) );
-		Directory.CreateDirectory( folder );
-		var interval = PassModule.IncludeCheckMs;
-		PassModule.IncludeCheckMs = 60_000;
-		try
-		{
-			var include = Path.Combine( folder, "looked.slangh" );
-			File.WriteAllText( include, "// one\n" );
-			var first = PassCache.FileHash( include );
-			var looks = PassCache.Looks;
-			for ( int i = 0; i < 100; i++ ) Assert.AreEqual( first, PassCache.FileHash( include ) );
-			Assert.AreEqual( looks, PassCache.Looks, "asked again within the interval" );
-
-			File.WriteAllText( include, "// two, longer\n" );
-			SlangCompiler.SourceChanged();
-			Assert.AreNotEqual( first, PassCache.FileHash( include ), "a watched change is read at once" );
-		}
-		finally
-		{
-			PassModule.IncludeCheckMs = interval;
 			Directory.Delete( folder, true );
 		}
 	}
@@ -1005,135 +405,6 @@ public class SurfaceTests : GpuTest
 		}
 	}
 
-	/// <summary>A stage no draw asked for in <see cref="PassModules.KeptRuns"/> runs is dropped; a malformed line is skipped.</summary>
-	[TestMethod]
-	public void KeptStagesAgeOut()
-	{
-		var path = Path.Combine( Path.GetTempPath(), "borealis-stages-test-" + Guid.NewGuid().ToString( "N" ) + ".txt" );
-		try
-		{
-			var last = 20;
-			var stages = new Dictionary<string, int>
-			{
-				["C:/a.slang\tPixel\tD_X=1;S_MODE_DEPTH=0"] = last,
-				["C:/b.slang\tCompute\t"] = last - PassModules.KeptRuns + 1,
-				["C:/old.slang\tVertex\tS_MODE_DEPTH=1"] = last - PassModules.KeptRuns,
-			};
-			File.WriteAllText( path, PassModules.WriteStages( last, stages ) + "garbage line\n" );
-
-			var ahead = PassModules.ReadStages( path, out var run, out var version, out var kept );
-			Assert.AreEqual( last + 1, run );
-			Assert.AreEqual( SlangCompiler.Version, version );
-			CollectionAssert.AreEquivalent( new[] { "C:/a.slang", "C:/b.slang" }, ahead.Select( a => a.Path ).ToArray() );
-			var pixel = ahead.Single( a => a.Path == "C:/a.slang" );
-			Assert.AreEqual( StageKind.Pixel, pixel.Kind );
-			Assert.AreEqual( 1, pixel.Values["D_X"] );
-			Assert.AreEqual( 0, pixel.Values["S_MODE_DEPTH"] );
-			Assert.AreEqual( 0, ahead.Single( a => a.Path == "C:/b.slang" ).Values.Count );
-			Assert.AreEqual( 2, kept.Count );
-
-			Assert.AreEqual( 0, PassModules.ReadStages( path + ".missing", out run, out _, out _ ).Count );
-			Assert.AreEqual( 0, run );
-		}
-		finally
-		{
-			File.Delete( path );
-		}
-	}
-
-	/// <summary>
-	/// Offline compiles (<see cref="SlangOutput"/>): a surface and a pass module compiled offline are read, not compiled, by
-	/// another compiler with an empty cache, the same SPIR-V, wherever the files they read are; not with offline compiles
-	/// off, nor once the source changes. An unchanged source isn't compiled offline again.
-	/// </summary>
-	[TestMethod]
-	[TestCategory( "Slow" )]
-	public void OfflineCompilesServeTheGame()
-	{
-		Compiler();
-		var folder = Path.Combine( Path.GetTempPath(), "borealis-offline-test-" + Guid.NewGuid().ToString( "N" ) );
-		Directory.CreateDirectory( folder );
-		try
-		{
-			var bin = EngineFolders.NativeIn( Path.GetDirectoryName( Core ) );
-			var shaders = Path.Combine( Core, "shaders" );
-			var module = Path.Combine( folder, "offline_rock.slang" );
-			File.WriteAllText( module, File.ReadAllText( Path.Combine( Surfaces, "rock.slang" ) ).Replace( "public struct Rock", "public struct OfflineRock", StringComparison.Ordinal ) );
-			var pass = PassModule.Read( Path.Combine( shaders, "depthresolve.slang" ), [shaders] );
-			var log = new List<string>();
-			var offline = new SlangCompiler( bin, [folder, shaders] ) { CacheFolder = Path.Combine( folder, "cache1" ), UseOffline = false };
-			Assert.AreEqual( OfflineResult.Compiled, offline.CompileOfflineAsync( module, log: log.Add ).GetAwaiter().GetResult(), string.Join( "\n", log ) );
-			Assert.AreEqual( OfflineResult.Compiled, offline.CompileOfflineAsync( pass.Path, Path.Combine( folder, "depthresolve.slang_c" ), log.Add ).GetAwaiter().GetResult(), string.Join( "\n", log ) );
-			Assert.AreEqual( OfflineResult.UpToDate, offline.CompileOfflineAsync( module ).GetAwaiter().GetResult() );
-			Assert.IsTrue( File.Exists( SlangOutput.PathOf( module ) ) );
-
-			var compiled = offline.CompileSurface( module );
-			var compiling = new List<string>();
-			var game = new SlangCompiler( bin, [folder, shaders] ) { CacheFolder = Path.Combine( folder, "cache2" ), Compiling = compiling.Add };
-			var read = game.CompileSurface( module );
-			Assert.IsTrue( read.Offline, "the surface came from its offline compile" );
-			foreach ( var (name, p) in compiled.Passes )
-			{
-				CollectionAssert.AreEqual( p.Vertex.Spirv, read.Pass( name ).Vertex.Spirv, name );
-				if ( p.Pixel is not null ) CollectionAssert.AreEqual( p.Pixel.Spirv, read.Pass( name ).Pixel.Spirv, name );
-			}
-
-			Assert.IsTrue( read.Dependencies.Any( d => d.EndsWith( "lighting.slangh", StringComparison.OrdinalIgnoreCase ) ), "the files it read, found again" );
-			var values = pass.Combos( StageKind.Pixel ).ToDictionary( c => c.Name, c => c.Min );
-			Assert.IsTrue( game.CompilePass( pass, StageKind.Pixel, values ).Offline, "the pass stage came from its offline compile" );
-			Assert.AreEqual( 0, compiling.Count, string.Join( "; ", compiling ) );
-
-			var off = new SlangCompiler( bin, [folder, shaders] ) { CacheFolder = Path.Combine( folder, "cache3" ), UseOffline = false };
-			Assert.IsFalse( off.CompileSurface( module ).Offline );
-
-			File.AppendAllText( module, "\n// changed\n" );
-			var changed = new SlangCompiler( bin, [folder, shaders] ) { CacheFolder = Path.Combine( folder, "cache4" ), Compiling = compiling.Add };
-			Assert.IsFalse( changed.CompileSurface( module ).Offline, "a changed module compiles again" );
-			Assert.AreEqual( 1, compiling.Count, "and says so" );
-			Assert.AreEqual( OfflineResult.Compiled, offline.CompileOfflineAsync( module ).GetAwaiter().GetResult() );
-		}
-		finally
-		{
-			Directory.Delete( folder, true );
-		}
-	}
-
-	/// <summary>A lit surface turns on the light loop's hook and hands it the material; an unlit one leaves the loop alone.</summary>
-	[TestMethod]
-	public void LitSurfaceHooksTheLightLoop()
-	{
-		var lit = Compiler().CompileSurface( Path.Combine( Surfaces, "rock_lit.slang" ) );
-		StringAssert.Contains( lit.Generated, "#define SURFACE_LIGHT_HOOK 1" );
-		StringAssert.Contains( lit.Generated, "s_LitSurface = m;" );
-		StringAssert.Contains( lit.Generated, "s_LitSurface.Light( SurfaceLitMaterial(), SurfaceLitInput(), light )" );
-		Assert.IsNotNull( lit.Pass( ShaderPasses.Forward ).Pixel.Spirv );
-
-		// A sun-lit surface (foliage) lights once, outside the loop, and leaves the loop alone
-		var sunLit = Compiler().CompileSurface( Path.Combine( Core, "shaders", "foliage.slang" ) );
-		StringAssert.Contains( sunLit.Generated, "SurfaceForwardSunLit<Foliage, true>" );
-		Assert.IsFalse( sunLit.Generated.Contains( "SURFACE_LIGHT_HOOK", StringComparison.Ordinal ) );
-	}
-	/// <summary>The generated classes in BorealisLab are what the compiler writes now, and a raw module has the same record.</summary>
-	[TestMethod]
-	public void GeneratedClassesAreCurrent()
-	{
-		var compiler = Compiler();
-		var rock = compiler.CompileSurface( Path.Combine( Surfaces, "rock.slang" ) );
-		var raw = compiler.CompileRaw( Path.Combine( Surfaces, "rock_raw.slang" ) );
-
-		Assert.AreEqual( ShaderTier.Raw, raw.Tier );
-		CollectionAssert.AreEqual( rock.Material.Fields.Select( f => (f.Kind, f.Offset) ).ToArray(), raw.Material.Fields.Select( f => (f.Kind, f.Offset) ).ToArray() );
-		var lit = compiler.CompileSurface( Path.Combine( Surfaces, "rock_lit.slang" ) );
-		var stage = compiler.CompileSurface( Path.Combine( Surfaces, "rock_stage.slang" ) );
-		var shaded = compiler.CompileSurface( Path.Combine( Surfaces, "rock_shaded.slang" ) );
-		foreach ( var (shader, file) in new[] { (rock, "rock.g.cs"), (raw, "rock_raw.g.cs"), (lit, "rock_lit.g.cs"), (stage, "rock_stage.g.cs"), (shaded, "rock_shaded.g.cs") } )
-		{
-			var expected = MaterialClassWriter.Write( shader, "Sandbox.BorealisLab.Surfaces" ).Replace( "\r\n", "\n" );
-			var actual = File.ReadAllText( Path.Combine( Surfaces, file ) ).Replace( "\r\n", "\n" );
-			Assert.AreEqual( expected, actual, $"{file} is stale: run borealislab -surface-parity <folder> -surface-classes" );
-		}
-	}
-
 	/// <summary>
 	/// Material.CommonInputs.hlsl's TextureFiltering (in the USP's glass_scope.shader, a .shader the game still compiles)
 	/// takes its filter from an expression on F_TEXTURE_FILTERING, evaluated per material: anisotropic by default, and the
@@ -1193,36 +464,6 @@ public class SurfaceTests : GpuTest
 
 		Assert.AreEqual( CullMode.Back, Cull( 0 ) );
 		Assert.AreEqual( CullMode.None, Cull( 1 ) );
-	}
-
-	/// <summary>
-	/// The expression evaluator runs the stack machine as native's VfxEval does: literals, feature loads, comparisons and
-	/// conditional jumps, swizzles and builtins; reads it can't answer fail rather than guess.
-	/// </summary>
-	[TestMethod]
-	public void ShaderExpressionsEvaluateAsNativeDoes()
-	{
-		static byte[] Literal( float value ) => [7, .. BitConverter.GetBytes( value )];
-		var context = new Borealis.Source2.Shaders.ShaderExpressionContext { Features = [0, 3] };
-		static float Evaluate( byte[] code, Borealis.Source2.Shaders.ShaderExpressionContext context ) =>
-			Borealis.Source2.Shaders.ShaderExpression.TryEvaluate( code, context, out var value ) ? value.X : float.NaN;
-
-		// F_1 == 3 ? 85 : 20, laid out as the builder lays out a ternary: test, conditional jump, else, jump, then
-		byte[] ternary = [26, 1, .. Literal( 3 ), 13, 4, 13, 0, 21, 0, .. Literal( 85 ), 2, 26, 0, .. Literal( 20 ), 0];
-		Assert.AreEqual( 85f, Evaluate( ternary, context ) );
-		Assert.AreEqual( 20f, Evaluate( ternary, new Borealis.Source2.Shaders.ShaderExpressionContext { Features = [0, 1] } ) );
-
-		// clamp( 2 * 3, 0, 5 ) + max( 1, -1 ): builtins by table index (clamp 7, max 29)
-		byte[] math = [.. Literal( 2 ), .. Literal( 3 ), 21, .. Literal( 0 ), .. Literal( 5 ), 6, 7, 0, .. Literal( 1 ), .. Literal( -1 ), 6, 29, 0, 19, 0];
-		Assert.AreEqual( 6f, Evaluate( math, context ) );
-
-		// float2( 1, 2 ).y via a swizzle (yyyy)
-		byte[] swizzle = [.. Literal( 1 ), .. Literal( 2 ), 6, 26, 0, 30, 0b01_01_01_01, 0];
-		Assert.AreEqual( 2f, Evaluate( swizzle, context ) );
-
-		// A render attribute with nothing to answer it fails; exists() of it is 0
-		Assert.IsTrue( float.IsNaN( Evaluate( [25, 1, 2, 3, 4, 0], context ) ) );
-		Assert.AreEqual( 0f, Evaluate( [31, 1, 2, 3, 4, 0], context ) );
 	}
 
 	/// <summary>
@@ -1384,74 +625,6 @@ public class SurfaceTests : GpuTest
 	}
 
 	/// <summary>
-	/// terrain_surface.slang (terrain.shader as a surface that owns its vertex stage) compiles: its vertex stage reads the
-	/// meshlet mesh's position alone, every pass clips holes, and the layers sample with the local position's derivatives.
-	/// </summary>
-	[TestMethod]
-	public void TerrainSurfaceCompiles()
-	{
-		var terrain = Compiler().CompileSurface( Path.Combine( Core, "shaders", "terrain_surface.slang" ) );
-		StringAssert.Contains( terrain.Generated, "d.Ddx.LocalPosition = ddx( v.LocalPosition );" );
-		foreach ( var name in new[] { ShaderPasses.Forward, ShaderPasses.Depth } )
-		{
-			var pass = terrain.Pass( name );
-			var inputs = pass.Vertex.Inputs.Select( i => i.Semantic + i.SemanticIndex ).ToArray();
-			Assert.IsTrue( inputs.Contains( "POSITION0" ) && inputs.All( i => i is "POSITION0" or "TEXCOORD13" ), string.Join( ", ", inputs ) );
-			Assert.IsTrue( WritesClipDistance( pass.Vertex.Spirv ), $"{name} doesn't clip holes" );
-			Assert.IsTrue( pass.Vertex.Bindings.Any( b => b.Name == "TerrainMeshlets" ), $"{name} doesn't read the meshlets" );
-		}
-
-		// The grid is the D_GRID combo, a specialization constant in both stages
-		Assert.IsTrue( terrain.Pass( ShaderPasses.Forward ).Pixel.Specializations.Any( s => s.Attribute == "D_GRID" ) );
-	}
-
-	/// <summary>
-	/// water_surface.slang (water.shader as a surface that owns its vertex stage and shades itself) compiles: its vertex stage
-	/// reads the clipmap mesh's cells and levels, its forward pass lights two-sided ([Lighting( "S_DIFFUSE_TWO_SIDED" )])
-	/// and shades itself, and its material takes the .vmat's values by name.
-	/// </summary>
-	[TestMethod]
-	public void WaterSurfaceCompiles()
-	{
-		var water = Compiler().CompileSurface( Path.Combine( Core, "shaders", "water_surface.slang" ) );
-		StringAssert.Contains( water.Generated, "#define S_DIFFUSE_TWO_SIDED 1" );
-		StringAssert.Contains( water.Generated, "SurfaceForwardShaded<SurfaceWithStageShaded<Water, Water>, false>" );
-		StringAssert.Contains( water.Generated, "d.Ddx.Rest = ddx( v.Rest );" );
-		var inputs = water.Pass( ShaderPasses.Forward ).Vertex.Inputs.Select( i => i.Semantic + i.SemanticIndex ).ToArray();
-		foreach ( var semantic in new[] { "TEXCOORD0", "TEXCOORD1" } ) CollectionAssert.Contains( inputs, semantic, string.Join( ", ", inputs ) );
-		Assert.AreEqual( "g_fRoughness", water.Material.Field( "Roughness" ).Source );
-		Assert.IsTrue( water.Pass( ShaderPasses.Forward ).Pixel.Bindings.Any( b => b.Name == "RefractionTexture" ) );
-	}
-
-	/// <summary>
-	/// surface_test_rock.shader's materials load as the surface the converter makes of it, as the other core material shaders'
-	/// do: its conversion is found by default and compiles.
-	/// </summary>
-	[TestMethod]
-	public void SurfaceTestRockConvertsByDefault()
-	{
-		var shaders = Path.Combine( Core, "shaders" );
-		var converted = Path.Combine( Path.GetTempPath(), "borealis-gpu-tests", "converted" );
-		var errors = new List<string>();
-		var file = SurfaceShaders.DefaultSurfaceFiles( shaders, [], converted, errors.Add ).FirstOrDefault( f => Path.GetFileName( f ) == "surface_test_rock.slang" );
-		Assert.IsNotNull( file, "surface_test_rock isn't drawn as a surface by default: " + string.Join( "; ", errors ) );
-		var rock = Compiler().CompileSurface( file );
-		Assert.IsNotNull( rock.Pass( ShaderPasses.Forward )?.Pixel );
-		Assert.IsNotNull( rock.Material.Field( "Color" ) );
-	}
-
-	/// <summary>Whether SPIR-V declares the ClipDistance capability (OpCapability 32): a stage that writes clip distances.</summary>
-	static bool WritesClipDistance( byte[] spirv )
-	{
-		for ( int i = 20; i + 8 <= spirv.Length; i += 4 )
-		{
-			if ( BitConverter.ToUInt32( spirv, i ) == 0x00020011u && BitConverter.ToUInt32( spirv, i + 4 ) == 32u ) return true;
-		}
-
-		return false;
-	}
-
-	/// <summary>
 	/// rock.slang written with a vertex stage of its own (rock_stage.slang: the engine's transform, its uv a Varying read with
 	/// its derivatives) and shading itself (rock_shaded.slang: the engine's lighting and fog) draws as rock.slang does; the
 	/// vertex stage's clip distance cuts the box below its middle.
@@ -1525,8 +698,7 @@ public class SurfaceTests : GpuTest
 		Assert.IsNull( Convert( "generic", out notes ), "generic converted" );
 		StringAssert.Contains( notes[0], "FinalCombiner" );
 
-		var folder = Path.Combine( Path.GetTempPath(), "borealis-surface-combiner-test-" + Guid.NewGuid().ToString( "N" ) );
-		Directory.CreateDirectory( folder );
+		var folder = Fixtures.Folder( "convert-standard" );
 		var previousHost = RenderHost.Current;
 		try
 		{
@@ -1845,54 +1017,6 @@ public class SurfaceTests : GpuTest
 	}
 
 	/// <summary>
-	/// A translucency feature a material's shader declares but never reads doesn't make it blend, as on native: blendable.shader
-	/// had common/features.hlsl's <c>F_ADDITIVE_BLEND</c> and no combo following it, so a blendable material that kept the
-	/// value from another shader (Unicycle Frenzy's start pad trim) was opaque there, and package shaders still declare it so.
-	/// Such a material is opaque and converts to a surface that doesn't read the feature; one whose shader's static combo
-	/// follows the feature (<c>S_ADDITIVE_BLEND</c>) still blends.
-	/// </summary>
-	[TestMethod]
-	public void TranslucencyFeaturesTheShaderDoesntReadDontBlend()
-	{
-		static MaterialFile MaterialOf( string shader, Dictionary<string, int> ints ) => new()
-		{
-			Name = "trim",
-			Shader = shader,
-			Ints = ints,
-			Floats = new Dictionary<string, float>(),
-			Vectors = new Dictionary<string, float[]>(),
-			Textures = new Dictionary<string, string>(),
-			IntAttributes = new Dictionary<string, int>(),
-		};
-
-		// F_MULTIBLEND picks code; F_ADDITIVE_BLEND only where the shader has S_ADDITIVE_BLEND
-		static ShaderFile Described( bool readsAdditive )
-		{
-			ShaderCombo[] features = [new() { Name = "F_MULTIBLEND", Min = 0, Max = 3, FeatureIndex = 0, Strings = [] }, new() { Name = "F_ADDITIVE_BLEND", Min = 0, Max = 1, FeatureIndex = 1, Strings = [] }];
-			var statics = new List<ShaderCombo> { new() { Name = "S_MULTIBLEND", Min = 0, Max = 3, FeatureIndex = 0, Strings = [] } };
-			if ( readsAdditive ) statics.Add( new() { Name = "S_ADDITIVE_BLEND", Min = 0, Max = 1, FeatureIndex = 1, Strings = [] } );
-			return ShaderFile.FromModule( readsAdditive ? "reads" : "declares", [new ShaderMode { Name = "Forward", Fallback = "", Settings = [] }], features,
-				[(ShaderProgramType.Vertex, [], []), (ShaderProgramType.Pixel, [.. statics], [])] );
-		}
-
-		var declares = Described( false );
-		var reads = Described( true );
-		Assert.IsTrue( declares.FeatureIndex( "F_ADDITIVE_BLEND" ) >= 0 );
-		Assert.IsFalse( declares.FeatureSelectsCode( declares.FeatureIndex( "F_ADDITIVE_BLEND" ) ) );
-		Assert.IsTrue( declares.FeatureSelectsCode( declares.FeatureIndex( "F_MULTIBLEND" ) ) );
-		Assert.IsTrue( reads.FeatureSelectsCode( reads.FeatureIndex( "F_ADDITIVE_BLEND" ) ) );
-
-		var trim = MaterialOf( "shaders/blendable.shader", new() { ["F_MULTIBLEND"] = 1, ["F_ADDITIVE_BLEND"] = 1 } );
-		using var trimMaterial = new BackendMaterial( "trim", declares, trim, null );
-		Assert.IsFalse( trimMaterial.IsTranslucent, "a material blends by a feature its shader doesn't read" );
-		var surface = Compiler().CompileSurface( Path.Combine( Core, "shaders", "blendable.slang" ) );
-		Assert.IsTrue( ConvertedMaterial.Accepts( surface, trim, declares ), "blendable.slang doesn't take the material" );
-
-		using var additive = new BackendMaterial( "additive", reads, trim, null );
-		Assert.IsTrue( additive.IsTranslucent, "a material whose shader reads F_ADDITIVE_BLEND is opaque" );
-	}
-
-	/// <summary>
 	/// A glass material draws translucent, so the glass of an object that is partly opaque casts no shadow, as on native: a
 	/// slab with glass top and bottom and opaque sides, out of the game layers (it only casts), leaves the floor under it
 	/// lit by the sun, where an opaque slab shadows it.
@@ -2019,39 +1143,6 @@ public class SurfaceTests : GpuTest
 		}
 
 		return sum / count;
-	}
-
-	/// <summary>
-	/// The converter's render state: a .shader's RenderState lines evaluated per feature value become the struct's
-	/// attributes and rules on the features' fields, as static_overlay.slang and standard.slang declare them by hand.
-	/// </summary>
-	[TestMethod]
-	public void ConverterTranslatesRenderStates()
-	{
-		if ( Core is null ) Assert.Inconclusive( "No game content" );
-		static ShaderConverter.RenderStates Translate( string name )
-		{
-			// static_overlay.shader and generic.shader are gone (surfaces stand in alone): the test keeps copies
-			var data = Path.Combine( AppContext.BaseDirectory, "Data", name + ".shader" );
-			var text = File.ReadAllText( File.Exists( data ) ? data : Path.Combine( Core, "shaders", name + ".shader" ) );
-			var combos = System.Text.RegularExpressions.Regex.Matches( text, @"StaticCombo\(\s*(S_\w+)\s*,\s*(F_\w+)" ).DistinctBy( m => m.Groups[1].Value ).ToDictionary( m => m.Groups[1].Value, m => m.Groups[2].Value );
-			var features = System.Text.RegularExpressions.Regex.Matches( text, @"Feature\(\s*(F_\w+)\s*,\s*(\d+)\s*\.\.\s*(\d+)" ).ToDictionary( m => m.Groups[1].Value, m => (int.Parse( m.Groups[2].Value ), int.Parse( m.Groups[3].Value )) );
-			features.TryAdd( "F_RENDER_BACKFACES", (0, 1) );
-			return ShaderConverter.TranslateRenderState( text, combos, features );
-		}
-
-		var overlay = Translate( "static_overlay" );
-		var overlayRules = string.Join( "\n", overlay.Rules.Select( r => $"{r.Feature}: {r.Rule}" ) );
-		Assert.AreEqual( "NoDepthWrite, DepthBias( 250, 0.5 )", overlay.Attributes, overlayRules );
-		Assert.AreEqual( "F_BLEND_MODE: Blend: Opaque, Alpha, Opaque, Mod2x, Additive, Multiply, ModulateAdd; AlphaTest: false, false, true, false, false, false, false", overlayRules, string.Join( "\n", overlay.Notes ) );
-
-		var generic = Translate( "generic" );
-		var genericRules = string.Join( "\n", generic.Rules.Select( r => $"{r.Feature}: {r.Rule}" ) );
-		Assert.AreEqual( "", generic.Attributes, genericRules );
-		Assert.AreEqual( "F_TRANSLUCENT: Blend: Alpha", genericRules, string.Join( "\n", generic.Notes ) );
-
-		// Additive blending needs translucency on as well in generic.shader: a combination its own rule can't give alone
-		Assert.IsTrue( generic.Notes.Any( n => n.Contains( "F_ADDITIVE_BLEND", StringComparison.Ordinal ) ), string.Join( "\n", generic.Notes ) );
 	}
 
 	/// <summary>
@@ -2344,5 +1435,918 @@ public class SurfaceTests : GpuTest
 		var lit = 0;
 		for ( int i = 0; i < rgb.Length; i += 3 ) if ( Math.Abs( rgb[i] - 124 ) + Math.Abs( rgb[i + 1] - 124 ) + Math.Abs( rgb[i + 2] - 124 ) > 6 ) lit++;
 		return lit;
+	}
+}
+
+/// <summary>Slang surface compilation, reflection and source rewriting without a Vulkan device.</summary>
+[TestClass]
+public class SurfaceCompilerTests
+{
+	/// <summary>vfx's include rewrite: static sets become defines, annotations are recorded per variable.</summary>
+	[TestMethod]
+	public void VfxIncludesRewriteSetsAndReadAnnotations()
+	{
+		var annotations = new Dictionary<string, Annotations>();
+		var text = VfxIncludes.Rewrite( "ExternalDescriptorSet g_viewSet Slot 2;\n"
+			+ "float3 FogSunColor < Attribute( \"FogSunColor\" ); Default3( 0.5, 1, 0 ); >;\n"
+			+ "CreateTexture3DWithoutSampler( g_tFogVolume ) : register( t11 ) < Attribute( \"FogVolume\" ); SrgbRead( false ); > ;\n"
+			+ "StructuredBuffer< TransformBufferData_t > g_TransformData  < Attribute( \"g_TransformBuffer\" ); >;\n"
+			+ "SamplerComparisonState ShadowDepthPCFSampler < Filter( COMPARISON_MIN_MAG_MIP_LINEAR ); AddressU( CLAMP ); ComparisonFunc( GREATER_EQUAL ); >;\n"
+			+ "int DDGIEnabled < Attribute( \"DDGI_Enabled\" ); Default( 0 ); SpecializedConstant(); >;\n", annotations );
+
+		Assert.IsTrue( text.StartsWith( "#define g_viewSet 5\n", StringComparison.Ordinal ), text );
+		Assert.AreEqual( "FogSunColor", annotations["FogSunColor"].Attribute );
+		CollectionAssert.AreEqual( new[] { 0.5f, 1, 0 }, annotations["FogSunColor"].Default );
+		Assert.AreEqual( "FogVolume", annotations["g_tFogVolume"].Attribute );
+		Assert.AreEqual( "g_TransformBuffer", annotations["g_TransformData"].Attribute );
+
+		// As vfx compiles them: a specialization constant, so the pipeline folds the branches it guards, and a constant buffer
+		// member of the same name, so the layout matches the compiled shader's
+		StringAssert.Contains( text, $"int DDGIEnabled; [vk::constant_id( {VfxIncludes.SpecializationId( "DDGIEnabled" )} )] const int DDGIEnabled__Spec = 0;\n#define DDGIEnabled DDGIEnabled__Spec" );
+		Assert.AreEqual( "DDGI_Enabled", annotations["DDGIEnabled"].Attribute );
+
+		var sampler = BackendContext.SurfaceSampler( annotations["ShadowDepthPCFSampler"] );
+		Assert.AreEqual( CompareFunction.GreaterEqual, sampler.Compare );
+		Assert.AreEqual( AddressMode.Clamp, sampler.AddressU );
+		Assert.AreEqual( Filter.Linear, sampler.MipFilter );
+	}
+
+	/// <summary>
+	/// A sampler without a filter is native's default sampler state (<c>DefaultSamplerStateDesc</c>): anisotropic and
+	/// wrapped. blendable.shader samples every layer with such a sampler (<c>g_sDefault</c>), so blendable.slang's
+	/// sampler filters anisotropically too, or ground seen at a glancing angle (Construct's grass) blurs along depth.
+	/// </summary>
+	[TestMethod]
+	public void SamplersWithoutAFilterAreAnisotropic()
+	{
+		var annotations = new Dictionary<string, Annotations>();
+		VfxIncludes.Rewrite( "SamplerState Clamped < AddressU( CLAMP ); >;\n"
+			+ "SamplerState Trilinear < Filter( TRILINEAR ); MaxAniso( 8 ); >;\n"
+			+ "SamplerState Aniso < Filter( ANISOTROPIC ); MaxAniso( 8 ); >;\n", annotations );
+
+		Assert.AreEqual( BackendContext.DefaultAnisotropy, BackendContext.SurfaceSampler( null ).MaxAnisotropy );
+		var clamped = BackendContext.SurfaceSampler( annotations["Clamped"] );
+		Assert.AreEqual( BackendContext.DefaultAnisotropy, clamped.MaxAnisotropy );
+		Assert.AreEqual( AddressMode.Clamp, clamped.AddressU );
+		Assert.AreEqual( AddressMode.Wrap, clamped.AddressV );
+		Assert.AreEqual( 1, BackendContext.SurfaceSampler( annotations["Trilinear"] ).MaxAnisotropy );
+		Assert.AreEqual( 8, BackendContext.SurfaceSampler( annotations["Aniso"] ).MaxAnisotropy );
+
+		var blendable = Compiler().CompileSurface( Path.Combine( Core, "shaders", "blendable.slang" ) );
+		var filtering = blendable.Pass( ShaderPasses.Forward ).Pixel.Bindings.First( b => b.Kind == BindingKind.Sampler && b.Variable == "g_BlendableFiltering" );
+		var state = BackendContext.SurfaceSampler( filtering.Annotations );
+		Assert.AreEqual( BackendContext.DefaultAnisotropy, state.MaxAnisotropy );
+		Assert.AreEqual( AddressMode.Wrap, state.AddressU );
+	}
+
+	/// <summary>
+	/// Material.CommonInputs.hlsl's <c>TextureFiltering</c> takes its filter from the material's <c>F_TEXTURE_FILTERING</c>, as
+	/// vfx evaluates annotations with the material's features: anisotropic x8 by default, then bilinear, trilinear, point.
+	/// </summary>
+	[TestMethod]
+	public void TextureFilteringFollowsTheMaterialsFeature()
+	{
+		var annotations = new Dictionary<string, Annotations>();
+		var line = File.ReadAllLines( Path.Combine( Core, "shaders", "common", "utils", "Material.CommonInputs.hlsl" ) ).Single( l => l.Contains( "SamplerState TextureFiltering", StringComparison.Ordinal ) );
+		VfxIncludes.Rewrite( line + "\n", annotations );
+		var filtering = annotations["TextureFiltering"];
+		StringAssert.Contains( filtering.Filter, "F_TEXTURE_FILTERING == 0 ? ANISOTROPIC" );
+
+		SamplerInfo With( int value ) => BackendContext.SurfaceSampler( filtering, name => name == "F_TEXTURE_FILTERING" ? value : null );
+		var anisotropic = BackendContext.SurfaceSampler( filtering );
+		Assert.AreEqual( 8, anisotropic.MaxAnisotropy, "a feature at its default (0) is anisotropic" );
+		Assert.AreEqual( Filter.Linear, anisotropic.MipFilter );
+		Assert.AreEqual( 8, With( 0 ).MaxAnisotropy );
+		Assert.AreEqual( (1f, Filter.Linear, Filter.Nearest), (With( 1 ).MaxAnisotropy, With( 1 ).MinFilter, With( 1 ).MipFilter), "bilinear" );
+		Assert.AreEqual( (1f, Filter.Linear, Filter.Linear), (With( 2 ).MaxAnisotropy, With( 2 ).MinFilter, With( 2 ).MipFilter), "trilinear" );
+		Assert.AreEqual( (Filter.Nearest, Filter.Nearest), (With( 3 ).MinFilter, With( 3 ).MagFilter), "point" );
+		Assert.AreEqual( (Filter.Nearest, Filter.Nearest), (With( 4 ).MinFilter, With( 4 ).MagFilter), "nearest" );
+	}
+
+	/// <summary>
+	/// A shader's own shorthand for annotations (macros a package's expanded includes define, as vfx's preprocessor expands
+	/// them) reads as what it stands for; macros that aren't annotations are left alone.
+	/// </summary>
+	[TestMethod]
+	public void VfxIncludesExpandAnnotationMacros()
+	{
+		var annotations = new Dictionary<string, Annotations>();
+		VfxIncludes.Rewrite( "#define SrgbRead(bArg) string _SrgbRead = #bArg\n"
+			+ "#define SRGB SrgbRead(true)\n"
+			+ "#define Address(arg) AddressU(arg); AddressV(arg); AddressW(arg)\n"
+			+ "#define TINT 3\n"
+			+ "Texture2D Frame < Attribute(\"Frame\"); SRGB; > ;\n"
+			+ "SamplerState S < Filter(BILINEAR); Address(CLAMP); > ;\n", annotations );
+
+		Assert.IsTrue( annotations["Frame"].SrgbRead );
+		Assert.AreEqual( "Frame", annotations["Frame"].Attribute );
+		Assert.AreEqual( "CLAMP", annotations["S"].AddressU );
+		Assert.AreEqual( "CLAMP", annotations["S"].AddressW );
+		Assert.AreEqual( "BILINEAR", annotations["S"].Filter );
+
+		// A module's active lines, read again per compile, have no #defines: the macros come from its whole text
+		var macros = "#define SRGB SrgbRead(true)\n";
+		VfxIncludes.Rewrite( "Texture2D Next < Attribute(\"Next\"); SRGB; > ;\n", annotations, macros );
+		Assert.IsTrue( annotations["Next"].SrgbRead );
+	}
+
+	/// <summary>Texture2D fields of [Material] structs become bindless slots; other Texture2Ds and lines stay.</summary>
+	[TestMethod]
+	public void MaterialStructTexturesBecomeSlots()
+	{
+		var source = "Texture2D Outside;\n[Material]\npublic struct Leaf : ISurface\n{\n\t[Group( \"Color\" ), Srgb] Texture2D Color;\n\tTexture2D<float4> Mask;\n\tfloat3 Tint;\n\tMaterial Evaluate( SurfaceInput i ) { Texture2D t; return {}; }\n}\n";
+		var text = MaterialSource.Rewrite( source, out var materials );
+
+		Assert.AreEqual( 1, materials.Count );
+		Assert.AreEqual( "Leaf", materials[0].Name );
+		CollectionAssert.AreEqual( new[] { "ISurface" }, materials[0].Interfaces );
+		StringAssert.Contains( text, "[Group( \"Color\" ), Srgb] public MaterialTexture2D Color;" );
+		StringAssert.Contains( text, "\tpublic MaterialTexture2D Mask;" );
+		StringAssert.Contains( text, "\tpublic float3 Tint;" );
+		StringAssert.Contains( text, "Texture2D Outside;" );
+		StringAssert.Contains( text, "{ Texture2D t; return {}; }" );
+		Assert.AreEqual( source.Count( c => c == '\n' ), text.Count( c => c == '\n' ) );
+	}
+
+	/// <summary>
+	/// A surface compiles into forward, alpha-tested forward, depth and alpha-tested depth passes; its record is the
+	/// struct in order with textures as four-byte slots; the alpha-tested depth pass reads only what opacity needs.
+	/// </summary>
+	[TestMethod]
+	public void SurfaceCompilesEveryPass()
+	{
+		var rock = Compiler().CompileSurface( Path.Combine( Surfaces, "rock.slang" ) );
+
+		Assert.AreEqual( ShaderTier.Surface, rock.Tier );
+		Assert.AreEqual( 28, rock.Material.Size );
+		CollectionAssert.AreEqual( new[] { "Color@0", "Normal@4", "Rma@8", "Tint@12", "RoughnessScale@24" }, rock.Material.Fields.Select( f => $"{f.Name}@{f.Offset}" ).ToArray() );
+		Assert.IsTrue( rock.Material.Field( "Color" ).Srgb );
+		Assert.AreEqual( 2f, rock.Material.Field( "RoughnessScale" ).Max );
+
+		Assert.IsNull( rock.Pass( ShaderPasses.Depth ).Pixel );
+		var forward = rock.Pass( ShaderPasses.Forward ).Pixel;
+
+		// Opaque depth's vertex stage reads the position alone (and the instance id), so it can draw from positions-only
+		// vertices; translucent forward compiles with S_TRANSLUCENT, which keeps opacity in alpha
+		var depthInputs = rock.Pass( ShaderPasses.Depth ).Vertex.Inputs.Select( i => i.Semantic + i.SemanticIndex ).ToArray();
+		Assert.IsTrue( depthInputs.All( i => i is "POSITION0" or "TEXCOORD13" or "BLENDINDICES0" ), string.Join( ", ", depthInputs ) );
+		Assert.IsTrue( rock.Pass( ShaderPasses.Forward ).Vertex.Inputs.Any( i => i.Semantic == "NORMAL" ) );
+		Assert.IsNotNull( rock.Pass( ShaderPasses.Forward + "Translucent" )?.Pixel );
+		Assert.IsTrue( forward.Bindings.Any( b => b.Kind == BindingKind.MaterialRecords && b.Set == 1 ) );
+		Assert.IsTrue( forward.Bindings.Any( b => b.Variable == "g_MaterialTextures2D" && b.Set == 4 && b.Binding == ShaderAbi.BindlessTextures ) );
+		Assert.IsTrue( forward.Bindings.Any( b => b.Name == "PerViewConstantBuffer_t" && b.Kind == BindingKind.ConstantBuffer && b.Size > 0 ) );
+		Assert.IsTrue( forward.Bindings.All( b => b.Set is 1 or ShaderAbi.BindlessSet or ShaderAbi.ViewSet ) );
+
+		// Per-view lighting and fog come from the view set, as the core shaders read them
+		Assert.IsTrue( forward.Bindings.Any( b => b.Set == ShaderAbi.ViewSet && b.Name == ShaderAbi.ViewEnvironment ) );
+		Assert.IsTrue( forward.Specializations.Any( s => s.Attribute == "ShadowFilterQuality" ) );
+		Assert.IsTrue( forward.Globals.Members.Any( m => m.Name == "UserShadowFilterQuality" ), "the specialization constant keeps its member, as vfx does" );
+		Assert.IsTrue( rock.Pass( ShaderPasses.Forward ).Vertex.Bindings.All( b => b.Set is 0 or ShaderAbi.BindlessSet or ShaderAbi.ViewSet ) );
+
+		// Alpha-tested passes compile with today's alpha test (S_ALPHA_TEST: its cutoff and edge strength are globals), the
+		// depth one in Depth mode as well (S_MODE_DEPTH), where Shade returns the coverage before lighting
+		var alphaTested = rock.Pass( ShaderPasses.Forward + "AlphaTest" ).Pixel;
+		Assert.IsTrue( alphaTested.Globals.Members.Any( m => m.Name == "g_flAlphaTestReference" ) );
+		Assert.IsFalse( forward.Globals.Members.Any( m => m.Name == "g_flAlphaTestReference" ) );
+		var depth = rock.Pass( ShaderPasses.DepthAlphaTest ).Pixel;
+		Assert.IsTrue( depth.Globals.Members.Any( m => m.Name == "g_flAlphaTestReference" ) );
+		StringAssert.Contains( rock.Generated, "SurfaceForward<Rock, true>( i.Pixel, m, m.Color.Slot )" );
+
+		// Material textures are read with the module's sampler, its state from its annotations
+		var sampler = forward.Bindings.Single( b => b.Kind == BindingKind.Sampler && b.Variable == "g_MaterialFiltering" );
+		Assert.AreEqual( "ANISOTROPIC", sampler.Annotations?.Filter );
+		Assert.IsFalse( rock.Generated.Contains( "SURFACE_LIGHT_HOOK", StringComparison.Ordinal ) );
+	}
+
+	/// <summary>
+	/// An interpolated surface (blendable.slang) reads its Varyings from the mesh by semantic and passes them to the pixel
+	/// stage; its fields say which .vmat value they take.
+	/// </summary>
+	[TestMethod]
+	public void InterpolatedSurfaceReadsItsVaryings()
+	{
+		var blendable = Compiler().CompileSurface( Path.Combine( Core, "shaders", "blendable.slang" ) );
+		var inputs = blendable.Pass( ShaderPasses.Forward ).Vertex.Inputs;
+		Assert.IsTrue( inputs.Any( i => i.Semantic == "TEXCOORD" && i.SemanticIndex == 4 && i.Components == 4 ) );
+		Assert.IsTrue( inputs.Any( i => i.Semantic == "TEXCOORD" && i.SemanticIndex == 5 && i.Components == 4 ) );
+		StringAssert.Contains( blendable.Generated, "SurfaceWithVaryings<Blendable>" );
+		Assert.AreEqual( "F_MULTIBLEND", blendable.Material.Field( "ExtraLayers" ).Source );
+		Assert.AreEqual( "ShaderVersion", blendable.Material.Field( "Version" ).Source );
+		Assert.IsNull( blendable.Material.Field( "ColorA" ).Source );
+		Assert.IsTrue( blendable.Pass( ShaderPasses.Forward ).Pixel.Bindings.Any( b => b.Kind == BindingKind.Sampler && b.Variable == "g_BlendableFiltering" ) );
+	}
+
+	/// <summary>
+	/// Every pass comes again for lightmapped draws, with the vertex stage that reads the mesh's lightmap uv (TEXCOORD3);
+	/// the plain one doesn't read it.
+	/// </summary>
+	[TestMethod]
+	public void LightmappedPassesReadTheLightmapUv()
+	{
+		var rock = Compiler().CompileSurface( Path.Combine( Surfaces, "rock.slang" ) );
+		static bool ReadsLightmapUv( CompiledStage vertex ) => vertex.Inputs.Any( i => i.Semantic == "TEXCOORD" && i.SemanticIndex == 3 );
+
+		// Opaque depth reads the position alone, lightmapped or not
+		Assert.AreSame( rock.Pass( ShaderPasses.Depth ).Vertex, rock.Pass( ShaderPasses.Depth + ShaderPasses.Lightmapped ).Vertex );
+		foreach ( var name in new[] { ShaderPasses.Forward, ShaderPasses.Forward + "AlphaTest", ShaderPasses.Forward + "Translucent", ShaderPasses.DepthAlphaTest } )
+		{
+			var plain = rock.Pass( name );
+			var lightmapped = rock.Pass( name + ShaderPasses.Lightmapped );
+			Assert.IsFalse( ReadsLightmapUv( plain.Vertex ), name );
+			Assert.IsTrue( ReadsLightmapUv( lightmapped.Vertex ), name + ShaderPasses.Lightmapped );
+			Assert.AreSame( plain.Pixel, lightmapped.Pixel, "the pixel stage is shared" );
+		}
+	}
+
+	/// <summary>
+	/// Every pass also comes GPU-driven, the translucent forward pass too: its vertex stage pulls its vertices (no vertex
+	/// inputs), and neither stage reads the classic records' buffer.
+	/// </summary>
+	[TestMethod]
+	public void SurfacesHaveGpuDrivenPasses()
+	{
+		foreach ( var path in new[] { Path.Combine( Surfaces, "rock.slang" ), Path.Combine( Core, "shaders", "foliage.slang" ), Path.Combine( Core, "shaders", "blendable.slang" ) } )
+		{
+			var surface = Compiler().CompileSurface( path );
+			Assert.IsNull( surface.GpuDrivenError, surface.GpuDrivenError );
+			foreach ( var name in new[] { ShaderPasses.Forward, ShaderPasses.Forward + "AlphaTest", ShaderPasses.Forward + "Translucent", ShaderPasses.Depth, ShaderPasses.DepthAlphaTest } )
+			{
+				foreach ( var suffix in new[] { ShaderPasses.GpuDriven, ShaderPasses.GpuDriven + ShaderPasses.Lightmapped } )
+				{
+					var pass = surface.Pass( name + suffix );
+					Assert.IsNotNull( pass, $"{Path.GetFileName( path )} {name}{suffix}" );
+					Assert.AreEqual( 0, pass.Vertex.Inputs.Count, $"{name}{suffix} reads vertex inputs" );
+					foreach ( var stage in new[] { pass.Vertex, pass.Pixel } )
+						Assert.IsFalse( stage is not null && stage.Bindings.Any( b => b.Kind == BindingKind.MaterialRecords ), $"{name}{suffix} reads the classic records" );
+				}
+			}
+		}
+	}
+
+	/// <summary>
+	/// The disk cache: a second compile of an unchanged module comes from it with the same SPIR-V; a change to the module
+	/// (or anything it read) compiles again.
+	/// </summary>
+	[TestMethod]
+	[TestCategory( "Slow" )]
+	public void CompileCacheKeepsUnchangedModules()
+	{
+		Compiler();
+		var folder = Path.Combine( Path.GetTempPath(), "borealis-surface-cache-test-" + Guid.NewGuid().ToString( "N" ) );
+		Directory.CreateDirectory( folder );
+		try
+		{
+			var module = Path.Combine( folder, "cached_rock.slang" );
+			File.WriteAllText( module, File.ReadAllText( Path.Combine( Surfaces, "rock.slang" ) ).Replace( "public struct Rock", "public struct CachedRock", StringComparison.Ordinal ) );
+			var bin = EngineFolders.NativeIn( Path.GetDirectoryName( Core ) );
+			var compiler = new SlangCompiler( bin, [Path.Combine( Core, "shaders" )] ) { CacheFolder = Path.Combine( folder, "cache" ) };
+
+			var first = compiler.CompileSurface( module );
+			var second = compiler.CompileSurface( module );
+			Assert.IsFalse( first.FromCache );
+			Assert.IsTrue( second.FromCache );
+			Assert.IsTrue( first.Dependencies.Any( d => d.EndsWith( "lighting.slangh", StringComparison.OrdinalIgnoreCase ) ), "the core includes are dependencies" );
+			CollectionAssert.AreEquivalent( first.Passes.Keys.ToArray(), second.Passes.Keys.ToArray() );
+			foreach ( var (name, pass) in first.Passes )
+			{
+				CollectionAssert.AreEqual( pass.Vertex.Spirv, second.Pass( name ).Vertex.Spirv, name );
+				if ( pass.Pixel is not null ) CollectionAssert.AreEqual( pass.Pixel.Spirv, second.Pass( name ).Pixel.Spirv, name );
+			}
+
+			Assert.AreSame( second.Pass( ShaderPasses.Forward ).Pixel, second.Pass( ShaderPasses.Forward + ShaderPasses.Lightmapped ).Pixel, "shared stages stay shared" );
+			Assert.AreEqual( first.Material.Size, second.Material.Size );
+
+			File.AppendAllText( module, "\n// changed\n" );
+			Assert.IsFalse( compiler.CompileSurface( module ).FromCache, "a changed module compiles again" );
+		}
+		finally
+		{
+			Directory.Delete( folder, true );
+		}
+	}
+
+	/// <summary>
+	/// The caches are keyed on what a compile reads and the compiler's <see cref="SlangCompiler.Version"/>, not on this
+	/// assembly's build: an engine build, or a Debug build beside a Release one, keeps them.
+	/// </summary>
+	[TestMethod]
+	public void CacheKeyIsNotTheAssemblysBuild()
+	{
+		var bin = EngineFolders.NativeIn( Path.GetDirectoryName( Core ) );
+		var identity = CompileCache.Identity( bin );
+		StringAssert.StartsWith( identity, $"{SlangCompiler.Version}:" );
+		Assert.IsFalse( identity.Contains( typeof( SlangCompiler ).Assembly.ManifestModule.ModuleVersionId.ToString(), StringComparison.OrdinalIgnoreCase ) );
+	}
+
+	/// <summary>
+	/// What the compiler generates for fixed inputs is as it was when <see cref="SlangCompiler.Version"/> was last raised: a
+	/// change to it must raise the version, or caches would keep shaders compiled the old way.
+	/// </summary>
+	[TestMethod]
+	public void GeneratedCodeNeedsAVersion()
+	{
+		var fingerprint = SlangCompiler.Fingerprint();
+		Assert.AreEqual( SlangCompiler.GeneratedFingerprint, fingerprint, $"What SlangCompiler generates changed: raise SlangCompiler.Version and set GeneratedFingerprint to \"{fingerprint}\"" );
+	}
+
+	/// <summary>
+	/// Surfaces compiled at once from several threads (their stages on the compile threads together) come out as each does
+	/// alone.
+	/// </summary>
+	[TestMethod]
+	[TestCategory( "Slow" )]
+	public void ParallelCompilesMatchSerialOnes()
+	{
+		Compiler();
+		var bin = EngineFolders.NativeIn( Path.GetDirectoryName( Core ) );
+		var files = new[] { Path.Combine( Surfaces, "rock.slang" ), Path.Combine( Core, "shaders", "glass.slang" ), Path.Combine( Surfaces, "rock_raw.slang" ) };
+		var compiler = new SlangCompiler( bin, [Path.Combine( Core, "shaders" )] );
+		CompiledShader Compile( string file ) => file.EndsWith( "_raw.slang", StringComparison.Ordinal ) ? compiler.CompileRaw( file ) : compiler.CompileSurface( file );
+		var alone = files.Select( Compile ).ToArray();
+		var together = files.AsParallel().AsOrdered().WithDegreeOfParallelism( files.Length ).Select( Compile ).ToArray();
+		for ( int i = 0; i < files.Length; i++ )
+		{
+			CollectionAssert.AreEquivalent( alone[i].Passes.Keys.ToArray(), together[i].Passes.Keys.ToArray(), files[i] );
+			foreach ( var (name, pass) in alone[i].Passes )
+			{
+				CollectionAssert.AreEqual( pass.Vertex.Spirv, together[i].Pass( name ).Vertex.Spirv, $"{files[i]} {name}" );
+				if ( pass.Pixel is not null ) CollectionAssert.AreEqual( pass.Pixel.Spirv, together[i].Pass( name ).Pixel.Spirv, $"{files[i]} {name}" );
+			}
+
+			CollectionAssert.AreEqual( alone[i].Dependencies.ToArray(), together[i].Dependencies.ToArray(), files[i] );
+		}
+	}
+
+	/// <summary>
+	/// The alpha-tested depth pass writes nothing but coverage: it skips the decals (which don't change opacity), for the
+	/// plain shading model and the final combiner alike, so neither reads the decal buffer.
+	/// </summary>
+	[TestMethod]
+	public void AlphaTestedDepthSkipsDecals()
+	{
+		var compiler = Compiler();
+		var rock = compiler.CompileSurface( Path.Combine( Surfaces, "rock.slang" ) );
+		var standard = compiler.CompileSurface( Path.Combine( Core, "shaders", "standard.slang" ) );
+		foreach ( var (name, shader) in new[] { ("rock", rock), ("standard", standard) } )
+		{
+			Assert.IsTrue( shader.Pass( ShaderPasses.Forward ).Pixel.Bindings.Any( b => b.Variable == "DecalBuffer" ), $"{name} forward applies decals" );
+			Assert.IsFalse( shader.Pass( ShaderPasses.DepthAlphaTest ).Pixel.Bindings.Any( b => b.Variable == "DecalBuffer" ), $"{name} depth" );
+			Assert.IsFalse( shader.Pass( ShaderPasses.DepthAlphaTest + ShaderPasses.GpuDriven ).Pixel.Bindings.Any( b => b.Variable == "DecalBuffer" ), $"{name} GPU-driven depth" );
+		}
+	}
+
+	/// <summary>
+	/// vfx's spirv-opt recipe runs over what Slang emits (SpirvOptimizer): code after a constant return is gone, and so is
+	/// the binding only it read, as a .shader's compile drops it.
+	/// </summary>
+	[TestMethod]
+	public void OptimizerStripsDeadCodeAndItsBindings()
+	{
+		Compiler();
+		var bin = EngineFolders.NativeIn( Path.GetDirectoryName( Core ) );
+		if ( !SpirvOptimizer.Available( bin ) ) Assert.Inconclusive( "spirv_optimizer isn't built" );
+
+		var folder = Path.Combine( Path.GetTempPath(), "borealis-optimizer-test-" + Guid.NewGuid().ToString( "N" ) );
+		Directory.CreateDirectory( folder );
+		try
+		{
+			var path = Path.Combine( folder, "dead_binding.slang" );
+			File.WriteAllText( path, """
+				// MODES: Default();
+				#include "sbox/pass.slangh"
+				#include "system.fxc"
+				#include "common.fxc"
+
+				struct PS_INPUT { float4 vPositionSs : SV_Position; };
+
+				#if ( PROGRAM == VFX_PROGRAM_PS )
+				Texture2D g_tLive < Attribute( "Live" ); >;
+				Texture2D g_tDead < Attribute( "Dead" ); >;
+				static const bool kEarly = true;
+
+				[shader( "pixel" )] float4 MainPs( PS_INPUT i ) : SV_Target0
+				{
+					float4 color = g_tLive.Load( int3( i.vPositionSs.xy, 0 ) );
+					if ( kEarly ) return color;
+					return color + g_tDead.Load( int3( i.vPositionSs.xy, 0 ) );
+				}
+				#endif
+				""" );
+
+			var compiler = new SlangCompiler( bin, [Path.Combine( Core, "shaders" )] );
+			var stage = compiler.CompilePass( PassModule.Read( path, [Path.Combine( Core, "shaders" )] ), StageKind.Pixel, new Dictionary<string, int>() ).Stage;
+			Assert.IsTrue( stage.Bindings.Any( b => b.Variable == "g_tLive" ) );
+			Assert.IsFalse( stage.Bindings.Any( b => b.Variable == "g_tDead" ), "the binding only dead code read is stripped" );
+		}
+		finally
+		{
+			Directory.Delete( folder, true );
+		}
+	}
+
+	/// <summary>
+	/// The converter turns pixel.hlsl-style .shaders into surfaces that compile: the template (Material::Init), bark (a test
+	/// copy in Data: the game no longer has it)
+	/// (Material.CommonInputs, a helper, a feature global, and its vertex sway as Displace with trunk_bending.hlsl's
+	/// functions copied) and water_simple (engine-bound textures as module globals, a helper taking the input, and the
+	/// refraction after shading as Composite).
+	/// </summary>
+	[TestMethod]
+	[TestCategory( "Slow" )]
+	public void ConverterTurnsPixelShadersIntoSurfaces()
+	{
+		var compiler = Compiler();
+		var game = Path.GetDirectoryName( Core );
+		var folder = Fixtures.Folder( "convert-pixel" );
+		try
+		{
+			var shaders = Path.Combine( Core, "shaders" );
+			string Include( string path ) => File.Exists( Path.Combine( shaders, path ) ) ? File.ReadAllText( Path.Combine( shaders, path ) ) : null;
+			foreach ( var (relative, name) in new[] { (Path.Combine( AppContext.BaseDirectory, "Data", "material.shader" ), "material"), (Path.Combine( AppContext.BaseDirectory, "Data", "bark.shader" ), "bark"), (Path.Combine( AppContext.BaseDirectory, "Data", "water_simple.shader" ), "water_simple") } )
+			{
+				var result = ShaderConverter.Convert( File.ReadAllText( Path.Combine( game, relative ) ), name, Include );
+				Assert.IsNotNull( result.Source, name );
+				var path = Path.Combine( folder, name + ".slang" );
+				File.WriteAllText( path, result.Source );
+				var compiled = compiler.CompileSurface( path );
+				Assert.IsNotNull( compiled.Pass( ShaderPasses.Forward ), name );
+				if ( name == "bark" )
+				{
+					StringAssert.Contains( result.Source, "IVertexSurface" );
+					StringAssert.Contains( result.Source, "public float3 Displace( VertexSurfaceInput v )" );
+					Assert.IsFalse( result.Notes.Any( n => n.Contains( "vertex shader", StringComparison.Ordinal ) ), string.Join( "; ", result.Notes ) );
+					Assert.IsTrue( compiled.Generated.Contains( "SurfaceVertexDisplaced", StringComparison.Ordinal ) );
+					Assert.IsNotNull( compiled.Material.Field( "SpecularOcclusion" ) );
+					Assert.IsNotNull( compiled.Material.Field( "Color" ) );
+				}
+
+				if ( name == "water_simple" )
+				{
+					StringAssert.Contains( result.Source, "ICompositeSurface" );
+					Assert.IsTrue( compiled.Generated.Contains( "SurfaceForwardComposite", StringComparison.Ordinal ) );
+
+					// The refraction and reflection textures are bound by attribute, not material fields
+					var forward = compiled.Pass( ShaderPasses.Forward ).Pixel;
+					Assert.IsTrue( forward.Bindings.Any( b => b.Name == "RefractionTexture" ), "no RefractionTexture binding" );
+					Assert.IsTrue( forward.Bindings.Any( b => b.Name == "ReflectionTexture" ), "no ReflectionTexture binding" );
+					Assert.IsNull( compiled.Material.Field( "RefractionTexture" ) );
+					Assert.IsNotNull( compiled.Material.Field( "BigWaveScale" ) );
+				}
+			}
+		}
+		finally
+		{
+			Directory.Delete( folder, true );
+		}
+	}
+
+	/// <summary>
+	/// A pass module keeps what it read from its preprocessed lines (<see cref="PassModule.DerivedCacheFolder"/>): the next
+	/// run's module reads the same entry and render states without preprocessing, and one whose include was edited
+	/// preprocesses again. Before, every run preprocessed each module once per combo values.
+	/// </summary>
+	[TestMethod]
+	[DoNotParallelize]
+	public void PassModuleKeepsItsReadsBetweenRuns()
+	{
+		var folder = Path.Combine( Path.GetTempPath(), "borealis-pass-derived-test-" + Guid.NewGuid().ToString( "N" ) );
+		Directory.CreateDirectory( folder );
+		var interval = PassModule.IncludeCheckMs;
+		PassModule.IncludeCheckMs = 0;
+		try
+		{
+			var include = Path.Combine( folder, "states.slangh" );
+			File.WriteAllText( include, "RenderState( DepthBias, 4 );\n" );
+			var path = Path.Combine( folder, "kept.slang" );
+			var text = "#include \"states.slangh\"\n[shader( \"pixel\" )] float4 MainPs() : SV_Target0 { return 1; }\n";
+			var cache = Path.Combine( folder, "derived" );
+			PassModule Run()
+			{
+				var module = PassModule.FromText( path, text, [folder] );
+				module.DerivedCacheFolder = cache;
+				return module;
+			}
+
+			var values = new Dictionary<string, int>();
+			var first = Run();
+			CollectionAssert.AreEqual( new[] { ("DepthBias", "4") }, first.RenderStates( values ).ToArray() );
+			Assert.IsTrue( first.Has( StageKind.Pixel, values ) );
+			first.SaveDerived();
+
+			var before = PassModule.Preprocesses;
+			var second = Run();
+			CollectionAssert.AreEqual( new[] { ("DepthBias", "4") }, second.RenderStates( values ).ToArray(), "the kept render states" );
+			Assert.IsTrue( second.Has( StageKind.Pixel, values ), "the kept entry" );
+			Assert.AreEqual( before, PassModule.Preprocesses, "read, not preprocessed" );
+
+			// Edited within the file system's clock tick: the same time, a different length
+			var written = File.GetLastWriteTimeUtc( include );
+			File.WriteAllText( include, "RenderState( DepthBias, 16 );\n// longer\n" );
+			File.SetLastWriteTimeUtc( include, written );
+			CollectionAssert.AreEqual( new[] { ("DepthBias", "16") }, Run().RenderStates( values ).ToArray(), "an edited include preprocesses again" );
+		}
+		finally
+		{
+			PassModule.IncludeCheckMs = interval;
+			Directory.Delete( folder, true );
+		}
+	}
+
+	/// <summary>
+	/// A pass module keeps what it preprocessed per combo values only while the includes it read are unchanged: an edited
+	/// include's render states are read again (hotload), once its check interval has passed (none here).
+	/// </summary>
+	[TestMethod]
+	[DoNotParallelize]
+	public void PassModuleRereadsAnEditedInclude()
+	{
+		var folder = Path.Combine( Path.GetTempPath(), "borealis-pass-include-test-" + Guid.NewGuid().ToString( "N" ) );
+		Directory.CreateDirectory( folder );
+		var interval = PassModule.IncludeCheckMs;
+		PassModule.IncludeCheckMs = 0;
+		try
+		{
+			var include = Path.Combine( folder, "states.slangh" );
+			File.WriteAllText( include, "RenderState( DepthBias, 4 );\n" );
+			var path = Path.Combine( folder, "edited.slang" );
+			var module = PassModule.FromText( path, "#include \"states.slangh\"\n[shader( \"pixel\" )] float4 MainPs() : SV_Target0 { return 1; }\n", [folder] );
+			var values = new Dictionary<string, int>();
+			CollectionAssert.AreEqual( new[] { ("DepthBias", "4") }, module.RenderStates( values ).ToArray() );
+			CollectionAssert.AreEqual( new[] { ("DepthBias", "4") }, module.RenderStates( values ).ToArray(), "kept" );
+
+			// Edited within the file system's clock tick (a write takes the clock's last tick as its time): the same time, a
+			// different length
+			var written = File.GetLastWriteTimeUtc( include );
+			File.WriteAllText( include, "RenderState( DepthBias, 16 );\n// longer\n" );
+			File.SetLastWriteTimeUtc( include, written );
+			CollectionAssert.AreEqual( new[] { ("DepthBias", "16") }, module.RenderStates( values ).ToArray(), "the edited include is read again" );
+		}
+		finally
+		{
+			PassModule.IncludeCheckMs = interval;
+			Directory.Delete( folder, true );
+		}
+	}
+
+	/// <summary>
+	/// A cache check trusts a file's last look for <see cref="PassModule.IncludeCheckMs"/>: a variant's stages each check every
+	/// include their compile read, and a map's first frame spent ~100 ms asking the file system. A watcher's change
+	/// (<see cref="SlangCompiler.SourceChanged"/>) looks again at once.
+	/// </summary>
+	[TestMethod]
+	[DoNotParallelize]
+	public void FileHashLooksAtAFileOncePerInterval()
+	{
+		var folder = Path.Combine( Path.GetTempPath(), "borealis-file-hash-test-" + Guid.NewGuid().ToString( "N" ) );
+		Directory.CreateDirectory( folder );
+		var interval = PassModule.IncludeCheckMs;
+		PassModule.IncludeCheckMs = 60_000;
+		try
+		{
+			var include = Path.Combine( folder, "looked.slangh" );
+			File.WriteAllText( include, "// one\n" );
+			var first = PassCache.FileHash( include );
+			var looks = PassCache.Looks;
+			for ( int i = 0; i < 100; i++ ) Assert.AreEqual( first, PassCache.FileHash( include ) );
+			Assert.AreEqual( looks, PassCache.Looks, "asked again within the interval" );
+
+			File.WriteAllText( include, "// two, longer\n" );
+			SlangCompiler.SourceChanged();
+			Assert.AreNotEqual( first, PassCache.FileHash( include ), "a watched change is read at once" );
+		}
+		finally
+		{
+			PassModule.IncludeCheckMs = interval;
+			Directory.Delete( folder, true );
+		}
+	}
+
+	/// <summary>A stage no draw asked for in <see cref="PassModules.KeptRuns"/> runs is dropped; a malformed line is skipped.</summary>
+	[TestMethod]
+	public void KeptStagesAgeOut()
+	{
+		var path = Path.Combine( Path.GetTempPath(), "borealis-stages-test-" + Guid.NewGuid().ToString( "N" ) + ".txt" );
+		try
+		{
+			var last = 20;
+			var stages = new Dictionary<string, int>
+			{
+				["C:/a.slang\tPixel\tD_X=1;S_MODE_DEPTH=0"] = last,
+				["C:/b.slang\tCompute\t"] = last - PassModules.KeptRuns + 1,
+				["C:/old.slang\tVertex\tS_MODE_DEPTH=1"] = last - PassModules.KeptRuns,
+			};
+			File.WriteAllText( path, PassModules.WriteStages( last, stages ) + "garbage line\n" );
+
+			var ahead = PassModules.ReadStages( path, out var run, out var version, out var kept );
+			Assert.AreEqual( last + 1, run );
+			Assert.AreEqual( SlangCompiler.Version, version );
+			CollectionAssert.AreEquivalent( new[] { "C:/a.slang", "C:/b.slang" }, ahead.Select( a => a.Path ).ToArray() );
+			var pixel = ahead.Single( a => a.Path == "C:/a.slang" );
+			Assert.AreEqual( StageKind.Pixel, pixel.Kind );
+			Assert.AreEqual( 1, pixel.Values["D_X"] );
+			Assert.AreEqual( 0, pixel.Values["S_MODE_DEPTH"] );
+			Assert.AreEqual( 0, ahead.Single( a => a.Path == "C:/b.slang" ).Values.Count );
+			Assert.AreEqual( 2, kept.Count );
+
+			Assert.AreEqual( 0, PassModules.ReadStages( path + ".missing", out run, out _, out _ ).Count );
+			Assert.AreEqual( 0, run );
+		}
+		finally
+		{
+			File.Delete( path );
+		}
+	}
+
+	/// <summary>
+	/// Offline compiles (<see cref="SlangOutput"/>): a surface and a pass module compiled offline are read, not compiled, by
+	/// another compiler with an empty cache, the same SPIR-V, wherever the files they read are; not with offline compiles
+	/// off, nor once the source changes. An unchanged source isn't compiled offline again.
+	/// </summary>
+	[TestMethod]
+	[TestCategory( "Slow" )]
+	public void OfflineCompilesServeTheGame()
+	{
+		Compiler();
+		var folder = Path.Combine( Path.GetTempPath(), "borealis-offline-test-" + Guid.NewGuid().ToString( "N" ) );
+		Directory.CreateDirectory( folder );
+		try
+		{
+			var bin = EngineFolders.NativeIn( Path.GetDirectoryName( Core ) );
+			var shaders = Path.Combine( Core, "shaders" );
+			var module = Path.Combine( folder, "offline_rock.slang" );
+			File.WriteAllText( module, File.ReadAllText( Path.Combine( Surfaces, "rock.slang" ) ).Replace( "public struct Rock", "public struct OfflineRock", StringComparison.Ordinal ) );
+			var pass = PassModule.Read( Path.Combine( shaders, "depthresolve.slang" ), [shaders] );
+			var log = new List<string>();
+			var offline = new SlangCompiler( bin, [folder, shaders] ) { CacheFolder = Path.Combine( folder, "cache1" ), UseOffline = false };
+			Assert.AreEqual( OfflineResult.Compiled, offline.CompileOfflineAsync( module, log: log.Add ).GetAwaiter().GetResult(), string.Join( "\n", log ) );
+			Assert.AreEqual( OfflineResult.Compiled, offline.CompileOfflineAsync( pass.Path, Path.Combine( folder, "depthresolve.slang_c" ), log.Add ).GetAwaiter().GetResult(), string.Join( "\n", log ) );
+			Assert.AreEqual( OfflineResult.UpToDate, offline.CompileOfflineAsync( module ).GetAwaiter().GetResult() );
+			Assert.IsTrue( File.Exists( SlangOutput.PathOf( module ) ) );
+
+			var compiled = offline.CompileSurface( module );
+			var compiling = new List<string>();
+			var game = new SlangCompiler( bin, [folder, shaders] ) { CacheFolder = Path.Combine( folder, "cache2" ), Compiling = compiling.Add };
+			var read = game.CompileSurface( module );
+			Assert.IsTrue( read.Offline, "the surface came from its offline compile" );
+			foreach ( var (name, p) in compiled.Passes )
+			{
+				CollectionAssert.AreEqual( p.Vertex.Spirv, read.Pass( name ).Vertex.Spirv, name );
+				if ( p.Pixel is not null ) CollectionAssert.AreEqual( p.Pixel.Spirv, read.Pass( name ).Pixel.Spirv, name );
+			}
+
+			Assert.IsTrue( read.Dependencies.Any( d => d.EndsWith( "lighting.slangh", StringComparison.OrdinalIgnoreCase ) ), "the files it read, found again" );
+			var values = pass.Combos( StageKind.Pixel ).ToDictionary( c => c.Name, c => c.Min );
+			Assert.IsTrue( game.CompilePass( pass, StageKind.Pixel, values ).Offline, "the pass stage came from its offline compile" );
+			Assert.AreEqual( 0, compiling.Count, string.Join( "; ", compiling ) );
+
+			// Turning off offline reads can use the ordinary disk cache rather than compiling the same stages again.
+			Assert.IsFalse( offline.CompileSurface( module ).Offline );
+
+			File.AppendAllText( module, "\n// changed\n" );
+			var changed = new SlangCompiler( bin, [folder, shaders] ) { CacheFolder = offline.CacheFolder, Compiling = compiling.Add };
+			Assert.IsFalse( changed.CompileSurface( module ).Offline, "a changed module compiles again" );
+			Assert.AreEqual( 1, compiling.Count, "and says so" );
+			// Repackage the changed stages just compiled into the offline output.
+			Assert.AreEqual( OfflineResult.Compiled, offline.CompileOfflineAsync( module ).GetAwaiter().GetResult() );
+		}
+		finally
+		{
+			Directory.Delete( folder, true );
+		}
+	}
+
+	/// <summary>A lit surface turns on the light loop's hook and hands it the material; an unlit one leaves the loop alone.</summary>
+	[TestMethod]
+	public void LitSurfaceHooksTheLightLoop()
+	{
+		var lit = Compiler().CompileSurface( Path.Combine( Surfaces, "rock_lit.slang" ) );
+		StringAssert.Contains( lit.Generated, "#define SURFACE_LIGHT_HOOK 1" );
+		StringAssert.Contains( lit.Generated, "s_LitSurface = m;" );
+		StringAssert.Contains( lit.Generated, "s_LitSurface.Light( SurfaceLitMaterial(), SurfaceLitInput(), light )" );
+		Assert.IsNotNull( lit.Pass( ShaderPasses.Forward ).Pixel.Spirv );
+
+		// A sun-lit surface (foliage) lights once, outside the loop, and leaves the loop alone
+		var sunLit = Compiler().CompileSurface( Path.Combine( Core, "shaders", "foliage.slang" ) );
+		StringAssert.Contains( sunLit.Generated, "SurfaceForwardSunLit<Foliage, true>" );
+		Assert.IsFalse( sunLit.Generated.Contains( "SURFACE_LIGHT_HOOK", StringComparison.Ordinal ) );
+	}
+	/// <summary>The generated classes in BorealisLab are what the compiler writes now, and a raw module has the same record.</summary>
+	[TestMethod]
+	public void GeneratedClassesAreCurrent()
+	{
+		var compiler = Compiler();
+		var rock = compiler.CompileSurface( Path.Combine( Surfaces, "rock.slang" ) );
+		var raw = compiler.CompileRaw( Path.Combine( Surfaces, "rock_raw.slang" ) );
+
+		Assert.AreEqual( ShaderTier.Raw, raw.Tier );
+		CollectionAssert.AreEqual( rock.Material.Fields.Select( f => (f.Kind, f.Offset) ).ToArray(), raw.Material.Fields.Select( f => (f.Kind, f.Offset) ).ToArray() );
+		var lit = compiler.CompileSurface( Path.Combine( Surfaces, "rock_lit.slang" ) );
+		var stage = compiler.CompileSurface( Path.Combine( Surfaces, "rock_stage.slang" ) );
+		var shaded = compiler.CompileSurface( Path.Combine( Surfaces, "rock_shaded.slang" ) );
+		foreach ( var (shader, file) in new[] { (rock, "rock.g.cs"), (raw, "rock_raw.g.cs"), (lit, "rock_lit.g.cs"), (stage, "rock_stage.g.cs"), (shaded, "rock_shaded.g.cs") } )
+		{
+			var expected = MaterialClassWriter.Write( shader, "Sandbox.BorealisLab.Surfaces" ).Replace( "\r\n", "\n" );
+			var actual = File.ReadAllText( Path.Combine( Surfaces, file ) ).Replace( "\r\n", "\n" );
+			Assert.AreEqual( expected, actual, $"{file} is stale: run borealislab -surface-parity <folder> -surface-classes" );
+		}
+	}
+
+	/// <summary>
+	/// The expression evaluator runs the stack machine as native's VfxEval does: literals, feature loads, comparisons and
+	/// conditional jumps, swizzles and builtins; reads it can't answer fail rather than guess.
+	/// </summary>
+	[TestMethod]
+	public void ShaderExpressionsEvaluateAsNativeDoes()
+	{
+		static byte[] Literal( float value ) => [7, .. BitConverter.GetBytes( value )];
+		var context = new Borealis.Source2.Shaders.ShaderExpressionContext { Features = [0, 3] };
+		static float Evaluate( byte[] code, Borealis.Source2.Shaders.ShaderExpressionContext context ) =>
+			Borealis.Source2.Shaders.ShaderExpression.TryEvaluate( code, context, out var value ) ? value.X : float.NaN;
+
+		// F_1 == 3 ? 85 : 20, laid out as the builder lays out a ternary: test, conditional jump, else, jump, then
+		byte[] ternary = [26, 1, .. Literal( 3 ), 13, 4, 13, 0, 21, 0, .. Literal( 85 ), 2, 26, 0, .. Literal( 20 ), 0];
+		Assert.AreEqual( 85f, Evaluate( ternary, context ) );
+		Assert.AreEqual( 20f, Evaluate( ternary, new Borealis.Source2.Shaders.ShaderExpressionContext { Features = [0, 1] } ) );
+
+		// clamp( 2 * 3, 0, 5 ) + max( 1, -1 ): builtins by table index (clamp 7, max 29)
+		byte[] math = [.. Literal( 2 ), .. Literal( 3 ), 21, .. Literal( 0 ), .. Literal( 5 ), 6, 7, 0, .. Literal( 1 ), .. Literal( -1 ), 6, 29, 0, 19, 0];
+		Assert.AreEqual( 6f, Evaluate( math, context ) );
+
+		// float2( 1, 2 ).y via a swizzle (yyyy)
+		byte[] swizzle = [.. Literal( 1 ), .. Literal( 2 ), 6, 26, 0, 30, 0b01_01_01_01, 0];
+		Assert.AreEqual( 2f, Evaluate( swizzle, context ) );
+
+		// A render attribute with nothing to answer it fails; exists() of it is 0
+		Assert.IsTrue( float.IsNaN( Evaluate( [25, 1, 2, 3, 4, 0], context ) ) );
+		Assert.AreEqual( 0f, Evaluate( [31, 1, 2, 3, 4, 0], context ) );
+	}
+
+	/// <summary>
+	/// terrain_surface.slang (terrain.shader as a surface that owns its vertex stage) compiles: its vertex stage reads the
+	/// meshlet mesh's position alone, every pass clips holes, and the layers sample with the local position's derivatives.
+	/// </summary>
+	[TestMethod]
+	public void TerrainSurfaceCompiles()
+	{
+		var terrain = Compiler().CompileSurface( Path.Combine( Core, "shaders", "terrain_surface.slang" ) );
+		StringAssert.Contains( terrain.Generated, "d.Ddx.LocalPosition = ddx( v.LocalPosition );" );
+		foreach ( var name in new[] { ShaderPasses.Forward, ShaderPasses.Depth } )
+		{
+			var pass = terrain.Pass( name );
+			var inputs = pass.Vertex.Inputs.Select( i => i.Semantic + i.SemanticIndex ).ToArray();
+			Assert.IsTrue( inputs.Contains( "POSITION0" ) && inputs.All( i => i is "POSITION0" or "TEXCOORD13" ), string.Join( ", ", inputs ) );
+			Assert.IsTrue( WritesClipDistance( pass.Vertex.Spirv ), $"{name} doesn't clip holes" );
+			Assert.IsTrue( pass.Vertex.Bindings.Any( b => b.Name == "TerrainMeshlets" ), $"{name} doesn't read the meshlets" );
+		}
+
+		// The grid is the D_GRID combo, a specialization constant in both stages
+		Assert.IsTrue( terrain.Pass( ShaderPasses.Forward ).Pixel.Specializations.Any( s => s.Attribute == "D_GRID" ) );
+	}
+
+	/// <summary>
+	/// water_surface.slang (water.shader as a surface that owns its vertex stage and shades itself) compiles: its vertex stage
+	/// reads the clipmap mesh's cells and levels, its forward pass lights two-sided ([Lighting( "S_DIFFUSE_TWO_SIDED" )])
+	/// and shades itself, and its material takes the .vmat's values by name.
+	/// </summary>
+	[TestMethod]
+	public void WaterSurfaceCompiles()
+	{
+		var water = Compiler().CompileSurface( Path.Combine( Core, "shaders", "water_surface.slang" ) );
+		StringAssert.Contains( water.Generated, "#define S_DIFFUSE_TWO_SIDED 1" );
+		StringAssert.Contains( water.Generated, "SurfaceForwardShaded<SurfaceWithStageShaded<Water, Water>, false>" );
+		StringAssert.Contains( water.Generated, "d.Ddx.Rest = ddx( v.Rest );" );
+		var inputs = water.Pass( ShaderPasses.Forward ).Vertex.Inputs.Select( i => i.Semantic + i.SemanticIndex ).ToArray();
+		foreach ( var semantic in new[] { "TEXCOORD0", "TEXCOORD1" } ) CollectionAssert.Contains( inputs, semantic, string.Join( ", ", inputs ) );
+		Assert.AreEqual( "g_fRoughness", water.Material.Field( "Roughness" ).Source );
+		Assert.IsTrue( water.Pass( ShaderPasses.Forward ).Pixel.Bindings.Any( b => b.Name == "RefractionTexture" ) );
+	}
+
+	/// <summary>
+	/// surface_test_rock.shader's materials load as the surface the converter makes of it, as the other core material shaders'
+	/// do: its conversion is found by default and compiles.
+	/// </summary>
+	[TestMethod]
+	public void SurfaceTestRockConvertsByDefault()
+	{
+		var shaders = Path.Combine( Core, "shaders" );
+		var converted = Path.Combine( Path.GetTempPath(), "borealis-gpu-tests", "converted" );
+		var errors = new List<string>();
+		var file = SurfaceShaders.DefaultSurfaceFiles( shaders, [], converted, errors.Add ).FirstOrDefault( f => Path.GetFileName( f ) == "surface_test_rock.slang" );
+		Assert.IsNotNull( file, "surface_test_rock isn't drawn as a surface by default: " + string.Join( "; ", errors ) );
+		var rock = Compiler().CompileSurface( file );
+		Assert.IsNotNull( rock.Pass( ShaderPasses.Forward )?.Pixel );
+		Assert.IsNotNull( rock.Material.Field( "Color" ) );
+	}
+
+	/// <summary>
+	/// A translucency feature a material's shader declares but never reads doesn't make it blend, as on native: blendable.shader
+	/// had common/features.hlsl's <c>F_ADDITIVE_BLEND</c> and no combo following it, so a blendable material that kept the
+	/// value from another shader (Unicycle Frenzy's start pad trim) was opaque there, and package shaders still declare it so.
+	/// Such a material is opaque and converts to a surface that doesn't read the feature; one whose shader's static combo
+	/// follows the feature (<c>S_ADDITIVE_BLEND</c>) still blends.
+	/// </summary>
+	[TestMethod]
+	public void TranslucencyFeaturesTheShaderDoesntReadDontBlend()
+	{
+		static MaterialFile MaterialOf( string shader, Dictionary<string, int> ints ) => new()
+		{
+			Name = "trim",
+			Shader = shader,
+			Ints = ints,
+			Floats = new Dictionary<string, float>(),
+			Vectors = new Dictionary<string, float[]>(),
+			Textures = new Dictionary<string, string>(),
+			IntAttributes = new Dictionary<string, int>(),
+		};
+
+		// F_MULTIBLEND picks code; F_ADDITIVE_BLEND only where the shader has S_ADDITIVE_BLEND
+		static ShaderFile Described( bool readsAdditive )
+		{
+			ShaderCombo[] features = [new() { Name = "F_MULTIBLEND", Min = 0, Max = 3, FeatureIndex = 0, Strings = [] }, new() { Name = "F_ADDITIVE_BLEND", Min = 0, Max = 1, FeatureIndex = 1, Strings = [] }];
+			var statics = new List<ShaderCombo> { new() { Name = "S_MULTIBLEND", Min = 0, Max = 3, FeatureIndex = 0, Strings = [] } };
+			if ( readsAdditive ) statics.Add( new() { Name = "S_ADDITIVE_BLEND", Min = 0, Max = 1, FeatureIndex = 1, Strings = [] } );
+			return ShaderFile.FromModule( readsAdditive ? "reads" : "declares", [new ShaderMode { Name = "Forward", Fallback = "", Settings = [] }], features,
+				[(ShaderProgramType.Vertex, [], []), (ShaderProgramType.Pixel, [.. statics], [])] );
+		}
+
+		var declares = Described( false );
+		var reads = Described( true );
+		Assert.IsTrue( declares.FeatureIndex( "F_ADDITIVE_BLEND" ) >= 0 );
+		Assert.IsFalse( declares.FeatureSelectsCode( declares.FeatureIndex( "F_ADDITIVE_BLEND" ) ) );
+		Assert.IsTrue( declares.FeatureSelectsCode( declares.FeatureIndex( "F_MULTIBLEND" ) ) );
+		Assert.IsTrue( reads.FeatureSelectsCode( reads.FeatureIndex( "F_ADDITIVE_BLEND" ) ) );
+
+		var trim = MaterialOf( "shaders/blendable.shader", new() { ["F_MULTIBLEND"] = 1, ["F_ADDITIVE_BLEND"] = 1 } );
+		using var trimMaterial = new BackendMaterial( "trim", declares, trim, null );
+		Assert.IsFalse( trimMaterial.IsTranslucent, "a material blends by a feature its shader doesn't read" );
+		var surface = Compiler().CompileSurface( Path.Combine( Core, "shaders", "blendable.slang" ) );
+		Assert.IsTrue( ConvertedMaterial.Accepts( surface, trim, declares ), "blendable.slang doesn't take the material" );
+
+		using var additive = new BackendMaterial( "additive", reads, trim, null );
+		Assert.IsTrue( additive.IsTranslucent, "a material whose shader reads F_ADDITIVE_BLEND is opaque" );
+	}
+
+	/// <summary>
+	/// The converter's render state: a .shader's RenderState lines evaluated per feature value become the struct's
+	/// attributes and rules on the features' fields, as static_overlay.slang and standard.slang declare them by hand.
+	/// </summary>
+	[TestMethod]
+	public void ConverterTranslatesRenderStates()
+	{
+		if ( Core is null ) Assert.Inconclusive( "No game content" );
+		static ShaderConverter.RenderStates Translate( string name )
+		{
+			// static_overlay.shader and generic.shader are gone (surfaces stand in alone): the test keeps copies
+			var data = Path.Combine( AppContext.BaseDirectory, "Data", name + ".shader" );
+			var text = File.ReadAllText( File.Exists( data ) ? data : Path.Combine( Core, "shaders", name + ".shader" ) );
+			var combos = System.Text.RegularExpressions.Regex.Matches( text, @"StaticCombo\(\s*(S_\w+)\s*,\s*(F_\w+)" ).DistinctBy( m => m.Groups[1].Value ).ToDictionary( m => m.Groups[1].Value, m => m.Groups[2].Value );
+			var features = System.Text.RegularExpressions.Regex.Matches( text, @"Feature\(\s*(F_\w+)\s*,\s*(\d+)\s*\.\.\s*(\d+)" ).ToDictionary( m => m.Groups[1].Value, m => (int.Parse( m.Groups[2].Value ), int.Parse( m.Groups[3].Value )) );
+			features.TryAdd( "F_RENDER_BACKFACES", (0, 1) );
+			return ShaderConverter.TranslateRenderState( text, combos, features );
+		}
+
+		var overlay = Translate( "static_overlay" );
+		var overlayRules = string.Join( "\n", overlay.Rules.Select( r => $"{r.Feature}: {r.Rule}" ) );
+		Assert.AreEqual( "NoDepthWrite, DepthBias( 250, 0.5 )", overlay.Attributes, overlayRules );
+		Assert.AreEqual( "F_BLEND_MODE: Blend: Opaque, Alpha, Opaque, Mod2x, Additive, Multiply, ModulateAdd; AlphaTest: false, false, true, false, false, false, false", overlayRules, string.Join( "\n", overlay.Notes ) );
+
+		var generic = Translate( "generic" );
+		var genericRules = string.Join( "\n", generic.Rules.Select( r => $"{r.Feature}: {r.Rule}" ) );
+		Assert.AreEqual( "", generic.Attributes, genericRules );
+		Assert.AreEqual( "F_TRANSLUCENT: Blend: Alpha", genericRules, string.Join( "\n", generic.Notes ) );
+
+		// Additive blending needs translucency on as well in generic.shader: a combination its own rule can't give alone
+		Assert.IsTrue( generic.Notes.Any( n => n.Contains( "F_ADDITIVE_BLEND", StringComparison.Ordinal ) ), string.Join( "\n", generic.Notes ) );
+	}
+
+}
+
+static class SurfaceFixtures
+{
+	internal static string Core => ContentFiles.FindGame().Roots.FirstOrDefault();
+
+	internal static string Surfaces => Path.GetFullPath( Path.Combine( Core, "..", "..", "engine", "Launcher", "BorealisLab", "Surfaces" ) );
+
+	/// <summary>
+	/// The engine's Slang over the core shaders, with the backend's disk cache (<see cref="Fixtures.SurfaceCache"/>): a surface
+	/// compiles once until it or anything it reads changes. Tests of compiling itself make compilers of their own.
+	/// </summary>
+	internal static SlangCompiler Compiler()
+	{
+		if ( Core is null ) Assert.Inconclusive( "No game content" );
+		var bin = EngineFolders.NativeIn( Path.GetDirectoryName( Core ) );
+		if ( !File.Exists( Path.Combine( bin, EngineFolders.Library( "slang" ) ) ) ) Assert.Inconclusive( "The engine's Slang isn't built" );
+		return new SlangCompiler( bin, [Path.Combine( Core, "shaders" )] ) { CacheFolder = Fixtures.SurfaceCache };
+	}
+
+	/// <summary>Whether SPIR-V declares the ClipDistance capability (OpCapability 32): a stage that writes clip distances.</summary>
+	internal static bool WritesClipDistance( byte[] spirv )
+	{
+		for ( int i = 20; i + 8 <= spirv.Length; i += 4 )
+		{
+			if ( BitConverter.ToUInt32( spirv, i ) == 0x00020011u && BitConverter.ToUInt32( spirv, i + 4 ) == 32u ) return true;
+		}
+
+		return false;
 	}
 }

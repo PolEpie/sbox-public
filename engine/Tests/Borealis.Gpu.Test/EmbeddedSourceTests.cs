@@ -18,11 +18,11 @@ namespace BorealisGpuTests;
 [DoNotParallelize]
 public class EmbeddedSourceTests : GpuTest
 {
-	// A pass shader the engine still compiles from a .shader (unlit, a UI pass), so there is a current .shader_c to compare with
-	const string Shader = "shaders/unlit.shader";
+	// A postprocess pass the game still compiles from a .shader, not an orphaned .shader_c left by a Slang migration.
+	const string Shader = "addons/sandbox/Assets/postprocess/comicprint/comicprint.shader";
 
 	/// <summary>
-	/// unlit as a package would ship it from an older engine: the ABI epoch it was compiled for isn't this one, and
+	/// comicprint as a package would ship it from an older engine: the ABI epoch it was compiled for isn't this one, and
 	/// each program's source is embedded as the compiler embeds it. It loads and draws from that source, the variant the
 	/// same as the current file's, and nothing recompiles it.
 	/// </summary>
@@ -32,14 +32,16 @@ public class EmbeddedSourceTests : GpuTest
 		var folder = Folder();
 		try
 		{
-			using var backend = Backend( folder, out var current );
+			var (_, current) = Fixture();
+			using var backend = Backend( folder );
 			var errors = new List<string>();
 			backend.Passes.Error = errors.Add;
 			backend.Shaders.UpgradeCache = Path.Combine( folder, "upgraded" );
 			backend.Shaders.Upgrader = ( _, _ ) => throw new AssertFailedException( "recompiled through the ShaderCompiler" );
 
-			Write( folder, Outdated( current, Embedded( File.ReadAllText( Source() ) ) ) );
-			var shader = backend.Shaders.Load( "shaders/package_vignette.shader" );
+			const string packageName = "package_comicprint";
+			Write( folder, Outdated( current, FixturePrograms( current ) ), packageName );
+			var shader = backend.Shaders.Load( $"shaders/{packageName}.shader" );
 			Assert.IsNotNull( shader );
 			Assert.IsNotNull( shader.Outdated, "read as it is, outdated" );
 
@@ -49,7 +51,7 @@ public class EmbeddedSourceTests : GpuTest
 			Assert.AreEqual( 0, errors.Count, string.Join( "\n", errors ) );
 			var differences = PassModuleTests.Compare( classic, module ).ToList();
 			Assert.AreEqual( 0, differences.Count, string.Join( "\n", differences ) );
-			Assert.IsTrue( Directory.EnumerateFiles( Path.Combine( folder, "embedded" ), "package_vignette.*.slang" ).Any(), "the module is written down" );
+			Assert.IsTrue( Directory.EnumerateFiles( Path.Combine( folder, "embedded" ), $"{packageName}.*.slang" ).Any(), "the module is written down" );
 		}
 		finally
 		{
@@ -67,7 +69,8 @@ public class EmbeddedSourceTests : GpuTest
 		var folder = Folder();
 		try
 		{
-			using var backend = Backend( folder, out var current );
+			var (_, current) = Fixture();
+			using var backend = Backend( folder );
 			var errors = new List<string>();
 			backend.Passes.Error = errors.Add;
 			var unloaded = new List<string>();
@@ -82,8 +85,7 @@ public class EmbeddedSourceTests : GpuTest
 			};
 
 			// Source that doesn't compile: the module is tried, then the recompile
-			var broken = Embedded( File.ReadAllText( Source() ).Replace( "return o;", "return oo;" ) );
-			Write( folder, Outdated( current, broken ), "package_broken" );
+			Write( folder, Outdated( current, Broken( current ) ), "package_broken" );
 			var shader = backend.Shaders.Load( "shaders/package_broken.shader" );
 			Assert.IsNotNull( shader?.Outdated );
 			var variant = backend.Shaders.Variant( shader, "Default", [] );
@@ -118,7 +120,8 @@ public class EmbeddedSourceTests : GpuTest
 		using var release = new ManualResetEventSlim();
 		try
 		{
-			using var backend = Backend( folder, out var current );
+			var (_, current) = Fixture();
+			using var backend = Backend( folder );
 			backend.Passes.Error = _ => { };
 			var recompiled = 0;
 			backend.Shaders.UpgradeCache = Path.Combine( folder, "upgraded" );
@@ -131,8 +134,7 @@ public class EmbeddedSourceTests : GpuTest
 				return true;
 			};
 
-			var broken = Embedded( File.ReadAllText( Source() ).Replace( "return o;", "return oo;" ) );
-			Write( folder, Outdated( current, broken ), "package_slow" );
+			Write( folder, Outdated( current, Broken( current ) ), "package_slow" );
 			var shader = backend.Shaders.Load( "shaders/package_slow.shader" );
 			Assert.IsNotNull( shader?.Outdated );
 
@@ -165,15 +167,15 @@ public class EmbeddedSourceTests : GpuTest
 		var folder = Folder();
 		try
 		{
-			using var backend = Backend( folder, out var current );
+			var (_, current) = Fixture();
+			using var backend = Backend( folder );
 			backend.Passes.Error = _ => { };
 			var unloaded = new List<string>();
 			backend.Shaders.Unloaded = unloaded.Add;
 			backend.Shaders.UpgradeCache = Path.Combine( folder, "upgraded" );
 			backend.Shaders.Upgrader = ( _, _ ) => false;
 
-			var broken = Embedded( File.ReadAllText( Source() ).Replace( "return o;", "return oo;" ) );
-			Write( folder, Outdated( current, broken ), "package_unloadable" );
+			Write( folder, Outdated( current, Broken( current ) ), "package_unloadable" );
 			var shader = backend.Shaders.Load( "shaders/package_unloadable.shader" );
 			Assert.IsNotNull( shader?.Outdated );
 
@@ -189,9 +191,8 @@ public class EmbeddedSourceTests : GpuTest
 	}
 
 	/// <summary>
-	/// A shader with a Slang module and no compiled file at all: it loads by its path from what the module declares (its
-	/// MODES lines, combos) and draws from the module, the variant the same as unlit's own; with modules off it has
-	/// nothing to draw.
+	/// A shader with a Slang module and no compiled file at all: it loads by its path from what the module declares and
+	/// draws from the module, matching comicprint's compiled variant; with the module skipped it has nothing to draw.
 	/// </summary>
 	[TestMethod]
 	public void ShaderWithOnlyAModuleLoads()
@@ -199,16 +200,19 @@ public class EmbeddedSourceTests : GpuTest
 		var folder = Folder();
 		try
 		{
-			using var backend = Backend( folder, out var current );
+			var (path, current) = Fixture();
+			using var backend = Backend( folder );
 			var errors = new List<string>();
 			backend.Passes.Error = errors.Add;
-			File.Copy( Path.ChangeExtension( Source(), ".slang" ), Path.Combine( folder, "shaders", "moduleonly_vignette.slang" ) );
+			const string moduleName = "moduleonly_comicprint";
+			var source = Sandbox.ShaderCompiler.PassConverter.ConvertStandalone( File.ReadAllText( path ), moduleName );
+			File.WriteAllText( Path.Combine( folder, "shaders", moduleName + ".slang" ), source );
 
-			var shader = backend.Shaders.Load( "shaders/moduleonly_vignette.shader" );
+			var shader = backend.Shaders.Load( $"shaders/{moduleName}.shader" );
 			Assert.IsNotNull( shader, "found by its module" );
 			Assert.IsTrue( shader.ModuleOnly );
-			CollectionAssert.AreEqual( new[] { "Default" }, shader.Modes.Select( m => m.Name ).ToArray() );
-			Assert.AreSame( shader, backend.Shaders.Load( "shaders/moduleonly_vignette.shader" ) );
+			CollectionAssert.AreEqual( new[] { "Default", "Forward" }, shader.Modes.Select( m => m.Name ).ToArray() );
+			Assert.AreSame( shader, backend.Shaders.Load( $"shaders/{moduleName}.shader" ) );
 
 			var module = backend.Shaders.Variant( shader, "Default", [] );
 			Assert.IsTrue( module is { FromModule: true } );
@@ -217,8 +221,8 @@ public class EmbeddedSourceTests : GpuTest
 			Assert.AreEqual( 0, differences.Count, string.Join( "\n", differences ) );
 
 			Assert.IsNull( backend.Shaders.Load( "shaders/moduleonly_missing.shader" ), "no module, no shader" );
-			backend.SlangPasses = false;
-			Assert.IsNull( backend.Shaders.Variant( shader, "Forward", [] ), "nothing to draw without its module" );
+			backend.Passes.Skip.Add( moduleName );
+			Assert.IsNull( backend.Shaders.Variant( shader, "Default", [] ), "nothing to draw without its module" );
 		}
 		finally
 		{
@@ -335,13 +339,13 @@ public class EmbeddedSourceTests : GpuTest
 		var folder = Folder();
 		try
 		{
-			using var backend = Backend( folder, out _ );
+			using var backend = Backend( folder );
 			var errors = new List<string>();
 			backend.Passes.Error = errors.Add;
 			backend.Shaders.UpgradeCache = Path.Combine( folder, "upgraded" );
 			backend.Shaders.Upgrader = ( _, _ ) => throw new AssertFailedException( "recompiled through the ShaderCompiler" );
 			var current = File.ReadAllBytes( scope + "_c" );
-			Write( folder, Outdated( current, Embedded( File.ReadAllText( scope ) ) ), "package_scope" );
+			Write( folder, Outdated( current, Embedded( File.ReadAllText( scope ), scope ) ), "package_scope" );
 			var shader = backend.Shaders.Load( "shaders/package_scope.shader" );
 			Assert.IsNotNull( shader?.Outdated );
 			var index = shader.FeatureIndex( "F_TEXTURE_FILTERING" );
@@ -393,7 +397,7 @@ public class EmbeddedSourceTests : GpuTest
 		var features = (compiled.Features?.StaticCombos ?? []).Select( c => (c.Name, c.Min, c.Max) );
 
 		var direct = Sandbox.ShaderCompiler.ShaderConverter.Convert( text, "surface_test_rock" );
-		var shader = Sandbox.ShaderCompiler.ShaderConverter.FromEmbedded( Embedded( text ), features );
+		var shader = Sandbox.ShaderCompiler.ShaderConverter.FromEmbedded( Embedded( text, Rock ), features );
 		var embedded = Sandbox.ShaderCompiler.ShaderConverter.Convert( shader, "surface_test_rock" );
 		Assert.IsNotNull( direct.Source, string.Join( "; ", direct.Notes ) );
 		Assert.AreEqual( Normalized( direct.Source ), Normalized( embedded.Source ) );
@@ -411,12 +415,12 @@ public class EmbeddedSourceTests : GpuTest
 		var folder = Folder();
 		try
 		{
-			using var backend = Backend( folder, out _ );
+			using var backend = Backend( folder );
 			var errors = new List<string>();
 			backend.Surfaces.Error = errors.Add;
 			backend.Surfaces.CacheFolder = Path.Combine( folder, "surfaces" );
 			var rock = ShaderFileTests.Files.Read( Rock );
-			Write( folder, Outdated( rock, Embedded( File.ReadAllText( Path.Combine( ShaderFileTests.Files.Roots[0], Rock ) ) ) ), "package_rock" );
+			Write( folder, Outdated( rock, Embedded( File.ReadAllText( Path.Combine( ShaderFileTests.Files.Roots[0], Rock ) ), Rock ) ), "package_rock" );
 
 			static Borealis.Source2.Materials.MaterialFile Material( string name ) => new()
 			{
@@ -453,11 +457,15 @@ public class EmbeddedSourceTests : GpuTest
 		return folder;
 	}
 
-	static string Source() => Path.Combine( ShaderFileTests.Files.Roots[0], Shader.Replace( '/', Path.DirectorySeparatorChar ) );
-
-	BackendDevice Backend( string folder, out byte[] current )
+	static (string Path, byte[] Compiled) Fixture()
 	{
-		current = ShaderFileTests.Files.Read( Shader );
+		var path = Path.Combine( Path.GetDirectoryName( ShaderFileTests.Files.Roots[0] ), Shader );
+		if ( !File.Exists( path + "_c" ) ) Assert.Inconclusive( "comicprint.shader isn't compiled (run Bootstrap)" );
+		return (path, File.ReadAllBytes( path + "_c" ));
+	}
+
+	BackendDevice Backend( string folder )
+	{
 		var backend = new BackendDevice( Device );
 		backend.Content.Add( folder );
 		backend.Passes.EmbeddedFolder = Path.Combine( folder, "embedded" );
@@ -478,13 +486,30 @@ public class EmbeddedSourceTests : GpuTest
 		}
 	}
 
-	static void Write( string folder, byte[] file, string name = "package_vignette" ) => File.WriteAllBytes( Path.Combine( folder, "shaders", $"{name}.shader_c" ), file );
+	static void Write( string folder, byte[] file, string name ) => File.WriteAllBytes( Path.Combine( folder, "shaders", $"{name}.shader_c" ), file );
+
+	static IReadOnlyDictionary<string, string> FixturePrograms( byte[] current )
+	{
+		var programs = ShaderFile.Read( current, Shader ).EmbeddedSource;
+		Assert.IsNotNull( programs, "the compiler embeds the addon's shader source" );
+		return programs;
+	}
+
+	static Dictionary<string, string> Broken( byte[] current )
+	{
+		var programs = new Dictionary<string, string>( FixturePrograms( current ) );
+		const string vertex = "VFX_PROGRAM_VS";
+		const string validReturn = "return output;";
+		StringAssert.Contains( programs[vertex], validReturn, "the return to break in the embedded vertex program" );
+		programs[vertex] = programs[vertex].Replace( validReturn, "return invalidOutput;", StringComparison.Ordinal );
+		return programs;
+	}
 
 	/// <summary>
 	/// Each program's source as the compiler embeds it: the whole <c>.shader</c> with HEADER, MODES, FEATURES and the
 	/// other programs' blocks blanked, and the block names and braces of COMMON and its own program, so lines stay put.
 	/// </summary>
-	static Dictionary<string, string> Embedded( string shader )
+	static Dictionary<string, string> Embedded( string shader, string path )
 	{
 		shader = shader.Replace( "\r\n", "\n" );
 		var blocks = new List<(string Name, int Start, int Open, int Close)>();
@@ -524,7 +549,7 @@ public class EmbeddedSourceTests : GpuTest
 				}
 			}
 
-			programs[$"VFX_PROGRAM_{program}"] = $"#line 1 \"{Shader}\"\n" + text;
+			programs[$"VFX_PROGRAM_{program}"] = $"#line 1 \"{path}\"\n" + text;
 		}
 
 		return programs;
@@ -534,7 +559,7 @@ public class EmbeddedSourceTests : GpuTest
 	/// A compiled file as an older engine would have written it: its programs stamped with another ABI epoch, and the
 	/// embedded source (null for none) in an <c>HLSL</c> block, as the compiler writes a package's.
 	/// </summary>
-	static byte[] Outdated( byte[] current, Dictionary<string, string> source )
+	static byte[] Outdated( byte[] current, IReadOnlyDictionary<string, string> source )
 	{
 		var file = (byte[])current.Clone();
 		var resource = Borealis.Source2.Resources.ResourceFile.Read( file );
@@ -546,20 +571,21 @@ public class EmbeddedSourceTests : GpuTest
 			BinaryPrimitives.WriteInt32LittleEndian( file.AsSpan( block + offset + 8 ), ShaderFile.AbiVersion - 2 );
 		}
 
-		if ( source is null ) return file;
+		if ( source is null && !resource.Has( "HLSL" ) ) return file;
 
-		// The blocks as they are, then the HLSL block, then a table of them all
-		var json = JsonSerializer.SerializeToUtf8Bytes( new { Programs = source } );
+		// Replace any compiler-written HLSL entry (or omit it for a shader with no source).
+		byte[] json = source is null ? [] : JsonSerializer.SerializeToUtf8Bytes( new { Programs = source } );
 		var table = 8 + BinaryPrimitives.ReadInt32LittleEndian( file.AsSpan( 8 ) );
 		var count = BinaryPrimitives.ReadInt32LittleEndian( file.AsSpan( 12 ) );
 		var entries = new List<(byte[] Name, int Offset, int Size)>();
 		for ( int i = 0; i < count; i++ )
 		{
 			var entry = table + i * 12;
+			if ( file.AsSpan( entry, 4 ).SequenceEqual( "HLSL"u8 ) ) continue;
 			entries.Add( (file.AsSpan( entry, 4 ).ToArray(), entry + 4 + BinaryPrimitives.ReadInt32LittleEndian( file.AsSpan( entry + 4 ) ), BinaryPrimitives.ReadInt32LittleEndian( file.AsSpan( entry + 8 ) )) );
 		}
 
-		entries.Add( (Encoding.ASCII.GetBytes( "HLSL" ), file.Length, json.Length) );
+		if ( source is not null ) entries.Add( (Encoding.ASCII.GetBytes( "HLSL" ), file.Length, json.Length) );
 		var newTable = file.Length + json.Length;
 		var result = new byte[newTable + entries.Count * 12];
 		file.CopyTo( result, 0 );

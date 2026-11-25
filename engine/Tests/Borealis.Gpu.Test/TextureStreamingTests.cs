@@ -139,8 +139,8 @@ public class TextureStreamingTests : GpuTest
 	}
 
 	/// <summary>
-	/// A streamed material texture starts as its tail; a draw asking for every mip gets a new image of them all, the material
-	/// re-keyed; a budget too small for it gives them back, a mip a build, down to the tail.
+	/// A streamed material texture starts as its tail; a draw asking for every mip gets a new image of them all under the same
+	/// handle, its materials' versions as they were; a budget too small for it gives them back, a mip a build, down to the tail.
 	/// </summary>
 	[TestMethod]
 	public void AskedMipsSwapInAndGoBackUnderBudget()
@@ -166,10 +166,11 @@ public class TextureStreamingTests : GpuTest
 		}
 
 		Assert.AreEqual( 0, stream.ResidentTop );
+		SettleImage( backend, texture, texture.Width );
 		Assert.AreEqual( texture.Width, Device.InfoOf( texture.Handle ).Width );
 		Assert.AreEqual( texture.Mips, Device.InfoOf( texture.Handle ).Mips );
-		Assert.AreNotEqual( tail, texture.Handle );
-		Assert.AreNotEqual( version, material.Version );
+		Assert.AreEqual( tail, texture.Handle, "the handle stays through the swap" );
+		Assert.AreEqual( version, material.Version, "so do its material's version: nothing naming it is made again" );
 		Assert.IsFalse( backend.StreamingTextures );
 
 		// A budget of a byte: mips given back down to the tail, which always stays
@@ -182,7 +183,126 @@ public class TextureStreamingTests : GpuTest
 		}
 
 		Assert.AreEqual( stream.TailTop, stream.ResidentTop );
+		SettleImage( backend, texture, Math.Max( texture.Width >> stream.TailTop, 1 ) );
 		Assert.AreEqual( Math.Max( texture.Width >> stream.TailTop, 1 ), Device.InfoOf( texture.Handle ).Width );
+		Device.WaitIdle();
+	}
+
+	/// <summary>Frames until a swapped-in image is the texture's (a swap waits for others to join it, <see cref="Device.ReplaceAfterFrames"/>).</summary>
+	void SettleImage( BackendDevice backend, BackendTexture texture, int width )
+	{
+		for ( int frame = 0; frame < Device.ReplaceAfterFrames + 4 && Device.InfoOf( texture.Handle ).Width != width; frame++ ) backend.BeginFrame();
+	}
+
+	[System.Runtime.InteropServices.StructLayout( System.Runtime.InteropServices.LayoutKind.Sequential )]
+	struct SlotConstants
+	{
+		public uint Target, First, Second, Third;
+	}
+
+	/// <summary>What a draw reads from a bindless slot: texel (0, 0) of mip 0 of the image it names now (the slots compute, which loads it).</summary>
+	byte[] ReadSlot( int slot )
+	{
+		var info = TextureInfo.Texture2D( 1, 1, Format.RGBA8Unorm, name: "Slot target" );
+		info.Usage |= TextureUsage.Storage;
+		var target = Device.CreateTexture( info );
+		using var stream = typeof( BorealisGpuSample.SampleScene ).Assembly.GetManifestResourceStream( "slots.cs.spv" );
+		var code = new byte[stream.Length];
+		stream.ReadExactly( code );
+		var shader = Device.CreateShader( code, "slots" );
+		var pipeline = Device.CreateComputePipeline( new ComputePipelineInfo { Shader = shader, Entry = "MainCs" } );
+
+		var list = Device.BeginCommandList( QueueType.Graphics, "Read a slot" );
+		list.Barrier( TextureBarrier.Transition( target, ImageLayout.Undefined, ImageLayout.General, PipelineStage.TopOfPipe, MemoryAccess.None, PipelineStage.ComputeShader, MemoryAccess.ShaderWrite ) );
+		list.SetPipeline( pipeline );
+		list.PushConstants( new SlotConstants { Target = (uint)Device.StorageIndex( target ), First = (uint)slot } );
+		list.Dispatch( 1, 1 );
+		Device.Wait( Device.Submit( list ) );
+		var bytes = ReadBack( target, ImageLayout.General );
+		Device.Destroy( target );
+		Device.Destroy( pipeline );
+		Device.Destroy( shader );
+		return bytes;
+	}
+
+	/// <summary>
+	/// A streamed texture's new mips are swapped in under its bindless index, and what names it isn't made again: its
+	/// material's version stays (a move on forgets and remakes every draw record the material has, and rebuilds plans: a burst
+	/// of streaming did that a few hundred times a second), and a read of the slot gets the new image.
+	/// </summary>
+	[TestMethod]
+	public void StreamedMipsKeepTheBindlessIndexAndTheMaterialVersion()
+	{
+		var path = StreamingTextures( 1 )[0];
+		using var backend = new BackendDevice( Device ) { StreamTextures = true };
+		var texture = (BackendTexture)backend.MaterialTextureFile( path );
+		var stream = texture.Stream;
+		using var material = new BackendMaterial( "streamed", null, null, new( StringComparer.OrdinalIgnoreCase ) { ["g_tColor"] = texture } );
+		var (slot, version, layout) = (texture.BindlessIndex, material.Version, material.LayoutVersion);
+		Assert.AreEqual( Math.Max( texture.Width >> stream.TailTop, 1 ), Device.InfoOf( texture.Handle ).Width );
+
+		for ( int frame = 0; frame < 200 && stream.ResidentTop > 0; frame++ )
+		{
+			backend.AskTextures( material, TextureSizes.All );
+			backend.BeginFrame();
+			Thread.Sleep( 5 );
+		}
+
+		Assert.AreEqual( 0, stream.ResidentTop );
+		SettleImage( backend, texture, texture.Width );
+		Assert.AreEqual( texture.Width, Device.InfoOf( texture.Handle ).Width, "the new image is the texture's" );
+		Assert.AreEqual( slot, texture.BindlessIndex, "at the index it had" );
+		Assert.AreEqual( version, material.Version );
+		Assert.AreEqual( layout, material.LayoutVersion );
+
+		var reference = TextureFile.Read( ContentFiles.FindGame().TryRead( path ) ).Create( Device, "Streamed reference" );
+		CollectionAssert.AreEqual( ReadSlot( Device.BindlessIndex( reference ) ), ReadSlot( slot ), "a draw reading the index samples the new image" );
+		Device.Destroy( reference );
+		Device.WaitIdle();
+	}
+
+	/// <summary>
+	/// A texture given another image (<see cref="Device.Replace"/>) keeps its handle and bindless slot and samples its old
+	/// image until a frame swaps the new one in, when the slot names that; a second image before then takes the first's place,
+	/// and a texture destroyed meanwhile takes its image with it.
+	/// </summary>
+	[TestMethod]
+	public void ReplacedTextureKeepsItsSlotAndSwapsInTheNewImage()
+	{
+		var red = Device.CreateTexture( TextureInfo.Texture2D( 1, 1, Format.RGBA8Unorm, name: "Replaced" ) );
+		Device.WriteTexture( red, [255, 0, 0, 255] );
+		var slot = Device.BindlessIndex( red );
+
+		TextureHandle Made( byte r, byte g, byte b, string name )
+		{
+			var image = Device.CreateTexture( TextureInfo.Texture2D( 2, 2, Format.RGBA8Unorm, mips: 2, name: name ) );
+			Device.WriteTexture( image, [r, g, b, 255, r, g, b, 255, r, g, b, 255, r, g, b, 255], 0, 0 );
+			Device.WriteTexture( image, [r, g, b, 255], 1, 0 );
+			return image;
+		}
+
+		var blue = Made( 0, 0, 255, "Superseded" );
+		var green = Made( 0, 255, 0, "New" );
+		Device.ReplaceAfterFrames = 0;
+		Device.Replace( red, blue );
+		Device.Replace( red, green );
+		Assert.IsFalse( Device.IsAlive( blue ), "the second image takes the first's place" );
+		Assert.IsTrue( Device.IsReplacing( red ) );
+		CollectionAssert.AreEqual( new byte[] { 255, 0, 0, 255 }, ReadSlot( slot ), "work before the swap samples the old image" );
+		Assert.AreEqual( 1, Device.InfoOf( red ).Width );
+
+		Device.BeginFrame();
+		Assert.IsFalse( Device.IsReplacing( red ) );
+		Assert.AreEqual( slot, Device.BindlessIndex( red ), "the slot stays" );
+		Assert.AreEqual( 2, Device.InfoOf( red ).Width );
+		Assert.AreEqual( 2, Device.InfoOf( red ).Mips );
+		CollectionAssert.AreEqual( new byte[] { 0, 255, 0, 255 }, ReadSlot( slot ), "work after it samples the new" );
+
+		var gone = Made( 255, 255, 255, "Of a destroyed texture" );
+		Device.Replace( red, gone );
+		Device.Destroy( red );
+		Device.BeginFrame();
+		Assert.IsFalse( Device.IsAlive( gone ), "the new image of a destroyed texture goes with it" );
 		Device.WaitIdle();
 	}
 
@@ -309,6 +429,7 @@ public class TextureStreamingTests : GpuTest
 	{
 		var path = StreamingTextures( 1 )[0];
 		using var backend = new BackendDevice( Device ) { StreamTextures = true };
+		backend.Streamer.WindowFrames = int.MaxValue;
 		var texture = (BackendTexture)backend.MaterialTextureFile( path );
 		var stream = texture.Stream;
 		using var material = new BackendMaterial( "streamed", null, null, new( StringComparer.OrdinalIgnoreCase ) { ["g_tColor"] = texture } );
@@ -338,7 +459,9 @@ public class TextureStreamingTests : GpuTest
 		}
 
 		Assert.AreEqual( stream.TailTop, stream.ResidentTop );
+		SettleImage( backend, texture, Math.Max( texture.Width >> stream.TailTop, 1 ) );
 		Assert.AreEqual( Math.Max( texture.Width >> stream.TailTop, 1 ), Device.InfoOf( texture.Handle ).Width );
+		Assert.AreEqual( 0, backend.Streamer.Waiting, "an expired ask doesn't stream the texture back in" );
 		Assert.IsTrue( backend.Streamer.IdleGivenBack > 0 );
 		Device.WaitIdle();
 	}
@@ -443,7 +566,7 @@ public class TextureStreamingTests : GpuTest
 
 	/// <summary>
 	/// A streamed texture in a block being emptied (defragmenting) is copied into new memory on the GPU between frames and
-	/// swapped in: a new image elsewhere, with every mip, its materials re-keyed.
+	/// swapped in under its handle: an image elsewhere, with every mip, its materials' versions as they were.
 	/// </summary>
 	[TestMethod]
 	public void TexturesMoveOutOfDrainingBlocks()
@@ -464,7 +587,7 @@ public class TextureStreamingTests : GpuTest
 		var room = Device.CreateTexture( new TextureInfo { Width = 256, Height = 256, Format = Format.RGBA8Unorm, Usage = TextureUsage.Sampled | TextureUsage.CopyDestination, Name = "Room", Content = true } );
 		try
 		{
-			for ( int frame = 0; frame < 20 && texture.Handle == before; frame++ ) backend.BeginFrame();
+			for ( int frame = 0; frame < 20 && Device.Get( texture.Handle ).Memory.Block == block; frame++ ) backend.BeginFrame();
 		}
 		finally
 		{
@@ -472,10 +595,10 @@ public class TextureStreamingTests : GpuTest
 			Device.Destroy( room );
 		}
 
-		Assert.AreNotEqual( before, texture.Handle, "moved" );
-		Assert.AreNotSame( block, Device.Get( texture.Handle ).Memory.Block, "into another block" );
+		Assert.AreEqual( before, texture.Handle, "the handle stays" );
+		Assert.AreNotSame( block, Device.Get( texture.Handle ).Memory.Block, "moved into another block" );
 		Assert.AreEqual( stream.TailTop, stream.ResidentTop );
-		Assert.AreNotEqual( version, material.Version, "its materials re-key" );
+		Assert.AreEqual( version, material.Version, "its materials aren't made again" );
 		Assert.IsTrue( backend.Streamer.Moved >= 1 );
 		Device.WaitIdle();
 	}

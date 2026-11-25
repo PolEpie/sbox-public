@@ -1,6 +1,7 @@
 using Borealis.Gpu;
 using Borealis.Source2.Shaders;
 using Sandbox.ShaderCompiler;
+using System.Collections.Concurrent;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
@@ -868,11 +869,11 @@ internal sealed class SurfaceProgram : IDisposable
 	readonly Dictionary<string, PassObjects> passes = new();
 	// Pipelines' keys are record structs, not tuples: a tuple of eight or more keeps the rest in a tuple of its own, which its
 	// hash and equality box until the JIT has optimised them, so every draw's lookup allocated in a run's first seconds
-	readonly record struct PipelineKey( PassObjects Pass, VertexLayout Layout, Format Color, Format Depth, int Samples, ulong Constants, bool Ids, bool OpaqueFade, SurfaceRenderState State, bool DepthEqual, ulong Features, bool Normals );
-	readonly record struct ImmediateKey( PassObjects Pass, VertexLayout Layout, Format Color, Format Depth, int Samples, ulong Constants, SurfaceRenderState State, PrimitiveTopology Topology, bool Ids, bool OpaqueFade, ToolsPass Tools );
-	readonly record struct ToolsKey( PassObjects Pass, VertexLayout Layout, Format Color, Format Depth, int Samples, ulong Constants, bool OpaqueFade, SurfaceRenderState State, bool DepthEqual, bool Normals, ToolsPass Tools );
+	readonly record struct PipelineKey( PassObjects Pass, VertexLayout Layout, Format Color, Format Depth, int Samples, ulong Constants, bool Ids, bool OpaqueFade, SurfaceRenderState State, bool DepthEqual, ulong Features, bool Normals, OverlayStencil Stencil );
+	readonly record struct ImmediateKey( PassObjects Pass, VertexLayout Layout, Format Color, Format Depth, int Samples, ulong Constants, SurfaceRenderState State, PrimitiveTopology Topology, bool Ids, bool OpaqueFade, ToolsPass Tools, OverlayStencil Stencil );
+	readonly record struct ToolsKey( PassObjects Pass, VertexLayout Layout, Format Color, Format Depth, int Samples, ulong Constants, bool OpaqueFade, SurfaceRenderState State, bool DepthEqual, bool Normals, ToolsPass Tools, OverlayStencil Stencil );
 
-	readonly Dictionary<PipelineKey, PipelineHandle> pipelines = new();
+	readonly ConcurrentDictionary<PipelineKey, PipelineHandle> pipelines = new();
 	readonly HashSet<PipelineKey> building = new();
 	readonly Dictionary<ulong, SurfaceFeatures> features = new();
 	readonly List<System.Threading.Tasks.Task> builds = new();
@@ -947,8 +948,10 @@ internal sealed class SurfaceProgram : IDisposable
 				var bySet = stage.Bindings.Where( b => b.Set < ShaderAbi.BindlessSet ).GroupBy( b => b.Set );
 				foreach ( var group in bySet )
 				{
-					var slots = group.Select( b => new BindingSlot( b.Binding, Type( b ), flags, Math.Max( b.Count, 1 ) ) ).ToArray();
-					sets[group.Key] = device.Gpu.CreateBindingLayout( slots );
+					// Layouts describe slots, not resource names. Sharing the same handle also lets the command list
+					// reuse descriptor sets across passes with the same layout and binding values.
+					var slots = group.OrderBy( b => b.Binding ).Select( b => new BindingSlot( b.Binding, Type( b ), flags, Math.Max( b.Count, 1 ) ) ).ToList();
+					sets[group.Key] = device.MaterialCache.Layout( slots );
 				}
 			}
 
@@ -1004,7 +1007,13 @@ internal sealed class SurfaceProgram : IDisposable
 	{
 		get
 		{
-			lock ( pipelines ) return (pipelines.Keys.Count( k => k.Features != 0 ), building.Count);
+			lock ( pipelines )
+			{
+				var made = 0;
+				foreach ( var (key, _) in pipelines )
+					if ( key.Features != 0 ) made++;
+				return (made, building.Count);
+			}
 		}
 	}
 
@@ -1059,22 +1068,27 @@ internal sealed class SurfaceProgram : IDisposable
 	/// In a tools pass (<paramref name="tools"/>) a colour pass draws with the engine's pixel stage instead
 	/// (<see cref="ToolsViewStage"/>), unspecialised and not kept for the next run.
 	/// </summary>
-	public PipelineHandle Pipeline( PassObjects pass, VertexLayout layout, Format color, Format depth, int samples, SpecializationConstant[] vertexConstants, SpecializationConstant[] pixelConstants, ulong constantsKey, SurfaceRenderState state, bool ids = false, bool opaqueFade = false, bool depthEqual = false, SurfaceFeatures specialized = null, bool normals = false, ToolsPass tools = ToolsPass.None )
+	public PipelineHandle Pipeline( PassObjects pass, VertexLayout layout, Format color, Format depth, int samples, SpecializationConstant[] vertexConstants, SpecializationConstant[] pixelConstants, ulong constantsKey, SurfaceRenderState state, bool ids = false, bool opaqueFade = false, bool depthEqual = false, SurfaceFeatures specialized = null, bool normals = false, ToolsPass tools = ToolsPass.None, OverlayStencil stencil = OverlayStencil.None )
 	{
 		// Only a pixel stage reads the features
 		if ( !pass.Pixel.IsValid ) specialized = null;
 		normals &= color != Format.Unknown && !ids;
+		if ( !depth.HasStencil() ) stencil = OverlayStencil.None;
 
 		// An ids pipeline is keyed by the ids target's format it draws into (BackendDevice.IdsFormat)
 		if ( ids && !BackendDevice.IsIdsFormat( color ) ) color = device.IdsFormat;
-		if ( tools != ToolsPass.None && color != Format.Unknown && !ids ) return ToolsPipeline( pass, layout, color, depth, samples, vertexConstants, constantsKey, state, opaqueFade, depthEqual, normals, tools );
-		var key = new PipelineKey( pass, layout, color, depth, samples, constantsKey, ids, opaqueFade, state, depthEqual, specialized?.Key ?? 0, normals );
+		tools = ids || color == Format.Unknown ? ToolsPass.None : ToolsViewStage.ReadyPass( device.Shaders, tools );
+		if ( tools != ToolsPass.None ) return ToolsPipeline( pass, layout, color, depth, samples, vertexConstants, constantsKey, state, opaqueFade, depthEqual, normals, tools, stencil );
+		var key = new PipelineKey( pass, layout, color, depth, samples, constantsKey, ids, opaqueFade, state, depthEqual, specialized?.Key ?? 0, normals, stencil );
+
+		// Most draws hit a published pipeline. Keep misses and prewarming serialized without blocking those readers.
+		if ( pipelines.TryGetValue( key, out var pipeline ) ) return pipeline;
 
 		// Never waited for: one a worker is making from the manifest is asked for again here, its draws skipped until made
 		// (GraphicsPipelineInfo.SkipUntilReady); the worker finds it made and drops its own
 		lock ( pipelines )
 		{
-			if ( pipelines.TryGetValue( key, out var pipeline ) ) return pipeline;
+			if ( pipelines.TryGetValue( key, out pipeline ) ) return pipeline;
 			return MakePipeline( key, pass, layout, color, depth, samples, vertexConstants, pixelConstants, constantsKey, state, ids, opaqueFade, depthEqual, specialized, normals );
 		}
 	}
@@ -1088,14 +1102,15 @@ internal sealed class SurfaceProgram : IDisposable
 	/// the start of the default stream as a classic draw's are; the default stream is 2. In a tools pass the colour pass draws
 	/// with the engine's pixel stage, as scene draws do.
 	/// </summary>
-	public PipelineHandle ImmediatePipeline( PassObjects pass, VertexLayout layout, Format color, Format depth, int samples, SpecializationConstant[] vertexConstants, SpecializationConstant[] pixelConstants, ulong constantsKey, SurfaceRenderState state, PrimitiveTopology topology, bool ids, bool opaqueFade, ToolsPass tools )
+	public PipelineHandle ImmediatePipeline( PassObjects pass, VertexLayout layout, Format color, Format depth, int samples, SpecializationConstant[] vertexConstants, SpecializationConstant[] pixelConstants, ulong constantsKey, SurfaceRenderState state, PrimitiveTopology topology, bool ids, bool opaqueFade, ToolsPass tools, OverlayStencil stencil )
 	{
-		if ( color == Format.Unknown ) tools = ToolsPass.None;
-		var key = new ImmediateKey( pass, layout, color, depth, samples, constantsKey, state, topology, ids, opaqueFade, tools );
+		tools = color == Format.Unknown ? ToolsPass.None : ToolsViewStage.ReadyPass( device.Shaders, tools );
+		if ( !depth.HasStencil() ) stencil = OverlayStencil.None;
+		var key = new ImmediateKey( pass, layout, color, depth, samples, constantsKey, state, topology, ids, opaqueFade, tools, stencil );
 		lock ( pipelines )
 		{
 			if ( immediatePipelines.TryGetValue( key, out var made ) ) return made;
-			var info = Info( pass, layout, color, depth, samples, vertexConstants, pixelConstants, state, false, opaqueFade, false, false ) with { SkipUntilReady = false, Topology = topology };
+			var info = Info( pass, layout, color, depth, samples, vertexConstants, pixelConstants, state, false, opaqueFade, false, false, stencil ) with { SkipUntilReady = false, Topology = topology };
 			if ( !ids ) info.VertexBuffers[1] = new VertexBufferLayout( 0, VertexStepRate.Instance );
 			if ( tools != ToolsPass.None ) ToolsViewStage.Apply( device.Shaders, ref info, tools, ToolsViews.ShaderColor( Compiled.Name ) );
 			using ( Zones.PipelineCreate.Start() ) made = device.Gpu.CreateGraphicsPipeline( info );
@@ -1105,13 +1120,13 @@ internal sealed class SurfaceProgram : IDisposable
 
 	readonly Dictionary<ToolsKey, PipelineHandle> toolsPipelines = new();
 
-	PipelineHandle ToolsPipeline( PassObjects pass, VertexLayout layout, Format color, Format depth, int samples, SpecializationConstant[] vertexConstants, ulong constantsKey, SurfaceRenderState state, bool opaqueFade, bool depthEqual, bool normals, ToolsPass tools )
+	PipelineHandle ToolsPipeline( PassObjects pass, VertexLayout layout, Format color, Format depth, int samples, SpecializationConstant[] vertexConstants, ulong constantsKey, SurfaceRenderState state, bool opaqueFade, bool depthEqual, bool normals, ToolsPass tools, OverlayStencil stencil )
 	{
-		var key = new ToolsKey( pass, layout, color, depth, samples, constantsKey, opaqueFade, state, depthEqual, normals, tools );
+		var key = new ToolsKey( pass, layout, color, depth, samples, constantsKey, opaqueFade, state, depthEqual, normals, tools, stencil );
 		lock ( pipelines )
 		{
 			if ( toolsPipelines.TryGetValue( key, out var made ) ) return made;
-			var info = Info( pass, layout, color, depth, samples, vertexConstants, null, state, false, opaqueFade, depthEqual, normals );
+			var info = Info( pass, layout, color, depth, samples, vertexConstants, null, state, false, opaqueFade, depthEqual, normals, stencil );
 			ToolsViewStage.Apply( device.Shaders, ref info, tools, ToolsViews.ShaderColor( Compiled.Name ) );
 			using ( Zones.PipelineCreate.Start() ) made = device.Gpu.CreateGraphicsPipeline( info );
 			return toolsPipelines[key] = made;
@@ -1195,7 +1210,7 @@ internal sealed class SurfaceProgram : IDisposable
 			{
 				var r = request;
 				var normals = r.Normals && r.Color != Format.Unknown && !r.Ids;
-				var key = new PipelineKey( r.Pass, r.Layout, r.Color, r.Depth, r.Samples, r.ConstantsKey, r.Ids, r.OpaqueFade, r.State, r.DepthEqual, 0ul, normals );
+				var key = new PipelineKey( r.Pass, r.Layout, r.Color, r.Depth, r.Samples, r.ConstantsKey, r.Ids, r.OpaqueFade, r.State, r.DepthEqual, 0ul, normals, r.Stencil );
 				if ( pipelines.ContainsKey( key ) || !building.Add( key ) ) continue;
 
 				var ahead = new Prewarming();
@@ -1224,7 +1239,7 @@ internal sealed class SurfaceProgram : IDisposable
 		var made = default( PipelineHandle );
 		try
 		{
-			using ( Zones.PipelineCreate.Start() ) made = device.Gpu.CreateGraphicsPipeline( Info( r.Pass, r.Layout, r.Color, r.Depth, r.Samples, r.VertexConstants, r.PixelConstants, r.State, r.Ids, r.OpaqueFade, r.DepthEqual, normals ) with { SkipUntilReady = false } );
+			using ( Zones.PipelineCreate.Start() ) made = device.Gpu.CreateGraphicsPipeline( Info( r.Pass, r.Layout, r.Color, r.Depth, r.Samples, r.VertexConstants, r.PixelConstants, r.State, r.Ids, r.OpaqueFade, r.DepthEqual, normals, r.Stencil ) with { SkipUntilReady = false } );
 		}
 		catch ( Exception e ) when ( e is GpuException or InvalidOperationException or ArgumentException )
 		{
@@ -1255,14 +1270,14 @@ internal sealed class SurfaceProgram : IDisposable
 		{
 			if ( specialized is not null )
 			{
-				var info = Info( pass, layout, color, depth, samples, vertexConstants, [.. pixelConstants ?? [], .. specialized.Constants], state, ids, opaqueFade, depthEqual, normals );
+				var info = Info( pass, layout, color, depth, samples, vertexConstants, [.. pixelConstants ?? [], .. specialized.Constants], state, ids, opaqueFade, depthEqual, normals, key.Stencil );
 				if ( !device.Surfaces.SpecializeInBackground )
 				{
 					if ( BackendDevice.DumpSurfaceShaders is { } dumpNow ) Dump( dumpNow, pass, info.FragmentConstants, specialized );
 					return pipelines[key] = device.Gpu.CreateGraphicsPipeline( info );
 				}
 
-				var unspecialized = Pipeline( pass, layout, color, depth, samples, vertexConstants, pixelConstants, constantsKey, state, ids, opaqueFade, depthEqual, normals: normals );
+				var unspecialized = Pipeline( pass, layout, color, depth, samples, vertexConstants, pixelConstants, constantsKey, state, ids, opaqueFade, depthEqual, normals: normals, stencil: key.Stencil );
 				if ( !disposed && building.Add( key ) )
 				{
 					builds.RemoveAll( b => b.IsCompleted );
@@ -1285,11 +1300,11 @@ internal sealed class SurfaceProgram : IDisposable
 				return unspecialized;
 			}
 
-			using ( Zones.PipelineCreate.Start() ) pipeline = device.Gpu.CreateGraphicsPipeline( Info( pass, layout, color, depth, samples, vertexConstants, pixelConstants, state, ids, opaqueFade, depthEqual, normals ) );
+			using ( Zones.PipelineCreate.Start() ) pipeline = device.Gpu.CreateGraphicsPipeline( Info( pass, layout, color, depth, samples, vertexConstants, pixelConstants, state, ids, opaqueFade, depthEqual, normals, key.Stencil ) );
 			pipelines[key] = pipeline;
 
 			// A miss, never a frame's every draw: kept for the next run to make ahead
-			device.Surfaces.Manifest?.Record( SourceFile, new SurfaceManifestRequest( pass, layout, color, depth, samples, vertexConstants, pixelConstants, constantsKey, state, ids, opaqueFade, depthEqual, normals ) );
+			device.Surfaces.Manifest?.Record( SourceFile, new SurfaceManifestRequest( pass, layout, color, depth, samples, vertexConstants, pixelConstants, constantsKey, state, ids, opaqueFade, depthEqual, normals, key.Stencil ) );
 			return pipeline;
 		}
 	}
@@ -1311,7 +1326,7 @@ internal sealed class SurfaceProgram : IDisposable
 	public bool WritesNormals( PassObjects pass ) => Compiled.Tier == ShaderTier.Surface
 		&& pass.Pass.Pixel?.Entry is "ForwardPs" or "ForwardAlphaTestPs" or "ForwardPsGpuDriven" or "ForwardAlphaTestPsGpuDriven";
 
-	internal GraphicsPipelineInfo Info( PassObjects pass, VertexLayout layout, Format color, Format depth, int samples, SpecializationConstant[] vertexConstants, SpecializationConstant[] pixelConstants, SurfaceRenderState state, bool ids, bool opaqueFade, bool depthEqual, bool normals )
+	internal GraphicsPipelineInfo Info( PassObjects pass, VertexLayout layout, Format color, Format depth, int samples, SpecializationConstant[] vertexConstants, SpecializationConstant[] pixelConstants, SurfaceRenderState state, bool ids, bool opaqueFade, bool depthEqual, bool normals, OverlayStencil stencil = OverlayStencil.None )
 	{
 		// A vertex-cache draw reads its vertex ids from streams 2 and 3, as floats, and the default stream from 4, as
 		// BackendDevice.Pipeline maps classic variants
@@ -1381,6 +1396,7 @@ internal sealed class SurfaceProgram : IDisposable
 			if ( normals ) BackendDevice.AddNormalsTarget( ref info, pixel && !state.DrawsTranslucent && WritesNormals( pass ) );
 		}
 
+		BackendDevice.ApplyOverlayStencil( ref info, stencil );
 		FitOutputs( ref info, pass );
 		return info;
 	}
@@ -1469,7 +1485,7 @@ internal sealed class SurfaceProgram : IDisposable
 		System.Threading.Tasks.Task.WaitAll( running );
 		lock ( pipelines )
 		{
-			foreach ( var pipeline in pipelines.Values ) device.Gpu.Destroy( pipeline );
+			foreach ( var (_, pipeline) in pipelines ) device.Gpu.Destroy( pipeline );
 			foreach ( var pipeline in toolsPipelines.Values ) device.Gpu.Destroy( pipeline );
 			foreach ( var pipeline in immediatePipelines.Values ) device.Gpu.Destroy( pipeline );
 			pipelines.Clear();

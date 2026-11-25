@@ -202,7 +202,7 @@ internal sealed partial class BackendContext
 		{
 			// Where the surface can't draw (a mode it has no pass for), the .shader it stands in for does
 			if ( DrawSurface( surface, shaderMode, mesh, draw, firstInstance, instances, depthBias, slopeScaledDepthBias, stripPixelShader, indirect ) ) return true;
-			if ( surface.Fallback is not BackendMaterial fallback ) return false;
+			if ( surface.Fallback is not { } fallback ) return false;
 			material = fallback;
 		}
 
@@ -284,12 +284,14 @@ internal sealed partial class BackendContext
 		if ( variant?.Vertex?.Bytecode is null ) return false;
 
 		var color = r.Color is null ? Format.Unknown : FormatOfTarget( r.Color, r.Srgb );
+		var depth = r.Depth is null ? Format.Unknown : BackendDevice.FormatOf( r.Depth );
+		var stencil = depth.HasStencil() ? OverlayStencil : OverlayStencil.None;
 		var noColor = stripPixelShader || r.Color is null;
 		var depthOnly = StripsPixelShader( m, variant, noColor, stripPixelShader, LookupCombo( OpaqueFadeCombo ) is > 0 );
 		var geometry = DepthGeometry( GeometryFor( source, draw ), variant, depthOnly );
-		var key = new MaterialObjectCache.Key( m, variant, geometry.Layout, noColor ? Format.Unknown : color, r.Depth is null ? Format.Unknown : BackendDevice.FormatOf( r.Depth ), (r.Color ?? r.Depth).Samples, depthOnly, geometry.UncompressedTangentFrame, Normals: !noColor && r.Normals is not null, Tools: noColor ? ToolsPass.None : ToolsPass );
+		var key = new MaterialObjectCache.Key( m, variant, geometry.Layout, noColor ? Format.Unknown : color, depth, (r.Color ?? r.Depth).Samples, depthOnly, geometry.UncompressedTangentFrame, Normals: !noColor && r.Normals is not null, Tools: noColor ? ToolsPass.None : ToolsViewStage.ReadyPass( device.Shaders, ToolsPass ), Stencil: stencil );
 
-		var materialObject = lastObject is not null && key.Same( lastKey ) && !lastObject.Stale ? lastObject : cache.Get( key, immediate: false, (device, geometry.Layout, key), static ( s, layout ) => s.device.Pipeline( s.key.Variant, s.Layout, s.key.Color, s.key.Depth, s.key.Samples, s.key.DepthOnly, layout.Sets, normals: s.key.Normals, tools: s.key.Tools ) );
+		var materialObject = lastObject is not null && key.Same( lastKey ) && !lastObject.Stale ? lastObject : cache.Get( key, immediate: false, (device, geometry.Layout, key), static ( s, layout ) => s.device.Pipeline( s.key.Variant, s.Layout, s.key.Color, s.key.Depth, s.key.Samples, s.key.DepthOnly, layout.Sets, normals: s.key.Normals, tools: s.key.Tools, stencil: s.key.Stencil ) );
 		(lastKey, lastObject) = (key, materialObject);
 
 		resolver.LayerEpoch = layerEpoch;
@@ -297,7 +299,7 @@ internal sealed partial class BackendContext
 		r.Binder = null;
 
 		if ( noColor ) r.List.SetDepthBias( depthBias, slopeScaledDepthBias );
-		if ( variant.State.StencilTest && r.Depth is not null && BackendDevice.FormatOf( r.Depth ).HasStencil() ) r.List.SetStencilReference( (byte)variant.State.StencilReference );
+		BackendDevice.SetStencilReference( r.List, depth, stencil, variant.State );
 
 		RecordDraw( r.List, geometry, instanceIds, draw, firstInstance, instances, indirect, variant );
 		return true;

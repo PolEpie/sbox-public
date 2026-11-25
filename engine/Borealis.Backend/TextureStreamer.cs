@@ -83,18 +83,12 @@ internal sealed class StreamedTexture
 		while ( top < TailTop && (MaxSide >> (top + 1)) >= size ) top++;
 		return top;
 	}
-
-	/// <summary>Note a material that names this texture, so it re-keys when the image is swapped.</summary>
-	public void AddDependent( IStreamDependent dependent ) => Texture.AddDependent( dependent );
-
-	/// <summary>Tell the materials that name it that its image changed.</summary>
-	public void Swapped() => Texture.Swapped();
 }
 
-/// <summary>Something that names streamed textures in what it binds (a material), so a swapped image re-keys it.</summary>
+/// <summary>Something that names textures in what it binds (a material), and is told when they go, so it binds defaults.</summary>
 internal interface IStreamDependent
 {
-	/// <summary>A texture it names has a new image: move its version on.</summary>
+	/// <summary>A texture it names is gone: move its version on.</summary>
 	void TexturesChanged();
 }
 
@@ -157,7 +151,7 @@ internal sealed class TextureStreamer
 	uint frame = 1;
 	long room;
 	uint memoryFrame;
-	long startedSinceMemory;
+	long residentAtMeasure, growMargin;
 
 	public TextureStreamer( BackendDevice device )
 	{
@@ -299,6 +293,11 @@ internal sealed class TextureStreamer
 			ResidentBytes += texture.ResidentBytes;
 		}
 
+		if ( now % (uint)Math.Max( WindowFrames, 1 ) == 0 )
+		{
+			foreach ( var texture in textures ) (texture.AskedBefore, texture.Asked) = (texture.Asked, int.MaxValue);
+		}
+
 		while ( asked.TryDequeue( out var asks ) )
 		{
 			var size = asks.Size;
@@ -309,11 +308,6 @@ internal sealed class TextureStreamer
 				texture.LastAsked = now;
 				texture.LastAskedTime = updateTime;
 			}
-		}
-
-		if ( now % (uint)Math.Max( WindowFrames, 1 ) == 0 )
-		{
-			foreach ( var texture in textures ) (texture.AskedBefore, texture.Asked) = (texture.Asked, int.MaxValue);
 		}
 
 		Volatile.Write( ref frame, now + 1 );
@@ -338,9 +332,11 @@ internal sealed class TextureStreamer
 		var idle = (long)(IdleSeconds * System.Diagnostics.Stopwatch.Frequency);
 		foreach ( var texture in textures )
 		{
-			if ( builds.Count >= MaxBuilds ) break;
-			if ( texture.Building is not null || texture.Pinned || texture.ResidentTop >= texture.TailTop || now - texture.LastAskedTime < idle ) continue;
-			StartBuild( texture, texture.TailTop );
+			if ( texture.Pinned || now - texture.LastAskedTime < idle ) continue;
+			// The wall-clock idle timeout can expire before both frame-based ask windows roll over.
+			texture.Asked = texture.AskedBefore = int.MaxValue;
+			if ( builds.Count >= MaxBuilds || texture.Building is not null || texture.ResidentTop >= texture.TailTop ) continue;
+			StartBuild( texture, texture.TailTop, texture.BytesFrom( texture.TailTop ) );
 			IdleGivenBack++;
 		}
 	}
@@ -377,7 +373,7 @@ internal sealed class TextureStreamer
 		{
 			var texture = textures[compactAt];
 			if ( texture.Building is not null || !texture.Texture.IsValid || !gpu.InSparseBlock( texture.Texture.Handle, SparseBlock ) ) continue;
-			StartBuild( texture, texture.ResidentTop );
+			StartBuild( texture, texture.ResidentTop, texture.ResidentBytes );
 			Compacted++;
 		}
 
@@ -399,8 +395,8 @@ internal sealed class TextureStreamer
 	int moveAt;
 
 	// While the allocator empties a block (defragmenting), streamed textures and those kept (Keep) in it are copied into
-	// other blocks' room on the GPU and swapped in like a build's image: materials re-key, and the old image goes once the
-	// frames using it are done
+	// other blocks' room on the GPU and swapped in like a build's image, under the same handle and bindless index: the old
+	// image goes once the frames using it are done
 	void MoveOutOfDrainingBlocks()
 	{
 		var gpu = device.Gpu;
@@ -415,7 +411,7 @@ internal sealed class TextureStreamer
 			var index = moveAt++;
 			var streamed = index < textures.Count ? textures[index] : null;
 			var texture = streamed?.Texture ?? kept[index - textures.Count];
-			if ( streamed?.Building is not null || !texture.IsValid || !gpu.InDrainingBlock( texture.Handle ) ) continue;
+			if ( streamed?.Building is not null || !texture.IsValid || gpu.IsReplacing( texture.Handle ) || !gpu.InDrainingBlock( texture.Handle ) ) continue;
 
 			TextureHandle copy;
 			try
@@ -431,7 +427,7 @@ internal sealed class TextureStreamer
 			if ( !copy.IsValid ) continue;
 			var bytes = gpu.MemorySizeOf( copy );
 			texture.Swap( copy );
-			texture.Swapped();
+			gpu.ReplaceSoon();
 			moved += bytes;
 			Moved++;
 			MovedBytes += bytes;
@@ -466,6 +462,7 @@ internal sealed class TextureStreamer
 	{
 		public StreamedTexture Texture;
 		public int Top;
+		public long Bytes;
 		public ContentFiles Content;
 		public Task<TextureFile> Read;
 		public TextureHandle Image;
@@ -568,13 +565,11 @@ internal sealed class TextureStreamer
 
 			// Every mip written with the frame's next submission, ahead of anything that samples it; the writes copied them
 			file.Release();
-			var bytes = texture.BytesFrom( build.Top );
-			ResidentBytes += bytes - texture.ResidentBytes;
+			ResidentBytes += build.Bytes - texture.ResidentBytes;
 			texture.Texture.Swap( build.Image );
 			texture.ResidentTop = build.Top;
-			texture.ResidentBytes = bytes;
+			texture.ResidentBytes = build.Bytes;
 			texture.Building = null;
-			texture.Swapped();
 			builds.RemoveAt( i-- );
 		}
 	}
@@ -591,6 +586,7 @@ internal sealed class TextureStreamer
 	void OutOfMemory( int top )
 	{
 		OutOfMemoryBuilds++;
+		device.Gpu.ReplaceSoon();
 		memoryFrame = 0;
 		growAfter = Frame + (uint)Math.Max( WindowFrames, 1 );
 		if ( OutOfMemoryBuilds == 1 ) Console.Error.WriteLine( $"Borealis.Gpu: streaming: video memory is full, so textures keep fewer mips (a build from mip {top} was dropped)" );
@@ -643,34 +639,38 @@ internal sealed class TextureStreamer
 		builds.RemoveAt( index );
 	}
 
-	// The room left for textures to grow into: video memory over the headroom, and the budget
+	// Keep projecting against the last sample until there's a new one, including builds that straddle it.
 	void Measure( uint now )
 	{
 		if ( memoryFrame == 0 || now - memoryFrame >= 15 )
 		{
 			memoryFrame = now;
-			startedSinceMemory = 0;
+			residentAtMeasure = ResidentBytes;
 			var (used, budget) = device.Gpu.DeviceLocalMemory();
 			var headroom = Math.Max( 256L << 20, budget / 10 );
 			room = budget - used - headroom;
+			growMargin = budget / 10;
 		}
 
-		var left = room - startedSinceMemory;
-		if ( BudgetBytes > 0 ) left = Math.Min( left, BudgetBytes - ResidentBytes - InFlightBytes() );
-		available = left;
+		var left = room + residentAtMeasure - ResidentBytes;
+		var textureBudget = BudgetBytes;
+		var budgetLeft = textureBudget > 0 ? textureBudget - ResidentBytes : long.MaxValue;
+		var budgetMargin = textureBudget > 0 ? textureBudget / 10 : 0;
+		long growing = 0, shrinking = 0;
+		foreach ( var build in builds )
+		{
+			var change = build.Bytes - build.Texture.ResidentBytes;
+			if ( change > 0 ) growing += change;
+			else shrinking -= change;
+		}
+
+		available = Math.Min( left, budgetLeft ) - growing + shrinking;
+		growAvailable = Math.Min( left - growMargin, budgetLeft - budgetMargin ) - growing;
 	}
 
-	long available;
+	long available, growAvailable;
 
-	long InFlightBytes()
-	{
-		long bytes = 0;
-		foreach ( var build in builds ) bytes += Math.Max( build.Texture.BytesFrom( build.Top ) - build.Texture.ResidentBytes, 0 );
-		return bytes;
-	}
-
-	// When there's no room: textures holding finer mips than they want give them back first, then the least lately asked
-	// give back a mip, one build each
+	// Give back mips from textures this window hasn't asked for first, then from those with spare mips.
 	void GiveBack()
 	{
 		if ( available >= 0 ) return;
@@ -683,6 +683,9 @@ internal sealed class TextureStreamer
 
 		candidates.Sort( static ( a, b ) =>
 		{
+			var aAsked = a.Asked != int.MaxValue;
+			var bAsked = b.Asked != int.MaxValue;
+			if ( aAsked != bAsked ) return aAsked ? 1 : -1;
 			var aSpare = a.ResidentTop < a.Wanted;
 			var bSpare = b.ResidentTop < b.Wanted;
 			if ( aSpare != bSpare ) return aSpare ? -1 : 1;
@@ -693,17 +696,18 @@ internal sealed class TextureStreamer
 		{
 			if ( available >= 0 || builds.Count >= MaxBuilds ) break;
 			var top = texture.ResidentTop < texture.Wanted ? texture.Wanted : texture.ResidentTop + 1;
-			available += texture.ResidentBytes - texture.BytesFrom( top );
-			StartBuild( texture, top );
+			var bytes = texture.BytesFrom( top );
+			available += texture.ResidentBytes - bytes;
+			StartBuild( texture, top, bytes );
 			GivenBack++;
 		}
 	}
 
-	// Builds for textures that want finer mips than they hold, the largest shortfall first, while there's room
+	// Builds for textures that want finer mips than they hold, largest shortfall first, while there's room above the margin
 	void Start()
 	{
 		candidates.Clear();
-		if ( Frame < growAfter )
+		if ( Frame < growAfter || growAvailable <= 0 )
 		{
 			Waiting = builds.Count;
 			return;
@@ -725,27 +729,28 @@ internal sealed class TextureStreamer
 
 			// Mips read or waiting to be written
 			long ahead = 0;
-			foreach ( var build in builds ) ahead += build.Texture.BytesFrom( build.Top );
+			foreach ( var build in builds ) ahead += build.Bytes;
 
 			foreach ( var texture in candidates )
 			{
-				var grow = texture.BytesFrom( texture.Reachable ) - texture.ResidentBytes;
-				if ( grow > available ) continue;
+				var top = texture.Reachable;
+				var bytes = texture.BytesFrom( top );
+				var grow = bytes - texture.ResidentBytes;
+				if ( grow > growAvailable ) continue;
 				waiting++;
 				if ( builds.Count >= BuildsAtOnce || (builds.Count > 0 && ahead >= UploadBytes * FramesAhead) ) continue;
-				available -= grow;
-				startedSinceMemory += grow;
-				ahead += texture.BytesFrom( texture.Reachable );
-				StartBuild( texture, texture.Reachable );
+				growAvailable -= grow;
+				ahead += bytes;
+				StartBuild( texture, top, bytes );
 			}
 		}
 
 		Waiting = waiting + builds.Count;
 	}
 
-	void StartBuild( StreamedTexture texture, int top )
+	void StartBuild( StreamedTexture texture, int top, long bytes )
 	{
-		var build = new Build { Texture = texture, Top = top, Content = device.Content, Gpu = device.Gpu };
+		var build = new Build { Texture = texture, Top = top, Bytes = bytes, Content = device.Content, Gpu = device.Gpu };
 		BuildsStarted++;
 		build.Read = BackendDevice.Read( Build.ReadFile, build );
 		texture.Building = build;

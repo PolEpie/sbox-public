@@ -29,10 +29,11 @@ public sealed partial class ShaderDrawer
 		ulong pixelKey = 0;
 		var pixelConstants = pass.Pass.Pixel is { } pixel ? SurfaceStageConstants( pixel, attributes, out pixelKey ) : null;
 		var fade = attributes.GetCombo( OpaqueFadeId ) is > 0;
-		var pipeline = program.ImmediatePipeline( pass, SurfaceLayoutOf( draw.Layout ), color, depth, samples, vertexConstants, pixelConstants, vertexKey * 31 + pixelKey, state, draw.Topology, ids, fade, ToolsPass );
+		var pipeline = program.ImmediatePipeline( pass, SurfaceLayoutOf( draw.Layout ), color, depth, samples, vertexConstants, pixelConstants, vertexKey * 31 + pixelKey, state, draw.Topology, ids, fade, ToolsPass, OverlayStencil );
 
 		if ( BackendDevice.DrawMarkers ) list.Marker( $"{material.Name} {pass.Pass.Name} (engine draw)" );
 		list.SetPipeline( pipeline );
+		BackendDevice.SetStencilReference( list, depth, OverlayStencil );
 		SetViewport( list, viewport );
 
 		var record = device.Surfaces.Records.Offset( material, out var records );
@@ -49,8 +50,7 @@ public sealed partial class ShaderDrawer
 		else
 		{
 			// Instance id 0 for every instance: the transform the draw binds first, as a classic draw reads it from the default stream
-			var zero = list.AllocateUpload( 16, 16 );
-			zero.Data[..16].Clear();
+			var zero = SurfaceUniform( list, zeroInstanceId );
 			list.SetVertexBuffer( 1, zero.Buffer, zero.Offset );
 		}
 
@@ -235,39 +235,100 @@ public sealed partial class ShaderDrawer
 	{
 		var size = (Math.Max( data?.Length ?? 0, b.Size ) + 15) & ~15;
 		if ( size == 0 ) return Binding.Uniform( b.Binding, defaults.Uniform, 0, Borealis.Source2.Shaders.ShaderDefaults.UniformSize );
-		var allocation = list.AllocateUpload( size, gpu.Capabilities.UniformAlignment );
-		allocation.Data[..size].Clear();
-		data?.CopyTo( allocation.Data );
-		return Binding.Uniform( b.Binding, allocation.Buffer, allocation.Offset, size );
+		var bytes = Scratch( size );
+		bytes.Clear();
+		data?.CopyTo( bytes );
+		var (buffer, offset) = SurfaceUniform( list, bytes );
+		return Binding.Uniform( b.Binding, buffer, offset, size );
 	}
 
 	/// <summary>A stage's <c>$Globals</c> for a draw: the attribute-bound members from the draw's attributes, the rest their defaults.</summary>
 	Binding SurfaceGlobals( CommandList list, GlobalConstants globals, int binding, ShaderAttributes attributes, bool tangent )
 	{
 		var size = Math.Max( globals?.Size ?? 16, 16 );
-		var allocation = list.AllocateUpload( size, gpu.Capabilities.UniformAlignment );
-		var data = allocation.Data[..size];
+		var data = Scratch( size );
 		data.Clear();
-		if ( globals is null ) return Binding.Uniform( binding, allocation.Buffer, allocation.Offset, size );
-
-		var layout = BackendContext.GlobalLayouts.GetValue( globals, static g => new BackendContext.SurfaceGlobalsLayout( g ) );
-		layout.Defaults.AsSpan( 0, Math.Min( layout.Defaults.Length, size ) ).CopyTo( data );
-		Span<float> one = stackalloc float[1];
-		for ( int a = 0; a < layout.Bound.Length; a++ )
+		if ( globals is not null )
 		{
-			var member = globals.Members[layout.Bound[a]];
-			if ( layout.Ids[a] == TangentFrameId )
+			var layout = BackendContext.GlobalLayouts.GetValue( globals, static g => new BackendContext.SurfaceGlobalsLayout( g ) );
+			layout.Defaults.AsSpan( 0, Math.Min( layout.Defaults.Length, size ) ).CopyTo( data );
+			Span<float> one = stackalloc float[1];
+			for ( int a = 0; a < layout.Bound.Length; a++ )
 			{
-				one[0] = tangent ? 1 : 0;
-				BackendContext.SurfaceGlobalsLayout.Write( data, member, one );
-			}
-			else if ( attributes.Get( layout.Ids[a] ) is float[] value )
-			{
-				BackendContext.SurfaceGlobalsLayout.Write( data, member, value );
+				var member = globals.Members[layout.Bound[a]];
+				if ( layout.Ids[a] == TangentFrameId )
+				{
+					one[0] = tangent ? 1 : 0;
+					BackendContext.SurfaceGlobalsLayout.Write( data, member, one );
+				}
+				else if ( attributes.Get( layout.Ids[a] ) is float[] value )
+				{
+					BackendContext.SurfaceGlobalsLayout.Write( data, member, value );
+				}
 			}
 		}
 
-		return Binding.Uniform( binding, allocation.Buffer, allocation.Offset, size );
+		var (buffer, offset) = SurfaceUniform( list, data );
+		return Binding.Uniform( binding, buffer, offset, size );
+	}
+
+	// A draw's uniform bytes are made here and only then copied out: upload memory is write-combined and very slow to read back
+	byte[] uniformScratch = new byte[256];
+	static readonly byte[] zeroInstanceId = new byte[16];
+
+	Span<byte> Scratch( int size )
+	{
+		if ( uniformScratch.Length < size ) uniformScratch = new byte[Math.Max( size, uniformScratch.Length * 2 )];
+		return uniformScratch.AsSpan( 0, size );
+	}
+
+	// Uniforms surface draws wrote into the list being recorded, by content. Consecutive draws with the same attributes write
+	// the same $Globals and constant buffers: binding the copy already written keeps the stage's bindings as they were, so
+	// the list keeps the descriptor set it wrote and bound for them instead of allocating, writing and binding another.
+	sealed class SurfaceUpload
+	{
+		public byte[] Bytes = [];
+		public int Size = -1;
+		public BufferHandle Buffer;
+		public long Offset;
+	}
+
+	const int SurfaceUploadsKept = 8;
+	readonly SurfaceUpload[] surfaceUploads = new SurfaceUpload[SurfaceUploadsKept];
+	int surfaceUploadNext;
+
+	// The recording the kept uploads are in: a list recycled within a frame (Device.TryRecycle) was submitted in between
+	CommandList uploadList;
+	ulong uploadFrame;
+	long uploadSubmit;
+
+	/// <summary>Where <paramref name="data"/> is in the list's upload memory: a copy written earlier in this recording with the same bytes, else a new one.</summary>
+	(BufferHandle Buffer, long Offset) SurfaceUniform( CommandList list, ReadOnlySpan<byte> data )
+	{
+		var frame = gpu.FrameNumber;
+		if ( !ReferenceEquals( list, uploadList ) || frame != uploadFrame || list.SubmitOrder != uploadSubmit )
+		{
+			(uploadList, uploadFrame, uploadSubmit) = (list, frame, list.SubmitOrder);
+			foreach ( var kept in surfaceUploads )
+			{
+				if ( kept is not null ) kept.Size = -1;
+			}
+		}
+
+		foreach ( var kept in surfaceUploads )
+		{
+			if ( kept is not null && kept.Size == data.Length && data.SequenceEqual( kept.Bytes.AsSpan( 0, kept.Size ) ) ) return (kept.Buffer, kept.Offset);
+		}
+
+		var allocation = list.AllocateUpload( data.Length, gpu.Capabilities.UniformAlignment );
+		data.CopyTo( allocation.Data );
+
+		var made = surfaceUploads[surfaceUploadNext] ??= new SurfaceUpload();
+		surfaceUploadNext = (surfaceUploadNext + 1) % SurfaceUploadsKept;
+		if ( made.Bytes.Length < data.Length ) made.Bytes = new byte[data.Length];
+		data.CopyTo( made.Bytes );
+		(made.Size, made.Buffer, made.Offset) = (data.Length, allocation.Buffer, allocation.Offset);
+		return (allocation.Buffer, allocation.Offset);
 	}
 
 	readonly ConditionalWeakTable<VertexStreamLayout, VertexLayout> surfaceLayouts = new();

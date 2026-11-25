@@ -27,6 +27,9 @@ public sealed class ShaderAttributes
 
 	// Bumped on any change; external: a caller's own array is held and may change in place unseen
 	int version;
+
+	// How many of those changes were a combo's, which a draw's values don't read (ValuesVersion)
+	int comboChanges;
 	bool external;
 
 	// Values and combos that show through where this set has none of its own (Under)
@@ -130,6 +133,7 @@ public sealed class ShaderAttributes
 		if ( combos.TryGetValue( id, out var current ) && current == value ) return;
 		combos[id] = value;
 		version++;
+		comboChanges++;
 	}
 
 	/// <summary>A value of one of the kinds above under an <see cref="AttributeIds"/> id, for callers that keep the ids.</summary>
@@ -282,6 +286,9 @@ public sealed class ShaderAttributes
 	/// <summary>Moves on any set, replace or clear; equal versions mean equal values only while <see cref="Stable"/>.</summary>
 	internal int Version => under is null ? version : HashCode.Combine( version, under.version, RuntimeHelpers.GetHashCode( under ) );
 
+	/// <summary><see cref="Version"/> without the combos' changes: equal while the values are, whatever the combos.</summary>
+	internal int ValuesVersion => under is null ? version - comboChanges : HashCode.Combine( version - comboChanges, under.version - under.comboChanges, RuntimeHelpers.GetHashCode( under ) );
+
 	/// <summary>False once a caller's own arrays are held: they may change in place.</summary>
 	internal bool Stable => !external && (under?.Stable ?? true);
 
@@ -336,27 +343,25 @@ public sealed class ShaderAttributes
 		return count;
 	}
 
-	static bool SameValue( object mine, object theirs ) => mine switch
-	{
-		float[] a => theirs is float[] b && a.AsSpan().SequenceEqual( b ),
-		byte[] a => theirs is byte[] b && a.AsSpan().SequenceEqual( b ),
-		_ => ReferenceEquals( mine, theirs ) || Equals( mine, theirs ),
-	};
+	// Exact type checks: a pattern over arrays goes through a cast helper per value, as an array of another element type may convert
+	static bool IsFloats( object value ) => value is not null && value.GetType() == typeof( float[] );
+	static bool IsBytes( object value ) => value is not null && value.GetType() == typeof( byte[] );
 
-	static bool SameShape( object mine, object theirs ) => mine switch
+	static bool SameValue( object mine, object theirs )
 	{
-		float[] => theirs is float[],
-		byte[] a => theirs is byte[] b && a.Length == b.Length,
-		_ => ReferenceEquals( mine, theirs ) || Equals( mine, theirs ),
-	};
+		if ( IsFloats( mine ) ) return IsFloats( theirs ) && Unsafe.As<float[]>( mine ).AsSpan().SequenceEqual( Unsafe.As<float[]>( theirs ) );
+		if ( IsBytes( mine ) ) return IsBytes( theirs ) && Unsafe.As<byte[]>( mine ).AsSpan().SequenceEqual( Unsafe.As<byte[]>( theirs ) );
+		return ReferenceEquals( mine, theirs ) || Equals( mine, theirs );
+	}
 
-	static int ShapeHash( int id, object value ) => HashCode.Combine( id, value switch
+	static bool SameShape( object mine, object theirs )
 	{
-		float[] => 1,
-		byte[] a => a.Length,
-		null => 0,
-		_ => value.GetHashCode(),
-	} );
+		if ( IsFloats( mine ) ) return IsFloats( theirs );
+		if ( IsBytes( mine ) ) return IsBytes( theirs ) && Unsafe.As<byte[]>( mine ).Length == Unsafe.As<byte[]>( theirs ).Length;
+		return ReferenceEquals( mine, theirs ) || Equals( mine, theirs );
+	}
+
+	static int ShapeHash( int id, object value ) => HashCode.Combine( id, IsFloats( value ) ? 1 : IsBytes( value ) ? Unsafe.As<byte[]>( value ).Length : value is null ? 0 : value.GetHashCode() );
 
 	/// <summary>Same ids with the same handles; numbers and bytes need only the same ids, as constants are rewritten per draw. Combos aren't compared.</summary>
 	internal bool SameStructure( ShaderAttributes other )
@@ -408,20 +413,21 @@ public sealed class ShaderAttributes
 		{
 			if ( id >= copies.Length ) Array.Resize( ref copies, Math.Max( Math.Max( copies.Length * 2, 64 ), AttributeIds.Count ) );
 			var value = other.slots[id];
-			switch ( value )
+			if ( IsFloats( value ) )
 			{
-				case float[] floats:
-					var floatCopy = copies[id] as float[];
-					if ( floatCopy is null || floatCopy.Length != floats.Length ) copies[id] = floatCopy = new float[floats.Length];
-					floats.CopyTo( floatCopy, 0 );
-					value = floatCopy;
-					break;
-				case byte[] bytes:
-					var byteCopy = copies[id] as byte[];
-					if ( byteCopy is null || byteCopy.Length != bytes.Length ) copies[id] = byteCopy = new byte[bytes.Length];
-					bytes.CopyTo( byteCopy, 0 );
-					value = byteCopy;
-					break;
+				var floats = Unsafe.As<float[]>( value );
+				var floatCopy = IsFloats( copies[id] ) ? Unsafe.As<float[]>( copies[id] ) : null;
+				if ( floatCopy is null || floatCopy.Length != floats.Length ) copies[id] = floatCopy = new float[floats.Length];
+				floats.CopyTo( floatCopy, 0 );
+				value = floatCopy;
+			}
+			else if ( IsBytes( value ) )
+			{
+				var bytes = Unsafe.As<byte[]>( value );
+				var byteCopy = IsBytes( copies[id] ) ? Unsafe.As<byte[]>( copies[id] ) : null;
+				if ( byteCopy is null || byteCopy.Length != bytes.Length ) copies[id] = byteCopy = new byte[bytes.Length];
+				bytes.CopyTo( byteCopy, 0 );
+				value = byteCopy;
 			}
 
 			Put( id, value );
@@ -670,7 +676,7 @@ public sealed partial class ShaderDrawer : IDisposable
 	}
 	// A record struct, not a tuple: a tuple of eight or more keeps the rest in a tuple of its own, which its hash and equality
 	// box until the JIT has optimised them
-	readonly record struct PipelineKey( ShaderVariant Variant, Format Color, Format Depth, int Samples, VertexStreamLayout Layout, PrimitiveTopology Topology, bool Ids, ToolsPass Tools, bool Redrawn );
+	readonly record struct PipelineKey( ShaderVariant Variant, Format Color, Format Depth, int Samples, VertexStreamLayout Layout, PrimitiveTopology Topology, bool Ids, ToolsPass Tools, bool Redrawn, OverlayStencil Stencil );
 	readonly Dictionary<PipelineKey, PipelineHandle> pipelines = new();
 
 	/// <summary>
@@ -678,6 +684,10 @@ public sealed partial class ShaderDrawer : IDisposable
 	/// its own vertex stage and the engine's tools view pixel stage (<see cref="ToolsViewStage"/>).
 	/// </summary>
 	internal ToolsPass ToolsPass { get; set; }
+
+	/// <summary>The depth prepass's overlay stencil override for custom objects.</summary>
+	internal OverlayStencil OverlayStencil { get; set; }
+
 	readonly Dictionary<ShaderVariant, PipelineHandle> computePipelines = new();
 	MaterialObjectCache cache;
 	readonly bool ownsCache;
@@ -1104,6 +1114,7 @@ public sealed partial class ShaderDrawer : IDisposable
 		public int Samples;
 		public PrimitiveTopology Topology;
 		public ToolsPass Tools;
+		public OverlayStencil Stencil;
 		public MaterialObject Found;
 	}
 
@@ -1113,10 +1124,10 @@ public sealed partial class ShaderDrawer : IDisposable
 	static int ObjectSlot( ShaderVariant variant, VertexStreamLayout layout, Format color, Format depth, int samples ) =>
 		(RuntimeHelpers.GetHashCode( variant ) + RuntimeHelpers.GetHashCode( layout ) * 31 + (int)color * 7 + (int)depth * 13 + samples) & (ObjectMemos - 1);
 
-	MaterialObject RememberedObject( ShaderVariant variant, VertexStreamLayout layout, bool ids, Format color, Format depth, int samples, PrimitiveTopology topology, ToolsPass tools, bool redrawn )
+	MaterialObject RememberedObject( ShaderVariant variant, VertexStreamLayout layout, bool ids, Format color, Format depth, int samples, PrimitiveTopology topology, ToolsPass tools, bool redrawn, OverlayStencil stencil )
 	{
 		ref readonly var memo = ref objectMemo[ObjectSlot( variant, layout, color, depth, samples )];
-		if ( ReferenceEquals( memo.Variant, variant ) && ReferenceEquals( memo.Layout, layout ) && memo.Ids == ids && memo.Color == color && memo.Depth == depth && memo.Samples == samples && memo.Topology == topology && memo.Tools == tools && memo.Redrawn == redrawn ) return memo.Found;
+		if ( ReferenceEquals( memo.Variant, variant ) && ReferenceEquals( memo.Layout, layout ) && memo.Ids == ids && memo.Color == color && memo.Depth == depth && memo.Samples == samples && memo.Topology == topology && memo.Tools == tools && memo.Redrawn == redrawn && memo.Stencil == stencil ) return memo.Found;
 		return null;
 	}
 
@@ -1126,16 +1137,17 @@ public sealed partial class ShaderDrawer : IDisposable
 		if ( BackendDevice.DrawMarkers ) list.Marker( BackendDevice.DrawMarkerName( variant ) );
 		var ids = ReadsInstanceIds( variant );
 		var redrawn = RedrawnEveryFrame.Active;
-		var tools = color == Format.Unknown ? ToolsPass.None : ToolsPass;
-		var materialObject = MaterialObjects ? RememberedObject( variant, layout, ids, color, depth, samples, topology, tools, redrawn ) : null;
+		var tools = color == Format.Unknown ? ToolsPass.None : ToolsViewStage.ReadyPass( shaders, ToolsPass );
+		var stencil = depth.HasStencil() ? OverlayStencil : OverlayStencil.None;
+		var materialObject = MaterialObjects ? RememberedObject( variant, layout, ids, color, depth, samples, topology, tools, redrawn, stencil ) : null;
 		if ( materialObject is not null ? HasPassSpace( materialObject.Layout ) : Objects( variant ) )
 		{
 			if ( materialObject is null )
 			{
-				var key = new MaterialObjectCache.Key( null, variant, LayoutKey( layout, ids ), color, depth, samples, false, false, topology, Tools: tools, Redrawn: redrawn );
-				materialObject = cache.Get( key, immediate: true, (Drawer: this, Variant: variant, Color: color, Depth: depth, Samples: samples, Layout: layout, Topology: topology, Ids: ids, Redrawn: redrawn),
-					static ( s, materialLayout ) => s.Drawer.Pipeline( s.Variant, s.Color, s.Depth, s.Samples, s.Layout, s.Topology, materialLayout.Sets, s.Ids, s.Redrawn ) );
-				objectMemo[ObjectSlot( variant, layout, color, depth, samples )] = new ObjectMemo { Variant = variant, Layout = layout, Ids = ids, Redrawn = redrawn, Color = color, Depth = depth, Samples = samples, Topology = topology, Tools = tools, Found = materialObject };
+				var key = new MaterialObjectCache.Key( null, variant, LayoutKey( layout, ids ), color, depth, samples, false, false, topology, Tools: tools, Redrawn: redrawn, Stencil: stencil );
+				materialObject = cache.Get( key, immediate: true, (Drawer: this, Variant: variant, Color: color, Depth: depth, Samples: samples, Layout: layout, Topology: topology, Tools: tools, Ids: ids, Redrawn: redrawn, Stencil: stencil),
+					static ( s, materialLayout ) => s.Drawer.Pipeline( s.Variant, s.Color, s.Depth, s.Samples, s.Layout, s.Topology, materialLayout.Sets, s.Tools, s.Ids, s.Redrawn, s.Stencil ) );
+				objectMemo[ObjectSlot( variant, layout, color, depth, samples )] = new ObjectMemo { Variant = variant, Layout = layout, Ids = ids, Redrawn = redrawn, Color = color, Depth = depth, Samples = samples, Topology = topology, Tools = tools, Stencil = stencil, Found = materialObject };
 			}
 
 			SetViewport( list, viewport );
@@ -1143,15 +1155,14 @@ public sealed partial class ShaderDrawer : IDisposable
 		}
 		else
 		{
-			list.SetPipeline( Pipeline( variant, color, depth, samples, layout, topology, null, ids, redrawn ) );
+			list.SetPipeline( Pipeline( variant, color, depth, samples, layout, topology, null, tools, ids, redrawn, stencil ) );
 			SetViewport( list, viewport );
 			Bind( list, variant, attributes, viewport );
 		}
 
-		// The stencil reference is dynamic state: a shader that tests or writes stencil (gizmos, tool overlays) sets its own
-		if ( variant.State.StencilTest && depth.HasStencil() ) list.SetStencilReference( (byte)variant.State.StencilReference );
+		BackendDevice.SetStencilReference( list, depth, stencil, variant.State );
 
-		// So is the depth bias drawing into depth alone (a shadow map's)
+		// The depth bias drawing into depth alone (a shadow map's) is dynamic
 		if ( color == Format.Unknown && depth != Format.Unknown ) list.SetDepthBias( DepthBias.Constant, DepthBias.Slope );
 		return ids;
 	}
@@ -1197,7 +1208,8 @@ public sealed partial class ShaderDrawer : IDisposable
 		}
 	}
 
-	const int AttributeStatesKept = 3, StructuresKept = 1024;
+	// A pass's draws cycle through a few sets of values (an MDI draw per material group and pass); more kept than they cycle through
+	const int AttributeStatesKept = 8, StructuresKept = 1024;
 	readonly AttributeState[] attributeStates = new AttributeState[AttributeStatesKept];
 	int attributeStateNext;
 
@@ -1248,7 +1260,7 @@ public sealed partial class ShaderDrawer : IDisposable
 			foreach ( var state in attributeStates ) state?.Forget();
 		}
 
-		var version = attributes.Version;
+		var version = attributes.ValuesVersion;
 		if ( attributes.Stable )
 		{
 			foreach ( var state in attributeStates )
@@ -1279,7 +1291,7 @@ public sealed partial class ShaderDrawer : IDisposable
 	/// <summary>Forget the last draws' lists, materials and attributes so their owners can be collected.</summary>
 	internal void ReleasePass()
 	{
-		passList = null;
+		passList = uploadList = null;
 		foreach ( var state in attributeStates ) state?.Forget();
 		structures.Clear();
 		Array.Clear( variantMemo );
@@ -1411,10 +1423,9 @@ public sealed partial class ShaderDrawer : IDisposable
 	/// draws <paramref name="redrawn"/> every frame (<see cref="RedrawnEveryFrame"/>) one not made yet is made on the device's
 	/// workers and its draws skipped meanwhile; those are kept apart from the ones other draws wait for.
 	/// </summary>
-	PipelineHandle Pipeline( ShaderVariant variant, Format color, Format depth, int samples, VertexStreamLayout layout, PrimitiveTopology topology, BindingLayoutHandle[] sets, bool ids = false, bool redrawn = false )
+	PipelineHandle Pipeline( ShaderVariant variant, Format color, Format depth, int samples, VertexStreamLayout layout, PrimitiveTopology topology, BindingLayoutHandle[] sets, ToolsPass tools, bool ids, bool redrawn, OverlayStencil stencil )
 	{
-		var tools = color == Format.Unknown ? ToolsPass.None : ToolsPass;
-		var key = new PipelineKey( variant, color, depth, samples, layout, topology, ids, tools, redrawn );
+		var key = new PipelineKey( variant, color, depth, samples, layout, topology, ids, tools, redrawn, stencil );
 		if ( sets is null && pipelines.TryGetValue( key, out var pipeline ) ) return pipeline;
 
 		// Inputs the stream lacks (or every input, with no stream) read the default stream. No colour format draws into
@@ -1458,6 +1469,7 @@ public sealed partial class ShaderDrawer : IDisposable
 
 		info.Topology = topology;
 		if ( sets is not null ) info.Sets = sets;
+		BackendDevice.ApplyOverlayStencil( ref info, stencil );
 		if ( tools != ToolsPass.None ) ToolsViewStage.Apply( shaders, ref info, tools, ToolsViews.ShaderColor( variant.Shader?.Name ) );
 		info.SkipUntilReady = redrawn;
 		using ( Zones.PipelineCreate.Start() ) pipeline = gpu.CreateGraphicsPipeline( info );
@@ -1569,7 +1581,7 @@ public sealed partial class ShaderDrawer : IDisposable
 		var stable = attributes.Stable;
 
 		// The same attributes, viewport and plan as the last write: its bytes again
-		if ( stable && plan.Image is { } image && image.Length == data.Length && ReferenceEquals( plan.ImageAttributes, attributes ) && plan.ImageAttributesVersion == attributes.Version
+		if ( stable && plan.Image is { } image && image.Length == data.Length && ReferenceEquals( plan.ImageAttributes, attributes ) && plan.ImageAttributesVersion == attributes.ValuesVersion
 			&& plan.ImageVersion == plan.Version && ReferenceEquals( plan.ImageFeatures, plan.Features ) && plan.ImageViewport == viewport )
 		{
 			image.CopyTo( data );
@@ -1615,7 +1627,7 @@ public sealed partial class ShaderDrawer : IDisposable
 
 		written.CopyTo( data );
 		if ( !cacheable ) return;
-		(plan.ImageAttributes, plan.ImageAttributesVersion, plan.ImageVersion, plan.ImageFeatures, plan.ImageViewport) = (attributes, attributes.Version, plan.Version, plan.Features, viewport);
+		(plan.ImageAttributes, plan.ImageAttributesVersion, plan.ImageVersion, plan.ImageFeatures, plan.ImageViewport) = (attributes, attributes.ValuesVersion, plan.Version, plan.Features, viewport);
 	}
 
 	readonly float[] scratch4 = new float[4], scratch2 = new float[2], scratch1 = new float[1];

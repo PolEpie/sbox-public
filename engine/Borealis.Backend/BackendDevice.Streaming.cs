@@ -18,11 +18,9 @@ public sealed partial class BackendDevice
 {
 	readonly ConcurrentDictionary<string, Task<ModelFile>> modelReads = new( StringComparer.OrdinalIgnoreCase );
 	readonly ConcurrentDictionary<string, MaterialFile> readMaterials = new( StringComparer.OrdinalIgnoreCase );
-	readonly ConcurrentDictionary<string, TextureFile> readTextures = new( StringComparer.OrdinalIgnoreCase );
 
-	// Images made on the worker that read a big whole texture (ImageAheadBytes), with the file they're for and, for one of
-	// StageAheadBytes or more, the upload buffer its mips were copied into there (StageAheadBytes), for Load to fill
-	readonly ConcurrentDictionary<string, (TextureFile File, Borealis.Gpu.TextureHandle Image, Borealis.Gpu.BufferHandle Staged)> imagesAhead = new( StringComparer.OrdinalIgnoreCase );
+	// A texture read ahead and any image and upload buffer made for it on the worker, under loadedTextures' lock.
+	readonly Dictionary<string, (TextureFile File, Borealis.Gpu.TextureHandle Image, Borealis.Gpu.BufferHandle Staged)> readTextures = new( StringComparer.OrdinalIgnoreCase );
 
 	/// <summary>
 	/// A whole texture read ahead (<see cref="LoadTextureAsync"/>, a map's lightmaps, a model's texture that doesn't stream)
@@ -409,6 +407,10 @@ public sealed partial class BackendDevice
 			if ( freedMaterials.Count > 0 )
 			{
 				gpuDrivenTables?.ForgetMaterials( freedMaterials );
+				foreach ( var material in freedMaterials )
+				{
+					if ( material is SurfaceMaterial surface ) surface.Dispose();
+				}
 				freedMaterials.Clear();
 			}
 		}
@@ -557,7 +559,7 @@ public sealed partial class BackendDevice
 	}
 
 	// On a worker: the model's file, and its materials' files and textures, read and decoded for the thread that makes them
-	ModelFile ReadModelAhead( string path ) => ReadContent( path ) is { } data ? ReadModelAhead( data ) : null;
+	ModelFile ReadModelAhead( string path ) => ReadContent( path ) is { } data ? ReadModelAhead( data, () => ReadContent( path ) ) : null;
 
 	byte[] ReadContent( string path )
 	{
@@ -565,9 +567,9 @@ public sealed partial class BackendDevice
 		return Content.TryRead( path );
 	}
 
-	ModelFile ReadModelAhead( byte[] data )
+	ModelFile ReadModelAhead( byte[] data, Func<byte[]> again = null )
 	{
-		var file = ModelFile.Read( data, Content.TryRead );
+		var file = ModelFile.Read( data, Content.TryRead, again );
 		foreach ( var mesh in file.Meshes )
 		{
 			foreach ( var call in mesh.DrawCalls ) ReadMaterialAhead( file.MaterialFor( call.Material, 0 ) );
@@ -606,49 +608,57 @@ public sealed partial class BackendDevice
 
 	void ReadTextureAhead( string path, bool tail = false )
 	{
-		if ( string.IsNullOrEmpty( path ) || readTextures.ContainsKey( path ) ) return;
+		if ( string.IsNullOrEmpty( path ) ) return;
 		lock ( loadedTextures )
 		{
-			if ( loadedTextures.ContainsKey( path ) ) return;
+			if ( loadedTextures.ContainsKey( path ) || readTextures.ContainsKey( path ) ) return;
 		}
 
 		using var zone = Zones.TextureRead.Start();
+		(TextureFile File, Borealis.Gpu.TextureHandle Image, Borealis.Gpu.BufferHandle Staged) ahead = default;
 		try
 		{
 			// A streamed texture's tail, unless it doesn't stream; its mips pooled until Load has written them
-			var texture = tail ? TextureStreamer.ReadMips( Content, path, TextureFile.Tail ) : null;
-			if ( texture is null || (texture.TopMip > 0 && !TextureStreamer.Streams( texture )) )
+			ahead.File = tail ? TextureStreamer.ReadMips( Content, path, TextureFile.Tail ) : null;
+			if ( ahead.File is null || (ahead.File.TopMip > 0 && !TextureStreamer.Streams( ahead.File )) )
 			{
-				texture?.Release();
-				texture = TextureStreamer.ReadWhole( Content, path );
+				ahead.File?.Release();
+				ahead.File = null;
+				ahead.File = TextureStreamer.ReadWhole( Content, path );
 			}
 
-			if ( texture is null ) return;
-
-			// Its image, and a big one's mips staged, before Load can take the file: it releases the mips once it's made
+			if ( ahead.File is not { } texture ) return;
 			var bytes = TextureStreamer.Bytes( texture, 0 );
-			(TextureFile File, Borealis.Gpu.TextureHandle Image, Borealis.Gpu.BufferHandle Staged) ahead = default;
-			if ( ImageAheadBytes > 0 && texture.TopMip == 0 && texture.Format != Borealis.Gpu.Format.Unknown && bytes >= ImageAheadBytes && !imagesAhead.ContainsKey( path ) )
+			if ( ImageAheadBytes > 0 && texture.TopMip == 0 && texture.Format != Borealis.Gpu.Format.Unknown && bytes >= ImageAheadBytes )
 			{
-				ahead = (texture, texture.CreateEmpty( Gpu, path ), default);
-				if ( StageAheadBytes > 0 && bytes >= StageAheadBytes && texture.Dimension != Borealis.Gpu.TextureDimension.Texture3D ) ahead.Staged = Stage( texture );
-				if ( !imagesAhead.TryAdd( path, ahead ) )
-				{
-					DestroyAhead( ahead );
-					ahead = default;
-				}
+				ahead.Image = CreateAhead( texture, path );
+				if ( ahead.Image.IsValid && StageAheadBytes > 0 && bytes >= StageAheadBytes && texture.Dimension != Borealis.Gpu.TextureDimension.Texture3D ) ahead.Staged = Stage( texture );
 			}
 
-			if ( !readTextures.TryAdd( path, texture ) )
+			lock ( loadedTextures )
 			{
-				if ( ahead.File is not null && imagesAhead.TryRemove( new KeyValuePair<string, (TextureFile, Borealis.Gpu.TextureHandle, Borealis.Gpu.BufferHandle)>( path, ahead ) ) ) DestroyAhead( ahead );
-				texture.Release();
-				return;
+				if ( !loadedTextures.ContainsKey( path ) && readTextures.TryAdd( path, ahead ) ) ahead = default;
 			}
 		}
 		catch ( InvalidDataException )
 		{
 			// Read again where it's made, which reports it
+		}
+		finally
+		{
+			ReleaseAhead( ahead );
+		}
+	}
+
+	Borealis.Gpu.TextureHandle CreateAhead( TextureFile texture, string path )
+	{
+		try
+		{
+			return texture.CreateEmpty( Gpu, path );
+		}
+		catch ( Borealis.Gpu.GpuException )
+		{
+			return default;
 		}
 	}
 
@@ -662,17 +672,19 @@ public sealed partial class BackendDevice
 			texture.Stage( Gpu, staged );
 			return staged;
 		}
-		catch ( Borealis.Gpu.GpuException )
+		catch ( Exception e )
 		{
-			// Written where it's made instead
 			if ( staged.IsValid ) Gpu.Destroy( staged );
+			if ( e is not Borealis.Gpu.GpuException ) throw;
+			// Written where it's made instead
 			return default;
 		}
 	}
 
-	void DestroyAhead( (TextureFile File, Borealis.Gpu.TextureHandle Image, Borealis.Gpu.BufferHandle Staged) ahead )
+	void ReleaseAhead( (TextureFile File, Borealis.Gpu.TextureHandle Image, Borealis.Gpu.BufferHandle Staged) ahead )
 	{
-		Gpu.Destroy( ahead.Image );
+		if ( ahead.Image.IsValid ) Gpu.Destroy( ahead.Image );
 		if ( ahead.Staged.IsValid ) Gpu.Destroy( ahead.Staged );
+		ahead.File?.Release();
 	}
 }

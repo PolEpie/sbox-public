@@ -244,4 +244,37 @@ public class DrawConstantsTests : GpuTest
 
 		if ( compared == 0 ) Assert.Inconclusive( "none of the shaders is compiled" );
 	}
+
+	/// <summary>
+	/// A combo moves <see cref="ShaderAttributes.Version"/> but not <see cref="ShaderAttributes.ValuesVersion"/>, which draws
+	/// keep their bound values by; a value does move it. Arrays of numbers and bytes compare by content and by their own type alone.
+	/// </summary>
+	[TestMethod]
+	public void ValuesVersionIgnoresCombos()
+	{
+		var attributes = new ShaderAttributes();
+		attributes.Set( "TestVector", 1.0f, 2.0f );
+		var (version, values) = (attributes.Version, attributes.ValuesVersion);
+
+		attributes.SetCombo( "D_TEST", 1 );
+		Assert.AreNotEqual( version, attributes.Version );
+		Assert.AreEqual( values, attributes.ValuesVersion );
+
+		attributes.Set( "TestVector", 3.0f, 4.0f );
+		Assert.AreNotEqual( values, attributes.ValuesVersion );
+
+		var a = new ShaderAttributes();
+		var b = new ShaderAttributes();
+		a.SetData( "TestBytes", [1, 2, 3] );
+		b.SetData( "TestBytes", [1, 2, 3] );
+		a.Set( "TestNumbers", [1.0f, 2.0f] );
+		b.Set( "TestNumbers", [1.0f, 2.0f] );
+		Assert.IsTrue( a.SameValues( b ) );
+		Assert.IsTrue( a.SameStructure( b ) );
+		Assert.AreEqual( a.StructureHash(), b.StructureHash() );
+
+		b.Set( "TestNumbers", [1.0f, 5.0f] );
+		Assert.IsFalse( a.SameValues( b ) );
+		Assert.IsTrue( a.SameStructure( b ), "numbers need only the same names" );
+	}
 }

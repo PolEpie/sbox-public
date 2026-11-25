@@ -11,7 +11,7 @@ namespace BorealisGpuTests;
 /// </summary>
 [TestClass]
 [DoNotParallelize]
-public class SkinningTests : GpuTest
+public class SkinningTests : RenderGpuTest
 {
 	const string Citizen = "models/citizen/citizen.vmdl";
 	const string Human = "models/citizen_human/human.vmdl";
@@ -325,6 +325,29 @@ public class SkinningTests : GpuTest
 			Device.WaitIdle();
 			RenderHost.Current = previousHost;
 		}
+	}
+
+	/// <summary>
+	/// A frame skinning far more than the cache holds never grows it under itself: past its room it gets none, with no vertex
+	/// handed out twice, and the next frame grows to fit all it asked for.
+	/// </summary>
+	[TestMethod]
+	public void VertexCacheGrowsOnlyAsAFrameStarts()
+	{
+		using var backend = new BackendDevice( Device ) { GpuDriven = false };
+		var taken = new List<(int First, int Count)>();
+		for ( int i = 0; i < 24; i++ ) taken.Add( (backend.AllocateVertexCache( 51505 ), 51505) );
+		var growths = backend.VertexCacheGrowths;
+
+		Assert.IsTrue( taken.Any( x => x.First < 0 ), "the frame ran out of room" );
+		var sorted = taken.Where( x => x.First >= 0 ).OrderBy( x => x.First ).ToList();
+		for ( int i = 1; i < sorted.Count; i++ ) Assert.IsTrue( sorted[i - 1].First + sorted[i - 1].Count <= sorted[i].First, $"allocations {i - 1} and {i} overlap" );
+		Assert.AreEqual( 1, growths, "it grew only as the frame started" );
+
+		Device.BeginFrame();
+		for ( int i = 0; i < 24; i++ ) Assert.IsTrue( backend.AllocateVertexCache( 51505 ) >= 0, $"the next frame had room for allocation {i}" );
+		Assert.AreEqual( growths + 1, backend.VertexCacheGrowths, "the next frame grew once, as it started" );
+		Device.WaitIdle();
 	}
 
 	/// <summary>Asks for a whole region of the vertex cache the first time it draws.</summary>

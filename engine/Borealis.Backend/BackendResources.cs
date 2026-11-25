@@ -26,46 +26,18 @@ internal sealed class BackendTexture : GpuTexture
 		Dimension = desc.Cube ? TextureDimension.TextureCube : desc.Depth > 1 ? TextureDimension.Texture3D : TextureDimension.Texture2D;
 	}
 
-	/// <summary>Its image: swapped between frames for one of other mips while it streams (<see cref="Stream"/>).</summary>
-	public TextureHandle Handle { get; private set; }
+	/// <summary>Its image's handle, which stays while the image is replaced for one of other mips as it streams (<see cref="Stream"/>, <see cref="Swap"/>).</summary>
+	public TextureHandle Handle { get; }
 
 	public string Name { get; }
 
 	/// <summary>Its streaming state while only some of its mips may be resident, or null when it holds them all.</summary>
 	public StreamedTexture Stream { get; set; }
 
-	readonly List<WeakReference<IStreamDependent>> dependents = new();
-
-	/// <summary>Note a material that names this texture, so it re-keys when the image is swapped.</summary>
-	public void AddDependent( IStreamDependent dependent )
-	{
-		lock ( dependents )
-		{
-			foreach ( var known in dependents )
-			{
-				if ( known.TryGetTarget( out var target ) && ReferenceEquals( target, dependent ) ) return;
-			}
-
-			dependents.Add( new WeakReference<IStreamDependent>( dependent ) );
-		}
-	}
-
-	/// <summary>Tell the materials that name it that its image changed (<see cref="Swap"/>).</summary>
-	public void Swapped()
-	{
-		lock ( dependents )
-		{
-			for ( int i = dependents.Count - 1; i >= 0; i-- )
-			{
-				if ( dependents[i].TryGetTarget( out var target ) ) target.TexturesChanged();
-				else dependents.RemoveAt( i );
-			}
-		}
-	}
-
 	/// <summary>
-	/// Take a new image (a streamed texture's other mips, or a copy in other memory), ready to sample once work submitted
-	/// after now runs; the old one is destroyed once the GPU is done with it. Between frames only; then <see cref="Swapped"/>.
+	/// Take a new image (a streamed texture's other mips, or a copy in other memory) under the same handle: the handle, its
+	/// bindless index and what binds it stay, so nothing that names this texture is made again. Its draws sample the new image
+	/// once <see cref="Device.Replace"/> swaps it in, and the old one is destroyed once the GPU is done with it. Between frames only.
 	/// </summary>
 	public void Swap( TextureHandle image )
 	{
@@ -75,15 +47,17 @@ internal sealed class BackendTexture : GpuTexture
 			return;
 		}
 
-		var old = Handle;
-		Handle = image;
 		Layout = ImageLayout.ShaderRead;
+		FrameBufferMipShader = null;
 		BackendContext.ForgetMipViews( this, device.Gpu );
-		device.Gpu.Destroy( old );
+		device.Gpu.Replace( Handle, image );
 	}
 
 	/// <summary>The layout the last recorded use left it in.</summary>
 	public ImageLayout Layout { get; set; }
+
+	/// <summary>The tiled shader that last made a complete frame copy mip chain; null if it must be rebuilt.</summary>
+	internal ShaderFile FrameBufferMipShader { get; set; }
 
 	/// <summary>Its shape, which a shader binding it must expect.</summary>
 	public TextureDimension Dimension { get; init; }
@@ -337,9 +311,15 @@ internal sealed class BackendParameters : ShaderParameters
 
 	public override void Set( StringToken name, GpuBuffer value ) => Store( name, value );
 
+	// Keep the ABI's marshalled size (which can differ from sizeof(T)) without asking the marshaller at every bind.
+	static class ConstantSize<T> where T : unmanaged
+	{
+		public static readonly int Marshalled = Marshal.SizeOf<T>();
+	}
+
 	public override void SetData<T>( StringToken name, in T value )
 	{
-		var size = Marshal.SizeOf<T>();
+		var size = ConstantSize<T>.Marshalled;
 		lock ( gate )
 		{
 			// The same bytes again change nothing
@@ -350,6 +330,20 @@ internal sealed class BackendParameters : ShaderParameters
 			var bytes = TakeBytes( name.Value, size );
 			bytes.AsSpan( length ).Clear();
 			MemoryMarshal.Write( bytes, in value );
+			Replace( name.Value, bytes );
+			version++;
+		}
+	}
+
+	public override void SetData( StringToken name, ReadOnlySpan<byte> data )
+	{
+		lock ( gate )
+		{
+			// The same bytes again change nothing
+			if ( values.TryGet( name.Value, out var old ) && old is byte[] current && current.AsSpan().SequenceEqual( data ) ) return;
+
+			var bytes = TakeBytes( name.Value, data.Length );
+			data.CopyTo( bytes );
 			Replace( name.Value, bytes );
 			version++;
 		}
@@ -602,7 +596,9 @@ internal sealed class BackendMaterial : GpuMaterial, IStreamDependent
 	// Variants by key, read without a lock by every recording thread: replaced whole under variantsGate when one is added
 	Dictionary<string, ShaderVariant> variants = new();
 	readonly object variantsGate = new();
-	readonly Dictionary<string, float[]> values;
+	// Read without a lock by every recording thread (each material record asks for every constant): replaced whole, under valuesGate, when a value is set
+	Dictionary<string, float[]> values;
+	readonly object valuesGate = new();
 	int version;
 
 	public BackendMaterial( string name, ShaderFile shader, MaterialFile file, Dictionary<string, BackendTexture> textures, Dictionary<string, float[]> values = null )
@@ -664,19 +660,16 @@ internal sealed class BackendMaterial : GpuMaterial, IStreamDependent
 	int layoutVersion, valuesVersion;
 
 	/// <summary>The material's value of a variable: set in code, else the compiled material's; null for the shader's default.</summary>
-	public float[] Value( string variable )
-	{
-		lock ( values ) return values.TryGetValue( variable, out var value ) ? value : File?.Value( variable );
-	}
+	public float[] Value( string variable ) => Volatile.Read( ref values ).TryGetValue( variable, out var value ) ? value : File?.Value( variable );
 
 	/// <summary>Set a variable's value in code, over the compiled material's, as <c>Material.Set</c> does.</summary>
 	public void Set( string variable, float[] value )
 	{
-		lock ( values )
+		lock ( valuesGate )
 		{
 			// The same values again (code that sets a material's values every frame) keep its material objects
 			if ( values.TryGetValue( variable, out var current ) && !ReferenceEquals( current, value ) && current is not null && value is not null && current.AsSpan().SequenceEqual( value ) ) return;
-			values[variable] = value;
+			Volatile.Write( ref values, new Dictionary<string, float[]>( values, values.Comparer ) { [variable] = value } );
 		}
 
 		Interlocked.Increment( ref valuesVersion );
@@ -689,10 +682,11 @@ internal sealed class BackendMaterial : GpuMaterial, IStreamDependent
 	/// </summary>
 	public void Set( string variable, ReadOnlySpan<float> value )
 	{
-		lock ( values )
+		lock ( valuesGate )
 		{
+			// Replaced whole, as the recording threads read it without a lock
 			if ( values.TryGetValue( variable, out var current ) && current is not null && current.AsSpan().SequenceEqual( value ) ) return;
-			values[variable] = value.ToArray();
+			Volatile.Write( ref values, new Dictionary<string, float[]>( values, values.Comparer ) { [variable] = value.ToArray() } );
 		}
 
 		Interlocked.Increment( ref valuesVersion );
@@ -714,13 +708,12 @@ internal sealed class BackendMaterial : GpuMaterial, IStreamDependent
 	/// <summary>The texture sizes its draws ask for, for its streamed textures.</summary>
 	internal MaterialAsks Asks { get; } = new();
 
-	// Its streamed textures, which ask for mips through it and re-key it when their images change
+	// Its streamed textures, which ask for mips through it
 	void Streamed()
 	{
 		List<StreamedTexture> streamed = null;
 		foreach ( var texture in Textures.Values )
 		{
-			texture?.AddDependent( this );
 			if ( texture?.Stream is not { } stream ) continue;
 			(streamed ??= new()).Add( stream );
 		}
@@ -1041,6 +1034,29 @@ internal sealed class BackendMaterial : GpuMaterial, IStreamDependent
 	}
 
 	long fastPath;
+
+	/// <summary>
+	/// Whether its shader declares its vertices animate, <c>BoolAttribute( AnimatesVertices, true )</c> (under a feature, as
+	/// <c>#if F_FOLIAGE_ANIMATION</c>, for the material's features), or the compiled material sets it. Worked out once per load.
+	/// </summary>
+	public override bool? AnimatesVertices
+	{
+		get
+		{
+			if ( Shader is null ) return false;
+			var known = Volatile.Read( ref animatesVertices );
+			if ( (known & 3) == 0 || (int)(known >> 2) != loads )
+			{
+				known = ((long)loads << 2) | (Attribute( "AnimatesVertices", false ) ? 2L : 1L);
+				Volatile.Write( ref animatesVertices, known );
+			}
+
+			return (known & 3) == 2;
+		}
+	}
+
+	long animatesVertices;
+
 	public override bool NeedsLightProbe
 	{
 		get

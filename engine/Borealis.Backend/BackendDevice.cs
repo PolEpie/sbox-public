@@ -54,9 +54,11 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	/// <summary>
 	/// Depth-only draws whose vertex shader reads nothing but positions fetch them from a positions-only copy of the mesh's
 	/// vertices (12 bytes a vertex) rather than the full vertices: on Construct the prepass reads 72 MB instead of 158 MB and
-	/// is 0.15 ms faster. Models loaded while it's on get the copy (<see cref="PositionStreamBytes"/>).
+	/// is 0.15 ms faster. Models loaded while it's on get the copy (<see cref="PositionStreamBytes"/>). Off unless
+	/// <c>-position-streams</c>: on Aftera the copies took 564 MiB of video memory, and drawing from them was no faster than
+	/// from the full vertices (GPU time within a millisecond's noise either way, at the same view).
 	/// </summary>
-	public bool PositionStreams { get; set; } = true;
+	public bool PositionStreams { get; set; } = HasSwitch( "-position-streams" );
 
 	/// <summary>Bytes of positions-only vertex copies made (<see cref="PositionStreams"/>).</summary>
 	public long PositionStreamBytes;
@@ -93,11 +95,62 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 
 		if ( loaded is not BackendMaterial material ) return false;
 		var file = Content.TryRead( path ) is { } data ? MaterialFile.Read( data ) : null;
+		var asked = file is null ? null : new AskedFor( path, file );
 		ShaderFile shader = null;
 		if ( file is not null ) file = WithShader( path, file, out shader );
 		material.Reload( shader, file, file is null ? null : Textures( file ) );
+		lock ( tracked ) tracked.AddOrUpdate( material, asked );
 		return true;
 	}
+
+	/// <summary>
+	/// Every material this device made that draws with <paramref name="shaderPath"/>'s shader takes it again, after that shader
+	/// was compiled again while running (<see cref="ShaderLibrary.Add"/>): they hold the shader they loaded, not its path.
+	/// Their files, textures and values set in code stay. Materials whose file names the shader but that fell back to the
+	/// error material when it wouldn't load are made from their file again. How many. Call between frames.
+	/// </summary>
+	public int ReloadMaterialsOfShader( string shaderPath )
+	{
+		var key = shaderPath.Replace( '\\', '/' );
+		if ( key.EndsWith( "_c", StringComparison.OrdinalIgnoreCase ) ) key = key[..^2];
+		if ( Shaders.Load( key ) is not { } shader ) return 0;
+
+		// A file shader is named by its full path, an added one by its relative path
+		static bool Names( string name, string key )
+		{
+			name = name.Replace( '\\', '/' );
+			if ( name.EndsWith( "_c", StringComparison.OrdinalIgnoreCase ) ) name = name[..^2];
+			return name.Equals( key, StringComparison.OrdinalIgnoreCase ) || name.EndsWith( "/" + key, StringComparison.OrdinalIgnoreCase );
+		}
+
+		List<BackendMaterial> reload = null;
+		List<(BackendMaterial Material, AskedFor Asked)> remake = null;
+		lock ( tracked )
+		{
+			foreach ( var (material, value) in tracked )
+			{
+				if ( ReferenceEquals( material.Shader, shader ) ) continue;
+				if ( value is AskedFor { File.Shader: { } wanted } asked && Names( wanted, key ) && (material.Shader is null || !ReferenceEquals( material.File, asked.File )) ) (remake ??= new()).Add( (material, asked) );
+				else if ( material.Shader is { Name: { } name } && Names( name, key ) ) (reload ??= new()).Add( material );
+			}
+		}
+
+		foreach ( var material in reload ?? [] ) material.Reload( shader, material.File, material.Textures );
+		foreach ( var (material, asked) in remake ?? [] )
+		{
+			var file = WithShader( asked.Path, asked.File, out var loaded );
+			if ( ReferenceEquals( file, asked.File ) ) MaterialFallbacks.TryRemove( asked.Path, out _ );
+			material.Reload( loaded, file, Textures( file ) );
+		}
+
+		return (reload?.Count ?? 0) + (remake?.Count ?? 0);
+	}
+
+	// Every material Track saw, so a recompiled shader reaches materials set in code as well as shared ones, with the file
+	// a material was loaded from when it has one (AskedFor)
+	readonly ConditionalWeakTable<BackendMaterial, object> tracked = new();
+
+	sealed record AskedFor( string Path, MaterialFile File );
 
 	Dictionary<string, BackendTexture> Textures( MaterialFile file )
 	{
@@ -110,10 +163,11 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 		return textures;
 	}
 
-	BackendMaterial Track( BackendMaterial material )
+	BackendMaterial Track( BackendMaterial material, AskedFor asked = null )
 	{
 		material.Disposing = m => materialCache?.Invalidate( m );
 		material.Library = Shaders;
+		lock ( tracked ) tracked.AddOrUpdate( material, asked );
 		return material;
 	}
 
@@ -355,7 +409,8 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 		}
 	}
 
-	internal override int ProgramsVersion => surfaces?.ReadyVersion ?? 0;
+	// Surface programs and shaders' GPU-driven variants: either finishing can make a material GPU-driven
+	internal override int ProgramsVersion => (surfaces?.ReadyVersion ?? 0) + Shaders.GpuDrivenReadyVersion;
 
 	internal override bool TakesResident( GpuMaterial material ) => material switch
 	{
@@ -731,6 +786,74 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	/// </summary>
 	public bool MeshLods { get; set; } = !HasSwitch( "-no-mesh-lodgen" );
 
+	/// <summary>
+	/// Seconds a resident instanced mesh (<c>SceneModelInstances</c>) cross-fades between LODs after it switches, the two
+	/// dithered in complementary halves (<c>borealis_lod_fade.fxc</c>), in the view that owns the fades (<see cref="OwnsLodFade"/>);
+	/// 0 switches at once; at most 32. Only draws whose material dithers it fade (<see cref="GpuMaterial.DithersLodFade"/>), the rest switch.
+	/// <c>-no-lod-fade</c> sets it to 0.
+	/// </summary>
+	public float LodFadeTime { get; set; } = HasSwitch( "-no-lod-fade" ) ? 0 : 1;
+
+	/// <summary>Transform slots the LOD fades keep a state word for; meshes in slots past them switch at once.</summary>
+	internal const int LodFadeSlots = 1 << 20;
+
+	BufferHandle lodFade;
+	readonly WeakReference<object> lodFadeView = new( null );
+	uint lodFadeSeen;
+	bool wantsLodFade;
+	readonly object lodFadeGate = new();
+	volatile bool lodFadeMade;
+
+	/// <summary>
+	/// This frame's stamp for LOD fades, as a state word keeps one (<c>borealis_lod_fade.fxc</c>): its time in ticks of
+	/// 1/256 s (bits 0-13, wrapping every 64 s) and its frame (bits 14-23): one for every cull of the frame.
+	/// </summary>
+	internal uint LodFadeNow { get; private set; }
+
+	/// <summary>Seconds LOD fades take as the time instead of the device's clock (a recording's frame times); null: the clock.</summary>
+	internal double? LodFadeClock { get; set; }
+
+	/// <summary>A group that can fade is drawn: the culls get the fades' states from now on.</summary>
+	internal void WantLodFade() => Volatile.Write( ref wantsLodFade, true );
+
+	/// <summary>
+	/// The LOD fades' states, a word per transform slot (made zeroed, every mesh unseen, at the start of the frame after a
+	/// group that can fade is first drawn), and a fade's length in ticks; 0 ticks and no buffer while nothing fades.
+	/// </summary>
+	internal (BufferHandle States, uint Ticks) LodFades()
+		=> LodFadeTime > 0 && lodFadeMade ? (lodFade, (uint)Math.Clamp( MathF.Round( LodFadeTime * 256 ), 1, 1 << 13 )) : (default, 0);
+
+	/// <summary>At a frame's start: make the fades' states once a group that can fade has been drawn, cleared on the GPU.</summary>
+	void MakeLodFades()
+	{
+		if ( lodFadeMade || LodFadeTime <= 0 || !Volatile.Read( ref wantsLodFade ) ) return;
+		lodFade = Gpu.CreateBuffer( new BufferInfo { Size = LodFadeSlots * 4, Usage = BufferUsage.Storage | BufferUsage.CopyDestination, Name = "Borealis LOD fades" } );
+		var list = Gpu.BeginCommandList( QueueType.Graphics, "LOD fades clear" );
+		list.FillBuffer( lodFade, 0 );
+		list.Barrier( PipelineStage.Transfer, MemoryAccess.TransferWrite, PipelineStage.AllCommands, MemoryAccess.ShaderRead | MemoryAccess.ShaderWrite );
+		Gpu.Submit( list );
+		lodFadeMade = true;
+	}
+
+	/// <summary>
+	/// Whether <paramref name="view"/> owns this frame's LOD fades: the first main view to ask keeps them while it draws, and
+	/// another takes them once it has stopped. Two views fading the same meshes towards their own LODs would restart each
+	/// other's fades every frame. shortcut: one owner per device, so a second viewport's meshes switch at once and a second
+	/// world's share slot numbers with the first's; keep a state buffer per render system if both ever need fades. The owner
+	/// is held weakly, as views' other state is, so a view that has gone isn't kept.
+	/// </summary>
+	internal bool OwnsLodFade( object view )
+	{
+		if ( view is null ) return false;
+		lock ( lodFadeGate )
+		{
+			if ( !lodFadeView.TryGetTarget( out var owner ) || GpuDrivenFrame - lodFadeSeen > 8 ) lodFadeView.SetTarget( owner = view );
+			if ( !ReferenceEquals( owner, view ) ) return false;
+			lodFadeSeen = GpuDrivenFrame;
+			return true;
+		}
+	}
+
 	/// <inheritdoc/>
 	internal override float LevelPixels => MeshLods && LodStore is not null ? LodPixels : 0;
 
@@ -1009,30 +1132,34 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	{
 		// Read ahead on a worker for a model loading asynchronously (LoadModelAsync), else from the content's folders or
 		// packages (a map's VPK); a streamed texture's tail, unless it doesn't stream. Its mips are pooled until written.
-		TextureFile texture = null;
+		readTextures.Remove( path, out var ahead );
 		try
 		{
-			if ( !readTextures.TryRemove( path, out texture ) || (!streamed && texture?.TopMip > 0) )
+			if ( !streamed && ahead.File?.TopMip > 0 )
 			{
-				texture?.Release();
-				texture = streamed ? TextureStreamer.ReadMips( Content, path, TextureFile.Tail ) : null;
-				if ( texture is null || (texture.TopMip > 0 && !TextureStreamer.Streams( texture )) )
-				{
-					texture?.Release();
-					texture = TextureStreamer.ReadWhole( Content, path );
-					if ( texture is null ) return null;
-				}
+				ReleaseAhead( ahead );
+				ahead = default;
 			}
 
-			return Make( path, streamed, texture );
+			ahead.File ??= streamed ? TextureStreamer.ReadMips( Content, path, TextureFile.Tail ) : null;
+			if ( ahead.File is null || (ahead.File.TopMip > 0 && !TextureStreamer.Streams( ahead.File )) )
+			{
+				ahead.File?.Release();
+				ahead.File = null;
+				ahead.File = TextureStreamer.ReadWhole( Content, path );
+			}
+
+			var made = Make( path, streamed, ahead.File, ahead.Image, ahead.Staged );
+			if ( made is not null ) ahead.Image = default;
+			return made;
 		}
 		finally
 		{
-			texture?.Release();
+			ReleaseAhead( ahead );
 		}
 	}
 
-	BackendTexture Make( string path, bool streamed, TextureFile texture )
+	BackendTexture Make( string path, bool streamed, TextureFile texture, TextureHandle image, BufferHandle staged )
 	{
 		if ( texture is null ) return null;
 		if ( texture.Format == Format.Unknown ) return null;
@@ -1049,7 +1176,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 			Format = TextureFormat.RGBA8888,
 		};
 
-		var made = new BackendTexture( this, CreateTexture( texture, path ), desc, path ) { Layout = ImageLayout.ShaderRead, Dimension = texture.Dimension };
+		var made = new BackendTexture( this, CreateTexture( texture, path, image, staged ), desc, path ) { Layout = ImageLayout.ShaderRead, Dimension = texture.Dimension };
 		if ( streamed && TextureStreamer.Streams( texture ) ) made.Stream = Streamer.Add( made, path, texture );
 		else if ( streamed ) Streamer.Keep( made );
 		return made;
@@ -1057,39 +1184,21 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 
 	// A texture file's image with every mip written: the one its read made ahead (ImageAheadBytes) when it's for this file,
 	// copied from the mips its read staged (StageAheadBytes) when uploads are deferred into a list
-	TextureHandle CreateTexture( TextureFile texture, string path )
+	TextureHandle CreateTexture( TextureFile texture, string path, TextureHandle image, BufferHandle staged )
 	{
-		if ( !imagesAhead.TryRemove( path, out var ahead ) ) return texture.Create( Gpu, path );
-		if ( ahead.File != texture )
+		if ( !image.IsValid ) return texture.Create( Gpu, path );
+
+		if ( staged.IsValid && Gpu.DeferredList is { } list )
 		{
-			DestroyAhead( ahead );
-			return texture.Create( Gpu, path );
+			texture.CopyStaged( list, staged, image );
+			StagedTextures++;
+		}
+		else
+		{
+			for ( int mip = texture.TopMip; mip < texture.Mips; mip++ ) texture.Write( Gpu, image, mip );
 		}
 
-		try
-		{
-			if ( ahead.Staged.IsValid && Gpu.DeferredList is { } list )
-			{
-				texture.CopyStaged( list, ahead.Staged, ahead.Image );
-				StagedTextures++;
-			}
-			else
-			{
-				for ( int mip = texture.TopMip; mip < texture.Mips; mip++ ) texture.Write( Gpu, ahead.Image, mip );
-			}
-		}
-		catch
-		{
-			Gpu.Destroy( ahead.Image );
-			throw;
-		}
-		finally
-		{
-			// Once the GPU is done with the copies
-			if ( ahead.Staged.IsValid ) Gpu.Destroy( ahead.Staged );
-		}
-
-		return ahead.Image;
+		return image;
 	}
 
 	/// <summary>Textures made from mips staged on the worker that read them (<see cref="StageAheadBytes"/>), for tests.</summary>
@@ -1582,7 +1691,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	/// <summary>A holder of the texture at <paramref name="path"/> (<see cref="HoldTexture"/>) lets it go: held by nothing and unpinned, it's freed.</summary>
 	public void ReleaseTexture( string path ) => ReleaseTextures( [path] );
 
-	void ReleaseTextures( IEnumerable<string> paths )
+	internal void ReleaseTextures( IEnumerable<string> paths )
 	{
 		List<GpuTexture> freed = null;
 		lock ( loadedTextures )
@@ -1615,7 +1724,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 			if ( --life.Holders > 0 || life.Pinned ) return;
 			materialLives.Remove( path );
 			released = sharedMaterials.GetValueOrDefault( path ) as IStreamDependent;
-			// Not disposed here: forgotten by the GPU-driven tables at the next frame's start
+			// GPU-driven records and surface fallbacks are released at the next frame's start
 #pragma warning disable CA2000
 			if ( sharedMaterials.Remove( path, out var gone ) && gone is not null ) lock ( freedMaterials ) freedMaterials.Add( gone );
 #pragma warning restore CA2000
@@ -1638,7 +1747,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	internal BackendMaterial ShaderMaterial( string path )
 	{
 		var loaded = LoadMaterial( path );
-		var material = (loaded as SurfaceMaterial)?.Fallback as BackendMaterial ?? loaded as BackendMaterial;
+		var material = (loaded as SurfaceMaterial)?.Fallback ?? loaded as BackendMaterial;
 		return material?.Shader is null ? null : material;
 	}
 
@@ -1650,19 +1759,16 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	{
 		if ( !Surfaces.HasConversions ) return null;
 		if ( (readMaterials.TryGetValue( path, out var read ) ? read : Content.TryRead( path ) is { } data ? ReadMaterial( data ) : null) is not { } file ) return null;
-		var converted = Converted( path, file, () =>
-		{
-			lock ( sharedMaterials ) return Material( path, null );
-		} );
+		var converted = Converted( path, file, classicFallback: true );
 		if ( converted is not null ) readMaterials.TryRemove( path, out _ );
 		return converted;
 	}
 
 	/// <summary>
-	/// <paramref name="file"/> as the surface standing in for its shader, with <paramref name="fallback"/> (its <c>.shader</c>
-	/// material) for draws the surface can't make; null when it has none or doesn't compile.
+	/// <paramref name="file"/> as the surface standing in for its shader, with its <c>.shader</c> material for draws the
+	/// surface can't make if <paramref name="classicFallback"/> is set; null when it has no surface or it doesn't compile.
 	/// </summary>
-	ConvertedMaterial Converted( string path, MaterialFile file, Func<BackendMaterial> fallback )
+	ConvertedMaterial Converted( string path, MaterialFile file, bool classicFallback = false )
 	{
 		var tier = Surfaces;
 		if ( tier.ConversionFor( file.Shader ) is not { } surface || tier.Layout( surface ) is not { } compiled ) return null;
@@ -1673,11 +1779,10 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 		tier.CountConverted( path );
 		var converted = ConvertedMaterial.Create( compiled, WithFeatureRules( file ), path, MaterialTextureFile );
 
-		// The .shader material, for draws the surface can't make; none for a surface alone
-		if ( shader is not null ) converted.SetFallback( fallback );
-
-		// Its scene attributes (overlay, NoZPrepass, ...) are the .shader material's: that material without textures
-		converted.SetAttributes( () => new BackendMaterial( path, shader, file, null ) );
+		if ( shader is not null && classicFallback )
+			converted.SetFallback( Track( new BackendMaterial( path, shader, file, Textures( file ) ), new AskedFor( path, file ) ) );
+		else if ( shader is not null || file.IntAttributes is { Count: > 0 } )
+			converted.SetAttributes( new BackendMaterial( path, shader, file, null ) );
 		return converted;
 	}
 
@@ -1709,16 +1814,11 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	/// </summary>
 	internal GpuMaterial LoadMaterial( string name, MaterialFile file )
 	{
-		BackendMaterial Classic()
-		{
-			var drawn = WithShader( name, file, out var shader );
-			return Track( new BackendMaterial( name, shader, drawn, Textures( drawn ) ) );
-		}
-
 #pragma warning disable CA2000 // Returned: the caller owns it
-		if ( Surfaces.HasConversions && Converted( name, file, Classic ) is { } converted ) return converted;
+		if ( Surfaces.HasConversions && Converted( name, file, classicFallback: true ) is { } converted ) return converted;
 #pragma warning restore CA2000
-		return Classic();
+		var drawn = WithShader( name, file, out var shader );
+		return Track( new BackendMaterial( name, shader, drawn, Textures( drawn ) ), new AskedFor( name, file ) );
 	}
 
 	/// <summary>
@@ -1732,9 +1832,9 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 			if ( sharedMaterials.TryGetValue( shaderPath, out var material ) ) return material;
 			var shader = Shaders.Load( shaderPath );
 #pragma warning disable CA2000 // Kept: the shared materials own it
-			if ( shader is null && Surfaces.HasConversions && Converted( shaderPath, EmptyMaterial( shaderPath ), () => null ) is { } converted ) return sharedMaterials[shaderPath] = converted;
-#pragma warning restore CA2000
+			if ( shader is null && Surfaces.HasConversions && Converted( shaderPath, EmptyMaterial( shaderPath ) ) is { } converted ) return sharedMaterials[shaderPath] = converted;
 			return sharedMaterials[shaderPath] = Track( new BackendMaterial( shaderPath, shader, null, null ) );
+#pragma warning restore CA2000
 		}
 	}
 
@@ -1756,7 +1856,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 		// A shader that's a surface alone (standard, and complex standing for it) has no compiled file: the surface with its defaults
 		var shader = Shaders.Load( shaderPath );
 #pragma warning disable CA2000 // Returned: the caller owns it
-		if ( shader is null && Surfaces.HasConversions && Converted( name, EmptyMaterial( shaderPath ), () => null ) is { } converted ) return converted;
+		if ( shader is null && Surfaces.HasConversions && Converted( name, EmptyMaterial( shaderPath ) ) is { } converted ) return converted;
 #pragma warning restore CA2000
 		return Track( new BackendMaterial( name, shader, null, null ) );
 	}
@@ -1777,7 +1877,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 		// A shader that's a surface alone (standard, complex for it; skin, glass): the surface with its defaults, every texture
 		// the error texture until code sets one, as its .shader's material had (no texture of theirs names a default)
 #pragma warning disable CA2000 // Returned: the caller owns it
-		if ( shader is null && Surfaces.HasConversions && Converted( name, EmptyMaterial( shaderPath ), () => null ) is { } converted )
+		if ( shader is null && Surfaces.HasConversions && Converted( name, EmptyMaterial( shaderPath ) ) is { } converted )
 		{
 			converted.FillUnsetTextures( ErrorTexture );
 			return converted;
@@ -1847,7 +1947,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 		var values = new Dictionary<string, float[]>( StringComparer.OrdinalIgnoreCase ) { ["g_vColorTint"] = [albedo.r, albedo.g, albedo.b, 0] };
 		if ( Content.Find( "materials/default/white.vmat" ) is not null ) return LoadMaterial( "materials/default/white.vmat", values, name );
 #pragma warning disable CA2000 // Returned: the caller owns it
-		if ( Surfaces.HasConversions && Converted( name, WithValues( EmptyMaterial( "shaders/standard.shader" ), values ), () => null ) is { } converted ) return converted;
+		if ( Surfaces.HasConversions && Converted( name, WithValues( EmptyMaterial( "shaders/standard.shader" ), values ) ) is { } converted ) return converted;
 #pragma warning restore CA2000
 		return Track( new BackendMaterial( name, Shaders.Load( "shaders/standard.shader" ), null, null, values ) );
 	}
@@ -1862,7 +1962,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 		var own = values is null ? null : new Dictionary<string, float[]>( values, StringComparer.OrdinalIgnoreCase );
 #pragma warning disable CA2000 // Returned: the caller owns it
 		if ( Surfaces.HasConversions && Content.TryRead( path ) is { } data && ReadMaterial( data ) is { } file && Shaders.Load( file.Shader ) is null
-			&& Converted( name ?? path, WithValues( file, own ), () => null ) is { } converted ) return converted;
+			&& Converted( name ?? path, WithValues( file, own ) ) is { } converted ) return converted;
 #pragma warning restore CA2000
 		return Material( path, own, name );
 	}
@@ -1981,8 +2081,8 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 		}
 
 		if ( file is null ) return Track( new BackendMaterial( name ?? path, null, null, null, values ) );
-		file = WithShader( path, file, out var shader );
-		return Track( new BackendMaterial( name ?? path, shader, file, Textures( file ), values ) );
+		var drawn = WithShader( path, file, out var shader );
+		return Track( new BackendMaterial( name ?? path, shader, drawn, Textures( drawn ), values ), new AskedFor( path, file ) );
 	}
 
 	/// <summary>
@@ -2061,6 +2161,29 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	/// </summary>
 	internal static BlendState IdsScratchBlend => BlendState.NoWrites;
 
+	// Leave the VR checkerboard and dynamic-object bits alone (vr_common_ps_code.fxc).
+	const byte OverlayStencilBit = 0x04;
+
+	/// <summary>The prepasses' stencil override, as in <c>ISceneLayer::SetOverlayStencil</c>.</summary>
+	internal static void ApplyOverlayStencil( ref GraphicsPipelineInfo info, OverlayStencil stencil )
+	{
+		if ( stencil == OverlayStencil.None || !info.DepthFormat.HasStencil() ) return;
+		var write = stencil == OverlayStencil.Write;
+		info.StencilTest = true;
+		info.StencilReadMask = OverlayStencilBit;
+		info.StencilWriteMask = write ? OverlayStencilBit : (byte)0;
+		info.StencilFront = info.StencilBack = new StencilFace( StencilOp.Keep, write ? StencilOp.Replace : StencilOp.Keep, StencilOp.Keep,
+			write ? CompareFunction.Always : CompareFunction.NotEqual );
+	}
+
+	/// <summary>The dynamic stencil reference for the pass override, or the shader's own outside it.</summary>
+	internal static void SetStencilReference( CommandList list, Format depth, OverlayStencil stencil, ShaderPipelineState state = null )
+	{
+		if ( !depth.HasStencil() ) return;
+		if ( stencil != OverlayStencil.None ) list.SetStencilReference( OverlayStencilBit );
+		else if ( state is { StencilTest: true } ) list.SetStencilReference( (byte)state.StencilReference );
+	}
+
 	/// <summary>
 	/// A pipeline for a variant drawing vertices laid out as <paramref name="layout"/> into targets of these formats,
 	/// made once. Mesh vertices are stream 0, instance ids stream 1 (<c>TEXCOORD13</c>), and inputs the mesh lacks, or
@@ -2070,15 +2193,16 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	/// (<see cref="AddNormalsTarget"/>). In a tools pass (<paramref name="tools"/>) a colour pipeline draws with the engine's
 	/// pixel stage (<see cref="ToolsViewStage"/>).
 	/// </summary>
-	internal PipelineHandle Pipeline( ShaderVariant variant, VertexLayout layout, Format color, Format depth, int samples, bool depthOnly, BindingLayoutHandle[] sets = null, bool materialPerDraw = false, bool ids = false, ShaderVariant stateFrom = null, bool normals = false, ToolsPass tools = ToolsPass.None )
+	internal PipelineHandle Pipeline( ShaderVariant variant, VertexLayout layout, Format color, Format depth, int samples, bool depthOnly, BindingLayoutHandle[] sets = null, bool materialPerDraw = false, bool ids = false, ShaderVariant stateFrom = null, bool normals = false, ToolsPass tools = ToolsPass.None, OverlayStencil stencil = OverlayStencil.None )
 	{
 		normals &= color != Format.Unknown && !ids;
-		if ( ids || color == Format.Unknown ) tools = ToolsPass.None;
+		tools = ids || color == Format.Unknown ? ToolsPass.None : ToolsViewStage.ReadyPass( Shaders, tools );
+		if ( !depth.HasStencil() ) stencil = OverlayStencil.None;
 
 		// An ids pipeline's colour is the ids target's format it was asked for (the frame's IdsFormat), so pipelines for either
 		// format live side by side and one made on a worker after the format changed is still the one asked for
 		if ( ids && !IsIdsFormat( color ) ) color = IdsFormat;
-		var key = new PipelineKey( variant, layout, color, depth, samples, depthOnly, sets, materialPerDraw, stateFrom, normals, tools );
+		var key = new PipelineKey( variant, layout, color, depth, samples, depthOnly, sets, materialPerDraw, stateFrom, normals, tools, stencil );
 		lock ( pipelines )
 		{
 			if ( pipelines.TryGetValue( key, out var pipeline ) ) return pipeline;
@@ -2123,6 +2247,8 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 				info.StencilReadMask = state.StencilReadMask;
 				info.StencilWriteMask = state.StencilWriteMask;
 			}
+
+			ApplyOverlayStencil( ref info, stencil );
 
 			// A GPU-driven pixel shader reading its bucket's one material (borealis_gpu_driven.h's specialization constant)
 			if ( materialPerDraw && info.FragmentShader.IsValid ) info.FragmentConstants = [.. info.FragmentConstants ?? [], new SpecializationConstant( variant.Pixel?.MaterialPerDrawId ?? ShaderStage.GpuDrivenMaterialPerDrawId, 1 )];
@@ -2227,7 +2353,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	/// </summary>
 	internal static readonly string DumpSurfaceShaders = Environment.GetEnvironmentVariable( "BOREALIS_DUMP_SURFACE_SHADERS" );
 
-	internal readonly record struct PipelineKey( ShaderVariant Variant, VertexLayout Layout, Format Color, Format Depth, int Samples, bool DepthOnly, BindingLayoutHandle[] Sets = null, bool MaterialPerDraw = false, ShaderVariant StateFrom = null, bool Normals = false, ToolsPass Tools = ToolsPass.None );
+	internal readonly record struct PipelineKey( ShaderVariant Variant, VertexLayout Layout, Format Color, Format Depth, int Samples, bool DepthOnly, BindingLayoutHandle[] Sets = null, bool MaterialPerDraw = false, ShaderVariant StateFrom = null, bool Normals = false, ToolsPass Tools = ToolsPass.None, OverlayStencil Stencil = OverlayStencil.None );
 
 	/// <summary>
 	/// <c>kForwardNormalsOutput</c> in sbox/forward_normals.slangh: a pixel stage that has it writes the opaque pass's normals
@@ -2282,6 +2408,22 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	internal override GpuContext CreateContext( GpuContext frame = null ) => new BackendContext( this, (BackendContext)frame );
 
 	internal override bool DrawsAggregatesGpuDriven => GpuDriven && MaterialObjects && GpuDrivenTables is not null;
+
+	CullStats cullStats;
+	readonly object cullStatsGate = new();
+
+	/// <summary>The counters the GPU culls add what they let through to, once a render system has a slot; null before.</summary>
+	internal CullStats CullStats => Volatile.Read( ref cullStats );
+
+	internal override int AcquireCullStats()
+	{
+		if ( !CullsAggregatesGpuDriven ) return 0;
+		lock ( cullStatsGate ) return (cullStats ??= new CullStats( Gpu )).Acquire();
+	}
+
+	internal override void ReleaseCullStats( int slot ) => CullStats?.Release( slot );
+
+	internal override CulledCounts CullCounts( int slot ) => CullStats is { } stats && slot > 0 ? stats.Counts( slot ) : default;
 
 	internal override bool CullsAggregatesGpuDriven => DrawsAggregatesGpuDriven && GpuDrivenCulling;
 
@@ -2968,6 +3110,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 			list.FillBuffer( prepass, VisibilityView.CompactedCursorIndices, 0, 4 );
 			list.FillBuffer( state.PrepassCompacted16, VisibilityView.CompactedCursorIndices, 0, 4 );
 			list.FillBuffer( state.MeshletStamps, 0 );
+			list.FillBuffer( state.MeshletJobs, 1, 4, 8 );
 		}
 
 		list.Barrier( PipelineStage.Transfer, MemoryAccess.TransferWrite, PipelineStage.AllCommands, MemoryAccess.MemoryRead | MemoryAccess.MemoryWrite );
@@ -3403,8 +3546,6 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	// any did (the next frame waits for this one then)
 	int vertexCacheTotal, vertexCacheOverflow;
 
-	// Past every region, after a growth mid-frame: where the rest of the frame allocates, or 0
-	int vertexCacheTail;
 	bool vertexCacheOverflowed;
 
 	/// <summary>Vertex cache growths so far, and allocations past a frame's own region, for tests.</summary>
@@ -3415,10 +3556,11 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 
 	/// <summary>
 	/// Room for <paramref name="vertices"/> skinned vertices in this frame's region of the vertex cache; the first one's
-	/// index. The cache only grows as a frame starts (its first allocation), to the last frame's high-water mark, once the
-	/// frames before are done: switched mid-frame, work this frame recorded earlier would read a buffer its skinning didn't
-	/// write (it binds the cache by handle, draws read it through the bindless table). A frame needing more than its region
-	/// takes the next slot's, once the frames before are done, and the next frame waits for this one.
+	/// index, or -1 when the frame has none left. The cache only grows as a frame starts (its first allocation), to the last
+	/// frame's high-water mark, once the frames before are done: switched mid-frame, work this frame recorded earlier would
+	/// read a buffer its skinning didn't write (it binds the cache by handle, draws read it through the bindless table). A
+	/// frame needing more than its region takes the next slot's, once the frames before are done, and the next frame waits
+	/// for this one; past that it gets none, and the next frame grows to fit what it asked for.
 	/// </summary>
 	public override int AllocateVertexCache( int vertices )
 	{
@@ -3431,11 +3573,11 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 				if ( vertexCacheOverflowed || needed > vertexCacheCapacity ) Gpu.WaitForEarlierFrames();
 				if ( needed > vertexCacheCapacity ) GrowVertexCache( needed + needed / 4 );
 				vertexCacheOverflowed = false;
-				vertexCache = vertexCacheOverflow = vertexCacheTotal = vertexCacheTail = 0;
+				vertexCache = vertexCacheOverflow = vertexCacheTotal = 0;
 			}
 
 			vertexCacheTotal += vertices;
-			if ( vertexCacheTail == 0 && vertexCache + vertices <= vertexCacheCapacity )
+			if ( vertexCache + vertices <= vertexCacheCapacity )
 			{
 				var first = Gpu.FrameSlot * vertexCacheCapacity + vertexCache;
 				vertexCache += vertices;
@@ -3451,45 +3593,25 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 			}
 
 			VertexCacheOverflows++;
-			if ( vertexCacheTail == 0 && vertexCacheOverflow + vertices <= vertexCacheCapacity && Gpu.FramesInFlight > 1 )
+			if ( vertexCacheOverflow + vertices <= vertexCacheCapacity && Gpu.FramesInFlight > 1 )
 			{
 				var first = (Gpu.FrameSlot + 1) % Gpu.FramesInFlight * vertexCacheCapacity + vertexCacheOverflow;
 				vertexCacheOverflow += vertices;
 				return first;
 			}
 
-			// More than two regions in one frame (a first frame of many skinned meshes): only growing now makes room. What the
-			// frame sent already is copied to where it was, past which the rest of the frame allocates; skinning recorded but
-			// not yet sent still writes the old buffer it bound, so it's said
-			if ( vertexCacheTail == 0 )
-			{
-				Gpu.WaitIdle();
-				var held = vertexCacheCapacity * Gpu.FramesInFlight;
-				GrowVertexCache( (held + vertices) * 2 / Gpu.FramesInFlight + 1, copy: true );
-				vertexCacheTail = held;
-				Console.Error.WriteLine( $"Borealis.Gpu: the vertex cache grew mid-frame to {vertexCacheCapacity} vertices a frame; skinned meshes recorded before may draw wrong this frame" );
-			}
-
-			if ( vertexCacheTail + vertices > vertexCacheCapacity * Gpu.FramesInFlight ) throw new InvalidOperationException( $"The vertex cache has no room for {vertices} more vertices this frame" );
-			var tail = vertexCacheTail;
-			vertexCacheTail += vertices;
-			return tail;
+			// More than two regions in one frame (a first frame of many skinned meshes): never grown now, the next frame
+			// grows to the frame's total
+			return -1;
 		}
 	}
 
-	void GrowVertexCache( int needed, bool copy = false )
+	void GrowVertexCache( int needed )
 	{
 		var capacity = Math.Max( 1 << 16, vertexCacheCapacity );
 		while ( capacity < needed ) capacity *= 2;
 
 		var buffer = Gpu.CreateBuffer( new BufferInfo { Size = (long)capacity * VertexCacheStride * Gpu.FramesInFlight, Usage = BufferUsage.Storage, Name = "Borealis vertex cache" } );
-		if ( copy && vertexCacheBuffer.IsValid )
-		{
-			// This frame's region so far, where it stays (the slot's start moves with the capacity)
-			var list = Gpu.BeginCommandList( QueueType.Graphics, "Vertex cache growth" );
-			list.CopyBuffer( vertexCacheBuffer, (long)Gpu.FrameSlot * vertexCacheCapacity * VertexCacheStride, buffer, (long)Gpu.FrameSlot * capacity * VertexCacheStride, (long)vertexCache * VertexCacheStride );
-			Gpu.Wait( Gpu.Submit( list ) );
-		}
 
 		Gpu.SetBindlessBuffer( ShaderAbi.BindlessVertexCache, buffer );
 		if ( vertexCacheBuffer.IsValid ) Gpu.Destroy( vertexCacheBuffer );
@@ -3710,7 +3832,10 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 			if ( lodStore is { } lods ) lods.Loading = Loading;
 			meshletStore?.BeginFrame();
 			lodStore?.BeginFrame();
+			cullStats?.BeginFrame();
 			GpuDrivenFrame++;
+			LodFadeNow = ((uint)(long)((LodFadeClock ?? clock.Elapsed.TotalSeconds) * 256) & 0x3fffu) | (GpuDrivenFrame & 0x3ffu) << 14;
+			MakeLodFades();
 			loadFrame++;
 			var shown = Volatile.Read( ref idsShownFrame );
 			IdsWhole = IdsNormals || shown != 0 && GpuDrivenFrame - shown <= 2;
@@ -3763,15 +3888,27 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 			System.Threading.Thread.Sleep( 1 );
 		}
 
-		// Builds read on workers make their images there: finished before the device can go
+		// Builds read on workers make their images there, as do model, texture and lightmap reads, LOD and meshlet builds:
+		// finished before the device can go
 		streamer?.Finish();
+		while ( Volatile.Read( ref readsPending ) > 0 ) System.Threading.Thread.Sleep( 1 );
+		System.Threading.Tasks.Task<Borealis.Source2.World.WorldFile>[] lightmapTasks;
+		lock ( mapLightmaps ) lightmapTasks = [.. lightmapReads.Values];
+		foreach ( var task in lightmapTasks ) ((IAsyncResult)task).AsyncWaitHandle.WaitOne();
+		meshletStore?.FinishBuilds();
+		lodStore?.FinishBuilds();
 		Gpu.WaitIdle();
+		foreach ( var (_, ahead) in readTextures ) ReleaseAhead( ahead );
+		readTextures.Clear();
 		Poll();
-		materialCache?.Dispose();
+		// Surface compilation uses the material cache's shared descriptor layouts.
 		surfaces?.Dispose();
+		materialCache?.Dispose();
 		ResidentCulls.Dispose( Gpu );
 		meshletStore?.Dispose();
 		lodStore?.Dispose();
+		cullStats?.Dispose();
+		if ( lodFade.IsValid ) Gpu.Destroy( lodFade );
 		gpuDrivenTables?.Dispose();
 		lock ( visibilityViews )
 		{
