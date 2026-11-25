@@ -20,6 +20,12 @@ public sealed partial class RenderSystem
 	public bool Draw3DSkybox { get; set; } = true;
 
 	/// <summary>
+	/// Whether the 3D skybox draws its own depth prepass before its forward pass (on by default, as native's
+	/// <c>Skybox3DPipeline</c>). BorealisLab turns it off to time the skybox without one.
+	/// </summary>
+	internal bool SkyboxDepthPrepass { get; set; } = true;
+
+	/// <summary>
 	/// Lazily created skybox system and view.
 	/// </summary>
 	RenderSystem skybox;
@@ -83,11 +89,12 @@ public sealed partial class RenderSystem
 
 			// Baked lighting needs no shadows (C3DSkyboxRenderer::Render); foliage still needs a prepass.
 			Shadows = false,
-			DepthPrepass = true,
+			DepthPrepass = SkyboxDepthPrepass,
 		};
 		skybox.aggregates.Skybox = true;
 		skybox.ParallelRecording = ParallelRecording;
 		skybox.DrawSky = DrawSky;
+		skybox.DepthPrepass = SkyboxDepthPrepass;
 
 		skyboxView ??= new RenderView { Name = "3D Skybox" };
 		FillSkyboxView( skyboxView, view, sky );

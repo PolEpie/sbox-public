@@ -30,7 +30,7 @@ internal static class MapRealRun
 	/// A way of drawing it: recording on one thread or several, material objects or binding by reflection, whether static
 	/// geometry casts sun shadows, and whether aggregates draw GPU-driven (<c>-gpudriven</c>).
 	/// </summary>
-	sealed record Variant( string Name, bool Parallel, bool MaterialObjects, bool Shadows, bool GpuDriven = false, bool MaterialBuckets = false, bool CpuCulling = false, bool NoCompaction = false, bool FullVertices = false, bool Visibility = false, bool FreezeFar = false, bool? FarCache = null, bool NoTiles = false, bool NoFrameBufferMips = false, bool NoContactShadows = false );
+	sealed record Variant( string Name, bool Parallel, bool MaterialObjects, bool Shadows, bool GpuDriven = false, bool MaterialBuckets = false, bool CpuCulling = false, bool NoCompaction = false, bool FullVertices = false, bool Visibility = false, bool FreezeFar = false, bool? FarCache = null, bool NoTiles = false, bool NoFrameBufferMips = false, bool NoContactShadows = false, bool NoSkybox = false, bool NoSkyboxPrepass = false, bool NoLeftCull = false );
 
 	static readonly Variant[] Variants =
 	[
@@ -57,6 +57,11 @@ internal static class MapRealRun
 		new( "real-parallel-gpudriven-shadows-frozen", true, true, true, true, Visibility: true, FreezeFar: true ),
 		new( "real-parallel-gpudriven-shadows-farcache", true, true, true, true, Visibility: true, FarCache: true ),
 		new( "real-parallel-gpudriven-shadows-nofarcache", true, true, true, true, Visibility: true, FarCache: false ),
+		new( "real-parallel-gpudriven-shadows-nocontact", true, true, true, true, Visibility: true, NoContactShadows: true ),
+		new( "real-parallel-gpudriven-shadows-nofbmips", true, true, true, true, Visibility: true, NoFrameBufferMips: true ),
+		new( "real-parallel-gpudriven-shadows-noskybox", true, true, true, true, Visibility: true, NoSkybox: true ),
+		new( "real-parallel-gpudriven-shadows-skyboxnoprepass", true, true, true, true, Visibility: true, NoSkyboxPrepass: true ),
+		new( "real-parallel-gpudriven-shadows-noleftcull", true, true, true, true, Visibility: true, NoLeftCull: true ),
 		new( "real-parallel-gpudriven-shadows-notiles", true, true, true, true, Visibility: true, NoTiles: true ),
 		new( "real-parallel-gpudriven-visibility-notiles", true, true, false, true, Visibility: true, NoTiles: true ),
 		new( "real-parallel-gpudriven-fullvertices", true, true, false, true, FullVertices: true ),
@@ -109,6 +114,10 @@ internal static class MapRealRun
 		var cascadeTiles = global::Borealis.Shadows.ShadowMapper.CascadeTiles && !Args.Has( "-no-cascade-tiles" );
 		// The map's sun's contact shadows, which the -nocontact variants turn off
 		var sunContactShadows = map.World.Lighting.SunContactShadows;
+		// -skybox-noprepass: the 3D skybox draws no depth prepass of its own (or the -skyboxnoprepass variant), captures too
+		var skyboxPrepass = !Args.Has( "-skybox-noprepass" );
+		// -noleftcull: batches the GPU-driven path leaves to the classic path draw every fragment, unculled (or the -noleftcull variant), captures too
+		var leftCull = !Args.Has( "-noleftcull" );
 		if ( Args.Int( "-cascade-resolution", 0 ) is > 0 and var cascadeResolution ) RenderHost.Current.Shadows.MaxCascadeResolution = cascadeResolution;
 		if ( Args.Int( "-cascade-cull-texels", 0 ) is > 0 and var cullTexels ) global::Borealis.Culling.SizeCull.CascadeTexels = cullTexels;
 		if ( !Args.Has( "-noprobes" ) ) map.CaptureProbes();
@@ -303,6 +312,9 @@ internal static class MapRealRun
 				map.Backend.GpuDrivenVisibility = variant.Visibility;
 				map.Backend.FrameBufferCopyMips = !variant.NoFrameBufferMips;
 				map.World.Lighting.SunContactShadows = sunContactShadows && !variant.NoContactShadows;
+				map.System.Draw3DSkybox = !variant.NoSkybox;
+				map.System.SkyboxDepthPrepass = skyboxPrepass && !variant.NoSkyboxPrepass;
+				global::Borealis.Features.AggregateRenderFeature.CullsLeftFragments = leftCull && !variant.NoLeftCull;
 				map.SetCastShadows( variant.Shadows );
 				global::Borealis.Shadows.ShadowMapper.FreezeFarCascade = variant.FreezeFar || Args.Has( "-freeze-far-cascade" );
 				global::Borealis.Shadows.ShadowMapper.ForgetFrozenFar();
@@ -438,6 +450,9 @@ internal static class MapRealRun
 				map.Backend.MaterialObjects = true;
 				map.Backend.FrameBufferCopyMips = true;
 				map.World.Lighting.SunContactShadows = sunContactShadows;
+				map.System.Draw3DSkybox = true;
+				map.System.SkyboxDepthPrepass = skyboxPrepass;
+				global::Borealis.Features.AggregateRenderFeature.CullsLeftFragments = leftCull;
 				// -capture-shadows: with static geometry casting sun shadows, so GPU-driven shadow views are compared too
 				map.SetCastShadows( Args.Has( "-capture-shadows" ) );
 				global::Borealis.Shadows.ShadowMapper.FarCascadeCache = farCache;
