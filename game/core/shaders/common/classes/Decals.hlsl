@@ -381,6 +381,11 @@ struct Decals
 
 	static void Apply( float3 worldPos, in out Material material )
 	{
+		// Uniform across the view, so skipping the derivatives here still keeps them quad-uniform.
+		[branch]
+		if ( NumDecals == 0 )
+			return;
+
 		// ddx/ddy expensive; compute world position derivatives once and pass them in.
 		// we use these to compute decal UV gradients for proper mipmapping for decals, also cheaper than doing .Sample separately.
 		// Taken before the early out: a quad neighbour's cluster can be empty, and derivatives need the whole quad

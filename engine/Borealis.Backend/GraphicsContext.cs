@@ -100,8 +100,8 @@ public sealed class GraphicsContext
 	}
 
 	/// <summary>
-	/// Seconds and device frames a scratch texture kept at the target's size (<see cref="countDepth"/>,
-	/// <see cref="resolvedTarget"/>, <see cref="targetCopy"/>) goes unused before it's destroyed: a game uses them most
+	/// Seconds and device frames a scratch texture kept at the target's size (<see cref="resolvedTarget"/>,
+	/// <see cref="targetCopy"/>) goes unused before it's destroyed: a game uses them most
 	/// frames; the menu after one, nothing does, and they'd keep a screen's worth of video memory each.
 	/// </summary>
 	internal static double ScratchIdleSeconds { get; set; } = 20;
@@ -109,20 +109,19 @@ public sealed class GraphicsContext
 	internal static ulong ScratchIdleFrames { get; set; } = 120;
 
 	// When each scratch texture was last used: Stopwatch ticks and the device frame
-	long countDepthUsed, resolvedUsed, copyUsed, scratchChecked;
-	ulong countDepthFrame, resolvedFrame, copyFrame;
+	long resolvedUsed, copyUsed, scratchChecked;
+	ulong resolvedFrame, copyFrame;
 
 	/// <summary>Scratch textures it holds now, for tests.</summary>
-	internal int ScratchTextures => (countDepth.IsValid ? 1 : 0) + (resolvedTarget.IsValid ? 1 : 0) + (targetCopy.IsValid ? 1 : 0);
+	internal int ScratchTextures => (resolvedTarget.IsValid ? 1 : 0) + (targetCopy.IsValid ? 1 : 0);
 
 	// At a block's start, now and then: what's gone unused long enough was last recorded into a list submitted long since
 	void ReleaseIdleScratch()
 	{
-		if ( !countDepth.IsValid && !resolvedTarget.IsValid && !targetCopy.IsValid ) return;
+		if ( !resolvedTarget.IsValid && !targetCopy.IsValid ) return;
 		var now = System.Diagnostics.Stopwatch.GetTimestamp();
 		if ( (now - scratchChecked) < System.Diagnostics.Stopwatch.Frequency * Math.Min( ScratchIdleSeconds, 1 ) ) return;
 		scratchChecked = now;
-		DropIfIdle( ref countDepth, countDepthUsed, countDepthFrame, now );
 		DropIfIdle( ref resolvedTarget, resolvedUsed, resolvedFrame, now );
 		DropIfIdle( ref targetCopy, copyUsed, copyFrame, now );
 	}
@@ -1060,7 +1059,7 @@ public sealed class GraphicsContext
 		mipViews.Clear();
 		viewMips.Clear();
 		owned.Clear();
-		countDepth = resolvedTarget = targetCopy = default;
+		resolvedTarget = targetCopy = default;
 		quadIndices = default;
 		identityTransform = default;
 		Array.Clear( readableSets );

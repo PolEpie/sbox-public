@@ -103,13 +103,13 @@ internal sealed class OutputLayer : RenderLayer
 	public OutputLayer() : base( "Output" ) { }
 
 	/// <summary>
-	/// Bind, resolve and copy the frame.
+	/// Resolve and copy the frame. Transfers name their own textures, so they need no draw targets bound.
 	/// </summary>
 	public override void Record( RenderFrame frame, GpuContext rc, ref RenderStats stats )
 	{
-		frame.BindFrame( rc );
-		rc.Resolve( frame.Output );
-		rc.CopyToOutput( frame.Output, frame.View.Viewport );
+		var output = frame.Output;
+		if ( output.Target.Samples > 1 ) rc.Resolve( output );
+		if ( output.Texture is not null ) rc.CopyToOutput( output, frame.View.Viewport );
 	}
 }
 

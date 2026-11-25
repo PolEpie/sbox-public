@@ -1539,8 +1539,7 @@ internal sealed partial class BackendContext : GpuContext
 
 		// With mips, the depth-aware mask, made with the copy in one pass where it can be; then the mips for blurred refraction
 		var masked = !frameBufferMadeBefore && device.FrameBufferCopyMips && copy.Mips > 1;
-		var dirty = (0, 0, copy.Width, copy.Height);
-		if ( !frameBufferMadeBefore && !(masked && CopyFrameBufferMasked( source, copy, viewport, ref dirty )) )
+		if ( !frameBufferMadeBefore && !(masked && CopyFrameBufferMasked( source, copy, viewport )) )
 		{
 			int x = (int)viewport.Left, y = (int)viewport.Top;
 			CloseScope();
@@ -1552,20 +1551,18 @@ internal sealed partial class BackendContext : GpuContext
 				List.CopyTextureRegion( source.Handle, copy.Handle, x, y, 0, 0, copy.Width, copy.Height );
 			else
 				List.Blit( source.Handle, (x, y, copy.Width, copy.Height), copy.Handle, (0, 0, copy.Width, copy.Height), Filter.Nearest );
-			if ( masked ) MaskFrameBufferCopy( copy, viewport, null, ref dirty );
-			else copy.FrameBufferMipShader = null;
+			if ( masked ) MaskFrameBufferCopy( copy, viewport, null );
 		}
 
-		int firstUnreadMip = 0;
 		if ( masked )
 		{
 			var mips = BeginGpuScope( "Frame Buffer Copy Mips" );
-			firstUnreadMip = GenerateFrameBufferCopyMips( copy, viewport, dirty );
+			GenerateFrameBufferCopyMips( copy, viewport );
 			EndGpuScope( mips );
 		}
 
 		// Then readable by the draws after it: they bind only what's readable
-		Transition( copy, ImageLayout.ShaderRead, firstMip: firstUnreadMip );
+		Transition( copy, ImageLayout.ShaderRead );
 
 		EndGpuScope( scope );
 

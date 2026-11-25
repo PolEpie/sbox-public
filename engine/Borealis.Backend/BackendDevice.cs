@@ -4081,8 +4081,6 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 		System.Threading.Tasks.Task<Borealis.Source2.World.WorldFile>[] lightmapTasks;
 		lock ( mapLightmaps ) lightmapTasks = [.. lightmapReads.Values];
 		foreach ( var task in lightmapTasks ) ((IAsyncResult)task).AsyncWaitHandle.WaitOne();
-		meshletStore?.FinishBuilds();
-		lodStore?.FinishBuilds();
 		Gpu.WaitIdle();
 		foreach ( var (_, ahead) in readTextures ) ReleaseAhead( ahead );
 		readTextures.Clear();
