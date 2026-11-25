@@ -37,7 +37,7 @@ internal static class SharedPasses
 	static readonly StringToken ConservativeQuarter = new( "D_CONSERVATIVE_QUARTER" );
 	static readonly StringToken DepthResolveSourceSize = new( "DepthResolveSourceSize" );
 	static readonly StringToken Upscale = new( "D_UPSCALE" );
-	static readonly StringToken DownsampleFactor = new( "DownsampleFactor" );
+	static readonly StringToken QuarterDepthSourceViewport = new( "QuarterDepthSourceViewport" );
 	static readonly StringToken DownsampleMethod = new( "D_DOWNSAMPLE_METHOD" );
 	static readonly StringToken FusedDepth = new( "D_FUSED_DEPTH" );
 	static readonly StringToken Mip0Out = new( "Mip0Out" );
@@ -157,13 +157,13 @@ internal static class SharedPasses
 	/// Write <paramref name="depth"/> at a quarter of the resolution into the bound depth target. It draws into what's bound,
 	/// so it keeps the binding (and the depth clear pending on it).
 	/// </summary>
-	public static void DownsampleQuarterDepth( GpuContext context, GpuTexture depth, bool msaaInput )
+	public static void DownsampleQuarterDepth( GpuContext context, GpuTexture depth, bool msaaInput, Rect sourceViewport )
 	{
 		var parameters = ParameterPool.Get();
 		parameters.Set( SourceDepth, depth );
 		parameters.SetCombo( Msaa, msaaInput );
 		parameters.SetCombo( Upscale, false );
-		parameters.Set( DownsampleFactor, 4 );
+		parameters.Set( QuarterDepthSourceViewport, new Vector4( sourceViewport.Left, sourceViewport.Top, sourceViewport.Width, sourceViewport.Height ) );
 		context.DrawFullscreen( DepthResolve, parameters, ForwardMode );
 		ParameterPool.Return( parameters );
 	}

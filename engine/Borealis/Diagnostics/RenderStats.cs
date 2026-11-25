@@ -134,3 +134,24 @@ public struct RenderStats
 	public override readonly string ToString()
 		=> $"{ObjectsVisible}/{Objects} visible ({ObjectsSizeCulled} too small), {Draws} draws ({TranslucentDraws} translucent, {Instances} instances, {CustomDraws} custom, {Triangles / 1000000.0:0.0}M tris) + {DepthDraws} depth, {Lights} lights, {ShadowViews} shadow views ({ShadowDraws} draws), collect {CollectMs:0.000}ms, prepare {PrepareMs:0.000}ms, draw {DrawMs:0.000}ms, alloc {CollectAllocBytes}/{PrepareAllocBytes}/{DrawAllocBytes} B";
 }
+
+/// <summary>
+/// What a render system's GPU culls let through in a frame, read back a few frames late (<see cref="GpuDevice.CullCounts"/>):
+/// batches with a surviving fragment by pass kind, the forward pass's surviving fragments and triangles, and every pass's triangles.
+/// </summary>
+internal struct CulledCounts
+{
+	public int Draws, DepthDraws, ShadowDraws, Instances;
+	public long Triangles, DrawnTriangles;
+
+	/// <summary>Add them to the stats of the batches the GPU counted.</summary>
+	public readonly void AddTo( ref RenderStats stats )
+	{
+		stats.Draws += Draws;
+		stats.DepthDraws += DepthDraws;
+		stats.ShadowDraws += ShadowDraws;
+		stats.Instances += Instances;
+		stats.Triangles += Triangles;
+		stats.DrawnTriangles += DrawnTriangles;
+	}
+}

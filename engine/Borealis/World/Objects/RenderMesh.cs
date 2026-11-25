@@ -250,6 +250,32 @@ public sealed class RenderMesh
 	/// </summary>
 	internal bool NeedsStencil => needsStencil ??= lods.Any( lod => lod.Any( draw => draw.Material is { NeedsStencil: true } ) );
 
+	bool? animatesVertices;
+
+	/// <summary>
+	/// Whether any LOD draws with a material that animates vertices (<see cref="GpuMaterial.AnimatesVertices"/>); null while
+	/// one that doesn't may still say it does (a surface compiling). Kept once known.
+	/// </summary>
+	internal bool? AnimatesVertices
+	{
+		get
+		{
+			if ( animatesVertices is { } known ) return known;
+			bool? animates = false;
+			foreach ( var lod in lods )
+			{
+				foreach ( var draw in lod )
+				{
+					var draws = draw.Material?.AnimatesVertices;
+					if ( draws == true ) return animatesVertices = true;
+					if ( draws is null ) animates = null;
+				}
+			}
+
+			return animatesVertices = animates;
+		}
+	}
+
 	/// <summary>
 	/// Model-free mesh for sorting and culling tests; cannot render.
 	/// </summary>

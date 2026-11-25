@@ -20,7 +20,7 @@ internal abstract class GpuContext : IDisposable
 	/// <summary>Whether the device can take an indirect draw count from a buffer.</summary>
 	public static bool SupportsDrawIndirectCount => Device.SupportsDrawIndirectCount;
 
-	/// <summary>Allocate vertex-cache space this frame and return its first vertex.</summary>
+	/// <summary>Allocate vertex-cache space this frame and return its first vertex, or -1 when the frame has none left.</summary>
 	public static int AllocateVertexCache( int vertices ) => Device.AllocateVertexCache( vertices );
 
 	/// <summary>Where a queued morph is in the atlas, once generated.</summary>
@@ -228,6 +228,9 @@ internal abstract class GpuContext : IDisposable
 	/// <summary>Clear the bound targets.</summary>
 	public abstract void Clear( Color color, bool clearColor = true, bool clearDepth = true );
 
+	/// <summary>Clear a rectangle of the bound depth attachment to reverse-Z far depth, preserving the rest.</summary>
+	public abstract void ClearDepthRegion( int x, int y, int width, int height );
+
 	/// <summary>
 	/// Fill a texture with a colour at this point in the work, not bound as a target. By default the device fills it now
 	/// (<see cref="GpuDevice.Clear"/>).
@@ -367,6 +370,12 @@ internal abstract class GpuContext : IDisposable
 		/// </summary>
 		public readonly uint[] Moved;
 
+		/// <summary>
+		/// Whether its LODs cross-fade, dithered, in the view that owns the fades (a main view's instanced object): those of
+		/// its draws whose material dithers it do (<see cref="GpuMaterial.DithersLodFade"/>), the rest switch at once.
+		/// </summary>
+		public bool FadesLods;
+
 		public int Count => Slots.Length;
 
 		public ResidentMeshes( RenderMesh mesh, Vector3[] centers, Vector3[] extents, int[] slots, float[] lodScales, ShaderParameters[] lightmaps = null, ShaderParameters[] probes = null, uint[] moved = null )
@@ -453,6 +462,12 @@ internal abstract class GpuContext : IDisposable
 		public bool Shadow;
 
 		/// <summary>
+		/// A device slot (<see cref="GpuDevice.AcquireCullStats"/>) its culls count what they let through into, else 0: the
+		/// batches drawn then count on the device (<see cref="GpuCountedBatches"/>), not by the caller.
+		/// </summary>
+		public int StatsSlot;
+
+		/// <summary>
 		/// The view's world to clip transform (as its vertex shaders take it, before they negate y) and its viewport's size:
 		/// what meshlet culling tests a meshlet's screen bounds against the sample grid with.
 		/// </summary>
@@ -474,6 +489,12 @@ internal abstract class GpuContext : IDisposable
 		/// its own root, as the 3D skybox isn't) or, with <see cref="LodTexels"/>, by texels.
 		/// </summary>
 		public bool GeneratedLods;
+
+		/// <summary>
+		/// A main view picking LODs by distance (its root camera's): what may own the frame's LOD fades, where resident meshes
+		/// that fade draw both LODs while they cross-fade; null for every other view, whose meshes switch at once.
+		/// </summary>
+		public object FadeView;
 
 		/// <summary>
 		/// Which of its resident list's casters it keeps by when each last moved, against the stamps the far cascade's cache was
@@ -518,6 +539,12 @@ internal abstract class GpuContext : IDisposable
 	internal bool GpuDrivenInOrder { get; set; }
 
 	/// <summary>
+	/// After <see cref="DrawGpuDriven"/>: how many of the call's first batches it drew with their survivors counted on the
+	/// device (<see cref="GpuDrivenCull.StatsSlot"/>); the caller counts the rest.
+	/// </summary>
+	internal int GpuCountedBatches { get; set; }
+
+	/// <summary>
 	/// Draw a layer's aggregate batches GPU-driven: per-draw data in tables and one multi-draw per pipeline, where the device
 	/// can. Sets <paramref name="drawn"/> for each batch drawn; the caller draws the rest as before. Devices without a
 	/// GPU-driven path draw none. With <paramref name="cull"/>, a device may cull every fragment of each batch's aggregate
@@ -538,6 +565,15 @@ internal abstract class GpuContext : IDisposable
 
 	/// <summary>Copy data into a buffer from <paramref name="offsetBytes"/> in, ordered before later draws.</summary>
 	public abstract void UploadBuffer<T>( GpuBuffer buffer, ReadOnlySpan<T> data, int offsetBytes ) where T : unmanaged;
+
+	/// <summary>
+	/// Record consecutive uploads to distinct buffers without synchronizing them with one another.
+	/// Only uploads to those buffers may be recorded between this and <see cref="EndBufferUploadBatch"/>.
+	/// </summary>
+	internal virtual void BeginBufferUploadBatch() { }
+
+	/// <summary>Make the batch's uploads visible to their consumers.</summary>
+	internal virtual void EndBufferUploadBatch() { }
 
 	/// <summary>Bind instance ids at <paramref name="firstInstance"/>.</summary>
 	public abstract void BindInstances( int stream, int firstInstance );

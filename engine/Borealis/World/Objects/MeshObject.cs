@@ -30,6 +30,7 @@ public sealed class MeshObject : RenderObject
 			LocalBounds = value?.Bounds ?? default;
 			WantsFrameBufferCopy = MaterialOverride is { } material ? RenderMesh.ReadsFrameBuffer( material ) : value?.ReadsFrameBufferCopy ?? false;
 			WantsStencil = MaterialOverride is { } stencilMaterial ? stencilMaterial.NeedsStencil : value?.NeedsStencil ?? false;
+			UpdateAnimation();
 			DrawChanged();
 		}
 	}
@@ -68,11 +69,15 @@ public sealed class MeshObject : RenderObject
 			OverrideAlphaTest = RenderMesh.IsAlphaTest( value );
 			WantsFrameBufferCopy = value is not null ? RenderMesh.ReadsFrameBuffer( value ) : mesh?.ReadsFrameBufferCopy ?? false;
 			WantsStencil = value is not null ? value.NeedsStencil : mesh?.NeedsStencil ?? false;
+			UpdateAnimation();
 			if ( !changed ) return;
 			ShadowChanged();
 			DrawChanged();
 		}
 	}
+
+	/// <inheritdoc/>
+	internal override bool? MaterialAnimates => MaterialOverride is { } material ? material.AnimatesVertices : mesh is null ? false : mesh.AnimatesVertices;
 
 	/// <summary>
 	/// Whether a material it draws with needs a stencil in the view's depth (<see cref="GpuMaterial.NeedsStencil"/>).

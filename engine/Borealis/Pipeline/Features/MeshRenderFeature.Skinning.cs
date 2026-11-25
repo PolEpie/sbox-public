@@ -127,11 +127,28 @@ internal sealed partial class MeshRenderFeature
 
 		var jobs = CollectionsMarshal.AsSpan( skinJobs );
 		var morphs = false;
+		var roomless = false;
+		skinnedRoom.Clear();
 		for ( int i = 0; i < jobs.Length; i++ )
 		{
 			ref var job = ref jobs[i];
 			var skin = job.Object.Mesh.SkinFor( job.ModelMesh );
 			job.VertexCacheOffset = GpuContext.AllocateVertexCache( skin.VertexCount );
+			if ( job.VertexCacheOffset < 0 )
+			{
+				// No room left this frame (the cache grows as the next starts): not skinned, its draws read the same mesh's
+				// vertices skinned for another object, drawn over it, so it's missing for a frame rather than garbage
+				// shortcut: a mesh with no sibling skinned this frame reads the cache's first vertices (in bounds unless it's
+				// bigger than the whole cache), drawn wrong for a frame; hide its draws if that shows
+				job.VertexCacheOffset = skinnedRoom.GetValueOrDefault( (job.Object.Mesh, job.ModelMesh) );
+				transforms.SetVertexCacheOffset( job.Slot, job.VertexCacheOffset );
+				job.Morph = -1;
+				job.Slot = -1;
+				roomless = true;
+				continue;
+			}
+
+			skinnedRoom.TryAdd( (job.Object.Mesh, job.ModelMesh), job.VertexCacheOffset );
 			transforms.SetVertexCacheOffset( job.Slot, job.VertexCacheOffset );
 
 			// Evaluate and queue morphs (FindOrAllocateTransforms).
@@ -139,15 +156,20 @@ internal sealed partial class MeshRenderFeature
 			morphs |= job.Morphed;
 		}
 
+		if ( roomless ) skinJobs.RemoveAll( job => job.Slot < 0 );
 		if ( !morphs ) return;
 
 		// Composite before submission, then store atlas subrects.
+		jobs = CollectionsMarshal.AsSpan( skinJobs );
 		context.GenerateMorphs();
 		for ( int i = 0; i < jobs.Length; i++ )
 		{
 			if ( jobs[i].Morphed ) transforms.SetMorphSubrect( jobs[i].Slot, GpuContext.MorphSubrect( jobs[i].Morph ) );
 		}
 	}
+
+	// This frame's first vertex-cache offset per mesh skinned (BeforeUpload), for the jobs that found no room
+	readonly Dictionary<(RenderMesh Mesh, int ModelMesh), int> skinnedRoom = new();
 
 	/// <summary>
 	/// The fewest skinning jobs worth recording on a worker (<see cref="BeginSetupWork"/>).

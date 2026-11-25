@@ -209,19 +209,31 @@ internal sealed partial class AggregateRenderFeature : RenderFeature
 	}
 
 	/// <summary>
-	/// Upload the frame's args, after every view has prepared.
+	/// Upload the frame's args, after every view has prepared, and make the resident lists' device batches the frame's layers
+	/// will draw (<see cref="MakeDeviceBatches"/>).
 	/// </summary>
 	internal override void Setup( GpuContext context, RenderWorld world, ViewPass view )
 	{
 		// On the main thread: draws may record on worker threads, where materials can't be made
 		depthOnlyMaterial ??= RenderHost.Current.Device.LoadMaterial( MeshRenderFeature.DepthOnlyMaterial );
+		if ( statsSlot == 0 ) statsSlot = RenderHost.Current.Device.AcquireCullStats();
 
-		var buffer = argsRing.Upload( context, args.AsSpan( 0, argCount ) );
-		if ( argCount > 0 )
+		var buffer = argsRing.UploadWithPrefix( context, args.AsSpan( 0, argCount ), argPrefixCount, residentArgsVersion, out var uploaded );
+		if ( uploaded )
 			context.BufferBarrier( buffer, GpuStage.Transfer, GpuAccess.TransferWrite, GpuStage.DrawIndirect, GpuAccess.IndirectCommandRead );
 
-		// Every view's resident lists culled at once, before any view draws
-		using ( Zones.ResidentCull.Start() ) CullResident( context );
+		// After the mesh feature's setup (features set up in the order they were added), as resident mesh groups' batches take
+		// its depth-only material
+		MakeDeviceBatches();
+	}
+
+	/// <summary>The device slot this feature's GPU culls count what they let through into (<see cref="GpuDevice.AcquireCullStats"/>), or 0.</summary>
+	int statsSlot;
+
+	/// <summary>Add what the GPU culls of this feature's views let through, read back a few frames late, to a frame's stats.</summary>
+	internal void AddCulledCounts( ref RenderStats stats )
+	{
+		if ( statsSlot != 0 ) RenderHost.Current.Device.CullCounts( statsSlot ).AddTo( ref stats );
 	}
 
 	/// <summary>
@@ -268,8 +280,13 @@ internal sealed partial class AggregateRenderFeature : RenderFeature
 		var items = state.List.Count + MeshDraws( view ).Count;
 		for ( int c = 0; c < weights.Length; c++ ) weights[c] = Math.Max( ChunkStart( c + 1, weights.Length, items ) - ChunkStart( c, weights.Length, items ), 1 );
 
-		// A resident list costs the first run about a multi-draw per bucket, not a batch each
-		if ( state.Resident is { } resident ) weights[0] += resident.DeviceCount / ResidentWeightDivisor;
+		// A resident list costs the first run about a multi-draw per bucket, not a batch each; and setup makes its batches for
+		// the layer's depth kind
+		if ( state.Resident is { } resident )
+		{
+			weights[0] += resident.DeviceCount / ResidentWeightDivisor;
+			WantDeviceBatches( state, layer );
+		}
 	}
 
 	/// <summary>
@@ -277,6 +294,13 @@ internal sealed partial class AggregateRenderFeature : RenderFeature
 	/// (<see cref="MeshRenderFeature.GpuDrivenItems"/>), so they go in the same buckets as the aggregates.
 	/// </summary>
 	internal MeshRenderFeature Meshes { get; set; }
+
+	/// <summary>
+	/// Drawing a 3D skybox, which shows only where the main world's depth left sky: its prepass draws no ids and its forward
+	/// pass lists none. The visibility passes' fixed costs (full-screen marks, compaction over every listed triangle) would
+	/// buy almost nothing there, as early depth already rejects the fragments the main world covers.
+	/// </summary>
+	internal bool Skybox { get; set; }
 
 	static readonly List<MeshRenderFeature.DrawItem> NoDraws = new();
 
@@ -316,21 +340,26 @@ internal sealed partial class AggregateRenderFeature : RenderFeature
 
 
 		// The device's GPU-driven path first, for what it can take: batches drawn from its own args, not the culler's
-		var gpuDriven = context.GpuDriven && phase == OcclusionPhase.None && !culledOnly && transforms is not null ? System.Buffers.ArrayPool<bool>.Shared.Rent( batches.Length + meshDraws.Length ) : null;
-		if ( gpuDriven is not null )
+		var gpuDriven = context.GpuDriven && phase == OcclusionPhase.None && !culledOnly && transforms is not null;
+		var resident = gpuDriven && first == 0 ? state.Resident : null;
+		var residentCount = resident?.DeviceCount ?? 0;
+		var total = gpuDriven ? residentCount + batches.Length + meshDraws.Length : 0;
+		var rented = total > 256 ? System.Buffers.ArrayPool<bool>.Shared.Rent( total ) : null;
+		Span<bool> allDrawn = rented is null ? stackalloc bool[total] : rented.AsSpan( 0, total );
+		var accepted = allDrawn[residentCount..];
+		if ( gpuDriven )
 		{
-			var drawn = gpuDriven.AsSpan( 0, batches.Length + meshDraws.Length );
-			drawn.Clear();
+			allDrawn.Clear();
 			// The frame copy frame-buffer readers among the mesh draws read, taken as the mesh feature takes it before its first
 			// reader (where the layer copies at all)
 			if ( !depth && !shadow && (ReadsFrameBuffer( view, meshDraws ) || (first == 0 && state.Resident is { ReadsFrameBuffer: true })) ) context.CopyFrameBuffer();
 
 			// The view's resident list first, in the first run, in the same call: the device keeps what it makes of it
-			DrawGpuDriven( context, view, first == 0 ? state.Resident : null, batches, meshDraws, mode, layer, depthBias, slopeBias, drawn, ref stats );
+			var counted = DrawGpuDriven( context, view, resident, residentCount, batches, meshDraws, mode, layer, depthBias, slopeBias, allDrawn, ref stats );
 
-			for ( int i = 0; i < batches.Length; i++ )
+			for ( int i = counted; i < batches.Length; i++ )
 			{
-				if ( !drawn[i] ) continue;
+				if ( !accepted[i] ) continue;
 				CountDrawn( batches[i], shadow, depth, ref stats );
 			}
 		}
@@ -342,7 +371,7 @@ internal sealed partial class AggregateRenderFeature : RenderFeature
 			var leftCount = 0;
 			for ( int i = 0; i < meshDraws.Length; i++ )
 			{
-				if ( gpuDriven is not null && gpuDriven[batches.Length + i] ) CountMeshDrawn( view, meshDraws[i], shadow, depth, layer.LayerType == MeshLayerType.Translucent, ref stats );
+				if ( gpuDriven && accepted[batches.Length + i] ) CountMeshDrawn( view, meshDraws[i], shadow, depth, layer.LayerType == MeshLayerType.Translucent, ref stats );
 				else left[leftCount++] = meshDraws[i];
 			}
 
@@ -353,7 +382,7 @@ internal sealed partial class AggregateRenderFeature : RenderFeature
 		for ( int b = 0; b < batches.Length; b++ )
 		{
 			ref readonly var batch = ref batches[b];
-			if ( gpuDriven is not null && gpuDriven[b] ) continue;
+			if ( gpuDriven && accepted[b] ) continue;
 			if ( culledOnly && batch.CullArg < 0 ) continue;
 
 			var aggregate = batch.Aggregate;
@@ -365,7 +394,7 @@ internal sealed partial class AggregateRenderFeature : RenderFeature
 			ref readonly var draw = ref draws[0];
 			var material = MaterialFor( draw, depth, layer.ForceDepthFastPath, out var stripPixelShader );
 			if ( material is null ) continue;
-			if ( context.Census ) context.CensusNote = gpuDriven is not null ? "aggregate: the device's GPU-driven path left it" : !context.GpuDriven ? "aggregate: GPU-driven off" : phase != OcclusionPhase.None || culledOnly ? "aggregate: occlusion culled" : "aggregate: no transforms";
+			if ( context.Census ) context.CensusNote = gpuDriven ? "aggregate: the device's GPU-driven path left it" : !context.GpuDriven ? "aggregate: GPU-driven off" : phase != OcclusionPhase.None || culledOnly ? "aggregate: occlusion culled" : "aggregate: no transforms";
 
 			// Lightmaps light every draw or none of them (CAggregateSceneObjectDesc::SetBakedLightingAttributes)
 			context.SetObjectAttributes( null, !depth && aggregate.Lightmapped ? aggregate.LightmapAttributes : null );
@@ -378,7 +407,7 @@ internal sealed partial class AggregateRenderFeature : RenderFeature
 			CountDrawn( batch, shadow, depth, ref stats );
 		}
 
-		if ( gpuDriven is not null ) System.Buffers.ArrayPool<bool>.Shared.Return( gpuDriven );
+		if ( rented is not null ) System.Buffers.ArrayPool<bool>.Shared.Return( rented );
 		context.SetObjectAttributes( null );
 	}
 
@@ -444,18 +473,17 @@ internal sealed partial class AggregateRenderFeature : RenderFeature
 	/// Hand the device every batch at once for its GPU-driven path (<see cref="GpuContext.DrawGpuDriven"/>), with the
 	/// material each would bind here.
 	/// </summary>
-	void DrawGpuDriven( GpuContext context, ViewPass view, ResidentList resident, ReadOnlySpan<Batch> batches, ReadOnlySpan<MeshRenderFeature.DrawItem> meshDraws, StringToken mode, MeshLayer layer, int depthBias, float slopeBias, Span<bool> drawn, ref RenderStats stats )
+	int DrawGpuDriven( GpuContext context, ViewPass view, ResidentList resident, int residentCount, ReadOnlySpan<Batch> batches, ReadOnlySpan<MeshRenderFeature.DrawItem> meshDraws, StringToken mode, MeshLayer layer, int depthBias, float slopeBias, Span<bool> drawn, ref RenderStats stats )
 	{
 		var depth = layer.Depth;
 		var forceDepthOnly = layer.ForceDepthFastPath;
-		var residentCount = resident?.DeviceCount ?? 0;
-		var total = residentCount + batches.Length + meshDraws.Length;
-		if ( total == 0 ) return;
+		var total = drawn.Length;
+		if ( total == 0 ) return 0;
 
 		// A resident list alone is handed over as the list's own batches, without a copy; with batches after it, in an array
 		// of the list's that already starts with them (TakeCombined), so the call writes only its own
 		var alone = resident is not null && batches.IsEmpty && meshDraws.IsEmpty;
-		var kind = (depth ? 1 : 0) | (forceDepthOnly ? 2 : 0);
+		var kind = DeviceKind( depth, forceDepthOnly );
 		var deviceBatches = resident is not null ? DeviceBatches( resident, depth, forceDepthOnly ) : default;
 		var combined = !alone && resident is not null ? TakeCombined( resident, kind, deviceBatches, total ) : null;
 		var list = alone ? null : combined?.Batches ?? System.Buffers.ArrayPool<GpuContext.GpuDrivenBatch>.Shared.Rent( total );
@@ -469,20 +497,19 @@ internal sealed partial class AggregateRenderFeature : RenderFeature
 			foreach ( var item in meshDraws ) list[count++] = Meshes.GpuDrivenBatch( view, item, depth, forceDepthOnly ) ?? default;
 		}
 
-		var all = System.Buffers.ArrayPool<bool>.Shared.Rent( total );
-		var allDrawn = all.AsSpan( 0, total );
-		allDrawn.Clear();
-		context.DrawGpuDriven( mode, alone ? deviceBatches : list.AsSpan( 0, count ), args.AsSpan( 0, argCount ), transforms, depthBias, slopeBias, allDrawn, CullFor( view, depth, resident, resident?.Version ?? 0, residentCount ) );
-		allDrawn[residentCount..].CopyTo( drawn );
-		if ( resident is not null ) ResidentDrawn( context, layer, resident, alone ? deviceBatches : list.AsSpan( 0, residentCount ), allDrawn[..residentCount], mode, depthBias, slopeBias, ref stats );
+		context.DrawGpuDriven( mode, alone ? deviceBatches : list.AsSpan( 0, count ), args.AsSpan( 0, argCount ), transforms, depthBias, slopeBias, drawn, CullFor( view, depth, resident, resident?.Version ?? 0, residentCount ) );
 
-		System.Buffers.ArrayPool<bool>.Shared.Return( all );
+		// Batches the device counted what survived of (not mesh draws, which the CPU culled): the caller counts the rest
+		var counted = Math.Min( context.GpuCountedBatches, residentCount + batches.Length );
+		if ( resident is not null ) ResidentDrawn( context, layer, resident, alone ? deviceBatches : list.AsSpan( 0, residentCount ), drawn[..residentCount], Math.Min( counted, residentCount ), mode, depthBias, slopeBias, ref stats );
 		if ( combined is not null ) ReturnCombined( resident, kind, combined, count );
 		else if ( list is not null )
 		{
 			list.AsSpan( 0, count ).Clear();
 			System.Buffers.ArrayPool<GpuContext.GpuDrivenBatch>.Shared.Return( list );
 		}
+
+		return Math.Max( counted - residentCount, 0 );
 	}
 
 	/// <summary>A batch as the device takes it, with the material it would bind here; default when it has nothing to draw.</summary>
@@ -498,7 +525,7 @@ internal sealed partial class AggregateRenderFeature : RenderFeature
 	}
 
 	/// <summary>The tests Prepare made per fragment, for the device to make on the GPU over every fragment instead.</summary>
-	static GpuContext.GpuDrivenCull CullFor( ViewPass view, bool depth, object plan, int planVersion, int planBatches )
+	GpuContext.GpuDrivenCull CullFor( ViewPass view, bool depth, object plan, int planVersion, int planBatches )
 	{
 		var frustum = view.View.Frustum;
 		var root = view.Root;
@@ -506,11 +533,12 @@ internal sealed partial class AggregateRenderFeature : RenderFeature
 		return new GpuContext.GpuDrivenCull
 		{
 			// Resident meshes: culled as the CPU's collect culls them, their LOD picked as Classify picks it
-			KeepsSmallMeshes = view.StaticFilter == StaticFilter.OnlyStatic && !view.TexelSized,
+			KeepsSmallMeshes = view.KeepsSmallCasters,
 			LodCamera = texels ? default : new Vector4( root.Position, MathF.Tan( root.FieldOfView.DegreeToRadian() * 0.5f ) ),
 			LodWidth = texels ? view.LodTexelsPerUnit : root.Viewport.Width,
 			LodTexels = texels,
 			GeneratedLods = texels || !view.IsShadow && !view.View.Capture && ReferenceEquals( view.View, root ),
+			FadeView = !texels && !view.IsShadow && !view.View.Capture && !Skybox && ReferenceEquals( view.View, root ) ? view.View : null,
 			Left = frustum.Plane( 0 ),
 			Right = frustum.Plane( 1 ),
 			Bottom = frustum.Plane( 2 ),
@@ -523,9 +551,9 @@ internal sealed partial class AggregateRenderFeature : RenderFeature
 			Shadow = view.IsShadow,
 			View = view,
 			// Not for captures: a probe's faces would hold visibility runs for all they see, leaving the views that list none
-			Ids = depth && !view.IsShadow && !view.View.Capture,
+			Ids = depth && !view.IsShadow && !view.View.Capture && !Skybox,
 			// Nor in a geometric debug view: its tools pass draws every triangle, not only those that own a sample
-			Visibility = !depth && !view.IsShadow && !view.View.Capture && ToolsViews.PassOf( view.View ) == ToolsPass.None,
+			Visibility = !depth && !view.IsShadow && !view.View.Capture && !Skybox && ToolsViews.PassOf( view.View ) == ToolsPass.None,
 			Plan = plan,
 			PlanVersion = planVersion,
 			PlanBatches = planBatches,
@@ -534,6 +562,7 @@ internal sealed partial class AggregateRenderFeature : RenderFeature
 			Filter = plan is ResidentList && view.IsShadow ? ResidentFilterFor( view.StaticFilter ) : GpuContext.ResidentFilter.None,
 			SettledStamp = GpuContext.StampWord( view.SettledStamp ),
 			RestlessStamp = GpuContext.StampWord( view.RestlessStamp ),
+			StatsSlot = statsSlot,
 		};
 	}
 
@@ -565,21 +594,29 @@ internal sealed partial class AggregateRenderFeature : RenderFeature
 		var cull = CullFor( view, false, order, order.Version, batches.Length );
 		cull.View = null;
 		cull.Visibility = false;
+		cull.GeneratedLods = false;
 		cull.KeepsOrder = true;
 		context.DrawGpuDriven( layer.ShaderMode, batches, default, transforms, 0, 0, drawn, cull );
+		var counted = context.GpuCountedBatches;
 
 		if ( drawn.IndexOf( false ) < 0 )
 		{
-			stats.DrawnTriangles += order.Triangles;
-			stats.Draws += batches.Length;
-			stats.Instances += order.Fragments;
-			stats.Triangles += order.Triangles;
+			if ( counted < batches.Length )
+			{
+				stats.DrawnTriangles += order.Triangles;
+				stats.Draws += batches.Length;
+				stats.Instances += order.Fragments;
+				stats.Triangles += order.Triangles;
+			}
 		}
 		else
 		{
 			for ( int i = 0; i < batches.Length; i++ )
 			{
-				if ( drawn[i] ) stats.Draws++;
+				if ( drawn[i] )
+				{
+					if ( i >= counted ) stats.Draws++;
+				}
 				else if ( batches[i].Owner is GpuContext.ResidentMeshes owner ) MeshesLeft( order.Groups, owner );
 			}
 		}
@@ -591,13 +628,15 @@ internal sealed partial class AggregateRenderFeature : RenderFeature
 	/// Count what the device drew of a view's resident list (<see cref="GpuContext.GpuDrivenCull.Plan"/>) and draw what it left
 	/// the classic way, from the frame's arguments.
 	/// </summary>
-	void ResidentDrawn( GpuContext context, MeshLayer layer, ResidentList list, ReadOnlySpan<GpuContext.GpuDrivenBatch> batches, ReadOnlySpan<bool> drawn, StringToken mode, int depthBias, float slopeBias, ref RenderStats stats )
+	void ResidentDrawn( GpuContext context, MeshLayer layer, ResidentList list, ReadOnlySpan<GpuContext.GpuDrivenBatch> batches, ReadOnlySpan<bool> drawn, int counted, StringToken mode, int depthBias, float slopeBias, ref RenderStats stats )
 	{
 		var shadow = layer.LayerType == MeshLayerType.Shadow;
 		var depth = layer.Depth;
 		if ( drawn.IndexOf( false ) < 0 )
 		{
-			// All of it: the list's totals
+			// All of it: counted on the device, or the list's totals
+			if ( counted >= batches.Length ) return;
+
 			stats.DrawnTriangles += list.Triangles;
 			if ( shadow ) stats.ShadowDraws += batches.Length;
 			else if ( depth ) stats.DepthDraws += batches.Length;
@@ -616,7 +655,7 @@ internal sealed partial class AggregateRenderFeature : RenderFeature
 		{
 			if ( drawn[i] )
 			{
-				CountDrawn( own[i], shadow, depth, ref stats );
+				if ( i >= counted ) CountDrawn( own[i], shadow, depth, ref stats );
 				continue;
 			}
 
@@ -633,6 +672,7 @@ internal sealed partial class AggregateRenderFeature : RenderFeature
 		{
 			if ( drawn[i] )
 			{
+				if ( i < counted ) continue;
 				if ( shadow ) stats.ShadowDraws++;
 				else if ( depth ) stats.DepthDraws++;
 				else stats.Draws++;
@@ -661,5 +701,7 @@ internal sealed partial class AggregateRenderFeature : RenderFeature
 	internal override void Dispose()
 	{
 		argsRing.Dispose();
+		if ( statsSlot != 0 ) RenderHost.Current?.Device?.ReleaseCullStats( statsSlot );
+		statsSlot = 0;
 	}
 }

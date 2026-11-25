@@ -117,7 +117,8 @@ public abstract class GpuDevice
 
 	/// <summary>
 	/// Raised each time a program the device was compiling in the background becomes ready: what <see cref="TakesResident"/>
-	/// and <see cref="TakesOverlay"/> said of its materials meanwhile is looked at again.
+	/// and <see cref="TakesOverlay"/> said of its materials meanwhile is looked at again, and resident meshes whose draws it left
+	/// while compiling are taken back.
 	/// </summary>
 	internal virtual int ProgramsVersion => 0;
 
@@ -220,7 +221,7 @@ public abstract class GpuDevice
 	/// <summary>Whether the device can take an indirect draw count from a buffer.</summary>
 	public abstract bool SupportsDrawIndirectCount { get; }
 
-	/// <summary>Allocate vertex-cache space this frame and return its first vertex.</summary>
+	/// <summary>Allocate vertex-cache space this frame and return its first vertex, or -1 when the frame has none left.</summary>
 	public abstract int AllocateVertexCache( int vertices );
 
 	/// <summary>Where a queued morph is in the atlas once generated: u offset, u range, v offset, v range.</summary>
@@ -237,4 +238,13 @@ public abstract class GpuDevice
 
 	/// <summary>Free a buffer from <see cref="CreateConstantBuffer"/>.</summary>
 	public abstract void DestroyConstantBuffer( IntPtr buffer );
+
+	/// <summary>A slot for a render system to count what the GPU culls let through (<see cref="CullCounts"/>), 0 when the device counts none.</summary>
+	internal virtual int AcquireCullStats() => 0;
+
+	/// <summary>Give back a slot from <see cref="AcquireCullStats"/>.</summary>
+	internal virtual void ReleaseCullStats( int slot ) { }
+
+	/// <summary>What the GPU culls of a slot's views let through in a frame a few frames ago.</summary>
+	internal virtual CulledCounts CullCounts( int slot ) => default;
 }

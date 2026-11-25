@@ -171,10 +171,50 @@ public abstract class RenderObject
 		{
 			if ( field == value ) return;
 			field = value;
+			UpdateAnimation();
 			Changed( WorldNote.SyncDynamic );
 			Changed( WorldNote.StaticCaster );
 			DrawChanged();
 		}
+	}
+
+	/// <summary>
+	/// Whether the materials it draws with move vertices in the shader (<see cref="GpuMaterial.AnimatesVertices"/>): known to,
+	/// or false while that isn't known yet (<see cref="AnimationPending"/>). A custom object's materials aren't asked.
+	/// </summary>
+	internal virtual bool? MaterialAnimates => false;
+
+	/// <summary>
+	/// Whether it's known to animate vertices. A static object that does isn't a static caster (<see cref="CachesAsStatic"/>):
+	/// a light's static shadow cache can't hold its motion.
+	/// </summary>
+	internal bool AnimatesVertices { get; private set; }
+
+	/// <summary>Whether <see cref="MaterialAnimates"/> isn't known yet: the world asks again each frame (<see cref="RenderWorld.PendingAnimation"/>).</summary>
+	internal bool AnimationPending { get; private set; }
+
+	/// <summary>
+	/// Whether lights keep it in their static shadow caches: it's static and its vertices don't animate. One that does is
+	/// drawn live in every light, as a dynamic caster is.
+	/// </summary>
+	internal bool CachesAsStatic => IsStatic && !AnimatesVertices;
+
+	/// <summary>
+	/// Work out <see cref="AnimatesVertices"/> again, after what it comes from changed or a material that wasn't known resolved.
+	/// </summary>
+	internal void UpdateAnimation()
+	{
+		var animates = IsStatic ? MaterialAnimates : false;
+		var pending = animates is null;
+		if ( (animates == true) == AnimatesVertices && pending == AnimationPending ) return;
+
+		var moved = (animates == true) != AnimatesVertices;
+		AnimatesVertices = animates == true;
+		AnimationPending = pending;
+		Changed( WorldNote.SyncDynamic );
+		if ( !moved ) return;
+		Changed( WorldNote.StaticCaster );
+		DrawChanged();
 	}
 
 	/// <summary>
@@ -245,6 +285,7 @@ public abstract class RenderObject
 			if ( field == value ) return;
 			field = value;
 			World?.SetSubWorld( this, value );
+			ShadowChanged();
 			DrawChanged();
 		}
 	}

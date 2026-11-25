@@ -14,13 +14,14 @@ public sealed partial class RenderSystem
 
 	ContactShadowLayer contactShadows;
 	ScreenSpaceReflectionsLayer reflections;
+	OverlayDepthPrepassLayer overlayPrepass;
 
 	RenderLayer[] StandardLayers()
 	{
 		var bloom = new BloomLayer();
 		contactShadows = new ContactShadowLayer();
 		reflections = new ScreenSpaceReflectionsLayer();
-		var overlayPrepass = new OverlayDepthPrepassLayer();
+		overlayPrepass = new OverlayDepthPrepassLayer();
 		return
 		[
 			new OcclusionCullLayer( early: true ),

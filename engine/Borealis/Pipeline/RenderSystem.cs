@@ -157,10 +157,10 @@ public sealed partial class RenderSystem : IDisposable
 	internal const float MainWorldMinZ = 0.02f;
 
 	/// <summary>
-	/// The depth format its views draw into: 32-bit float (reverse-Z), with an 8-bit stencil once something it drew needed
-	/// one (<see cref="GpuMaterial.NeedsStencil"/>), or always on a device that can't tell (<see cref="GpuDevice.KnowsStencilUse"/>).
-	/// A view whose prepared draws need a stencil gets it before it records (<see cref="GiveStencil"/>) and keeps it, so
-	/// nothing is made again from frame to frame.
+	/// The depth format its views draw into: 32-bit float (reverse-Z), with an 8-bit stencil once an overlay prepass or a
+	/// material (<see cref="GpuMaterial.NeedsStencil"/>) needs it, or always on a device that can't tell
+	/// (<see cref="GpuDevice.KnowsStencilUse"/>). The view gets its stencil before it records (<see cref="GiveStencil"/>) and
+	/// keeps it, so nothing is made again from frame to frame.
 	/// </summary>
 	internal TextureFormat DepthFormat => stencil || StencilAlways || RenderHost.Current.Device is not { KnowsStencilUse: true } ? TextureFormat.D32FS8 : TextureFormat.D32;
 
@@ -171,14 +171,14 @@ public sealed partial class RenderSystem : IDisposable
 	bool stencil;
 
 	/// <summary>
-	/// Before the frame records: if its prepared draws (its own or its 3D skybox's) need a stencil, the depth it draws into
-	/// gets one, made again once if it has none, and keeps it. A depth the caller owns (<see cref="ViewTarget"/> over its
-	/// textures) is left as it is.
+	/// Before the frame records: if its overlay prepass or prepared draws (its own or its 3D skybox's) need a stencil,
+	/// the depth it draws into gets one, made again once if it has none, and keeps it. A depth the caller owns
+	/// (<see cref="ViewTarget"/> over its textures) is left as it is.
 	/// </summary>
 	void GiveStencil( RenderFrame skyFrame )
 	{
 		if ( RenderHost.Current.Device is not { KnowsStencilUse: true } ) return;
-		if ( !stencil && (meshes.WantsStencil( mainPass ) || (skyFrame is not null && skybox.meshes.WantsStencil( skyFrame.MainPass ))) ) stencil = true;
+		if ( !stencil && (overlayPrepass?.IsNeeded( frame ) == true || meshes.WantsStencil( mainPass ) || (skyFrame is not null && skybox.meshes.WantsStencil( skyFrame.MainPass ))) ) stencil = true;
 		if ( !stencil || frame.Output.Target is not { } target || target.Depth?.Format.HasStencil() != false ) return;
 
 		// A flipped view draws with the view's depth through a target of its own
@@ -187,6 +187,7 @@ public sealed partial class RenderSystem : IDisposable
 			if ( !source.GiveStencil() ) return;
 			flipTarget = new ViewTarget( flipTarget.Color, source.Depth, flipResolved );
 			frame.Output = frame.Output with { Target = flipTarget };
+			if ( skyFrame is not null ) skyFrame.Output = frame.Output;
 			return;
 		}
 
@@ -487,10 +488,12 @@ public sealed partial class RenderSystem : IDisposable
 			FinishChildren( childrenFrom );
 			if ( plan is not null ) recorder.FillTimes( plan );
 			RenderStats.AddCounts( ref stats, frame.Recorded );
+			aggregates.AddCulledCounts( ref stats );
 			if ( skyFrame is not null )
 			{
 				var skyStats = skybox.Stats;
 				RenderStats.AddCounts( ref skyStats, skyFrame.Recorded );
+				skybox.aggregates.AddCulledCounts( ref skyStats );
 				skybox.Stats = skyStats;
 				RenderStats.AddCounts( ref stats, skyStats );
 			}
@@ -688,6 +691,13 @@ public sealed partial class RenderSystem : IDisposable
 			if ( square ) frame.UseSquareConstants( context );
 			features[i].Setup( context, world, mainPass );
 			if ( square ) frame.UseFrameConstants( context );
+		}
+
+		// Both worlds have prepared. Resident culling uses the device's tables, not the skybox's view bindings.
+		if ( !isSkybox )
+		{
+			using var zone = Zones.ResidentCull.Start();
+			aggregates.CullResident( context, frame.Skybox is not null ? skybox.aggregates : null );
 		}
 
 		// The light binner writes the view's set before its culling reads it; a frame without one writes it here

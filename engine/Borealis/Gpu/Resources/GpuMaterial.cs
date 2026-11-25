@@ -22,6 +22,12 @@ public abstract class GpuMaterial : IDisposable
 	public abstract bool IsAlphaTest { get; }
 
 	/// <summary>
+	/// Whether its GPU-driven draws dither a LOD cross-fade (resident instanced meshes, <c>borealis_lod_fade.fxc</c>): every
+	/// pass of such a draw has a pixel stage that clips. Draws of other materials switch LODs at once.
+	/// </summary>
+	public virtual bool DithersLodFade => false;
+
+	/// <summary>
 	/// Whether it samples a copy of the frame (its <c>bWantsFBCopyTexture</c> attribute).
 	/// </summary>
 	public abstract bool ReadsFrameBuffer { get; }
@@ -57,6 +63,13 @@ public abstract class GpuMaterial : IDisposable
 	/// program has compiled) and has no <c>.shader</c> to draw it instead. Read as draws are recorded.
 	/// </summary>
 	public virtual bool DrawsNoDepth => false;
+
+	/// <summary>
+	/// Whether its vertex stage moves vertices over time (wind in foliage), as the shader declares with
+	/// <c>BoolAttribute( AnimatesVertices, true )</c>: a static object drawn with it isn't a static caster, as a light's
+	/// static shadow cache can't hold its motion, so lights draw it live. Null while that isn't known yet (a surface still compiling).
+	/// </summary>
+	public virtual bool? AnimatesVertices => false;
 
 	/// <summary>
 	/// Whether it's lit from a light probe when its object isn't lightmapped.

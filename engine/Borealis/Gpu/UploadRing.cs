@@ -8,6 +8,7 @@ internal sealed class UploadRing<T> : IDisposable where T : unmanaged
 	const int FramesInFlight = 3;
 
 	readonly GpuBuffer<T>[] buffers = new GpuBuffer<T>[FramesInFlight];
+	(int Length, int Version)[] prefixes;
 	readonly string name;
 	readonly GpuBuffer.UsageFlags usage;
 	int frame;
@@ -22,7 +23,7 @@ internal sealed class UploadRing<T> : IDisposable where T : unmanaged
 	}
 
 	/// <summary>
-	/// The buffer the last <see cref="Upload"/> went into.
+	/// The buffer the last upload went into.
 	/// </summary>
 	public GpuBuffer<T> Current { get; private set; }
 
@@ -31,17 +32,39 @@ internal sealed class UploadRing<T> : IDisposable where T : unmanaged
 	/// </summary>
 	public GpuBuffer<T> Upload( GpuContext context, ReadOnlySpan<T> data, int minimumCapacity = 1 )
 	{
+		var buffer = Advance( Math.Max( data.Length, minimumCapacity ) );
+		if ( data.Length > 0 ) context.UploadBuffer( buffer, data );
+		if ( prefixes is not null ) prefixes[frame] = default;
+		return buffer;
+	}
+
+	/// <summary>
+	/// Upload the whole span on a new or stale buffer, otherwise only the part after the versioned prefix.
+	/// </summary>
+	public GpuBuffer<T> UploadWithPrefix( GpuContext context, ReadOnlySpan<T> data, int prefixLength, int prefixVersion, out bool uploaded )
+	{
+		var buffer = Advance( Math.Max( data.Length, 1 ) );
+		prefixes ??= new (int, int)[FramesInFlight];
+		var prefix = (prefixLength, prefixVersion);
+		var start = prefixes[frame] == prefix ? prefixLength : 0;
+		uploaded = start < data.Length;
+		if ( uploaded ) context.UploadBuffer( buffer, data[start..], start * System.Runtime.CompilerServices.Unsafe.SizeOf<T>() );
+		prefixes[frame] = prefix;
+		return buffer;
+	}
+
+	GpuBuffer<T> Advance( int needed )
+	{
 		frame = (frame + 1) % FramesInFlight;
 
-		var needed = Math.Max( data.Length, minimumCapacity );
 		ref var buffer = ref buffers[frame];
 		if ( buffer is null || buffer.ElementCount < needed )
 		{
 			buffer?.Dispose();
 			buffer = new GpuBuffer<T>( Math.Max( needed, (buffer?.ElementCount ?? 0) * 2 ), usage, name );
+			if ( prefixes is not null ) prefixes[frame] = default;
 		}
 
-		if ( data.Length > 0 ) context.UploadBuffer( buffer, data );
 		Current = buffer;
 		return buffer;
 	}
@@ -54,6 +77,7 @@ internal sealed class UploadRing<T> : IDisposable where T : unmanaged
 			buffers[i] = null;
 		}
 
+		prefixes = null;
 		Current = null;
 	}
 }

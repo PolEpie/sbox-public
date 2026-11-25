@@ -179,6 +179,9 @@ internal sealed partial class MeshRenderFeature : RenderFeature
 		/// <summary>The view's visible objects its resident list doesn't draw, which it prepares (AggregateRenderFeature.Resident.cs).</summary>
 		public readonly List<int> Unheld = new();
 
+		/// <summary>The view's visible <see cref="InstancedMeshObject"/>s its resident list doesn't draw, which it culls and draws itself.</summary>
+		public readonly List<int> Instanced = new();
+
 		public void Clear()
 		{
 			foreach ( var list in ByBit )
@@ -187,6 +190,7 @@ internal sealed partial class MeshRenderFeature : RenderFeature
 				list.Clear();
 			GpuDriven.Clear();
 			LateCustom.Clear();
+			Instanced.Clear();
 			ReadersTaken = false;
 			OverlayOrders.Clear();
 			Custom = 0;
@@ -412,7 +416,7 @@ internal sealed partial class MeshRenderFeature : RenderFeature
 	/// <summary>
 	/// Meshes and custom objects share sorting lists.
 	/// </summary>
-	internal override bool Accepts( Type type ) => typeof( MeshObject ).IsAssignableFrom( type ) || typeof( CustomObject ).IsAssignableFrom( type );
+	internal override bool Accepts( Type type ) => typeof( MeshObject ).IsAssignableFrom( type ) || typeof( CustomObject ).IsAssignableFrom( type ) || type == typeof( InstancedMeshObject );
 
 	/// <summary>
 	/// Draw with each mesh draw's own material. When off, everything uses <see cref="DefaultShader"/>.
@@ -437,20 +441,32 @@ internal sealed partial class MeshRenderFeature : RenderFeature
 
 		var visible = pass.Visible( this );
 
-		// What the view's resident list draws isn't prepared here (AggregateRenderFeature.Resident.cs)
-		if ( Aggregates?.ResidentMeshHolds( world, pass, transforms ) is { } holds )
+		// What the view's resident list draws isn't prepared here (AggregateRenderFeature.Resident.cs). Instanced objects it
+		// doesn't draw go their own way: culled and drawn per placement (MeshRenderFeature.Instances.cs)
+		var holds = Aggregates?.ResidentMeshHolds( world, pass, transforms );
+		if ( holds is not null || world.InstancedObjects > 0 )
 		{
 			var unheld = layers.Unheld;
 			unheld.Clear();
+			var worldObjects = world.Objects;
+			var anyInstanced = world.InstancedObjects > 0;
 			foreach ( var index in CollectionsMarshal.AsSpan( visible ) )
 			{
-				if ( index >= holds.Length || !holds[index] ) unheld.Add( index );
+				var held = holds is not null && index < holds.Length && holds[index];
+				if ( anyInstanced && worldObjects[index] is InstancedMeshObject )
+				{
+					if ( !held ) layers.Instanced.Add( index );
+				}
+				else if ( !held )
+				{
+					unheld.Add( index );
+				}
 			}
 
 			visible = unheld;
 		}
 
-		if ( visible.Count == 0 ) return;
+		if ( visible.Count == 0 && layers.Instanced.Count == 0 ) return;
 		tintReasons = pass.CullReasons;
 
 		var objects = world.Objects;
@@ -571,6 +587,7 @@ internal sealed partial class MeshRenderFeature : RenderFeature
 			else SortBucket( buckets[bit] );
 
 			Emit( buckets[bit], Lists[bit].Draws, layers.ByBit[bit], world, visibleSpan, transforms, bit == 0 && !pass.IsShadow ? Occlusion : null );
+			if ( bit == 0 && layers.Instanced.Count > 0 ) EmitInstances( world, pass, transforms, layers.Instanced, layers.ByBit[0], camera, tanHalfFov, screenWidth, textureSizes );
 			BuildItems( layers.ByBit[bit], layers.ItemsByBit[bit], Lists[bit].Sort == ListSort.Batched );
 			if ( Lists[bit].Runs == MeshRuns.StaticOverlay ) RenderOrders( buckets[bit], layers.ByBit[bit], layers.OverlayOrders );
 		}
@@ -1524,8 +1541,8 @@ internal sealed partial class MeshRenderFeature : RenderFeature
 
 				// The custom objects straight after it that draw as it does go with it, in one run (CustomObject.RenderRun): on
 				// Borealis.Gpu one lent block for them all, rather than one each
-				var customRun = CustomRun ??= new();
-				customRun.Clear();
+				var pool = CustomRuns ??= new();
+				if ( !pool.TryPop( out var customRun ) ) customRun = new();
 				customRun.Add( new CustomDraw( custom, run.FirstInstance ) );
 				while ( i + 1 < items.Length && !context.Census && Joins( runs[items[i + 1].Run], custom, layer, depth, view.IsShadow, open, culledOnly ) )
 				{
@@ -1534,10 +1551,17 @@ internal sealed partial class MeshRenderFeature : RenderFeature
 				}
 
 				var customDraws = customRun.Count;
-				using ( Zones.CustomObject.Start() )
-				using ( RedrawnEveryFrame.Begin() )
-					custom.RenderRun( context, view, layer, CollectionsMarshal.AsSpan( customRun ) );
-				customRun.Clear();
+				try
+				{
+					using ( Zones.CustomObject.Start() )
+					using ( RedrawnEveryFrame.Begin() )
+						custom.RenderRun( context, view, layer, CollectionsMarshal.AsSpan( customRun ) );
+				}
+				finally
+				{
+					customRun.Clear();
+					pool.Push( customRun );
+				}
 				context.ToolsPass = tools;
 				context.SetCombo( CsVertexAnimation, 0 );
 				context.RestoreBound();
@@ -1624,8 +1648,8 @@ internal sealed partial class MeshRenderFeature : RenderFeature
 		context.SetObjectAttributes( null );
 	}
 
-	// The custom objects of a run being drawn (DrawItems); custom objects record on the main thread, but kept per thread anyway
-	[ThreadStatic] static List<CustomDraw> CustomRun;
+	// Available run lists on this recording thread; a nested view borrows a different list.
+	[ThreadStatic] static Stack<List<CustomDraw>> CustomRuns;
 
 	/// <summary>
 	/// Whether <paramref name="next"/> joins the run of custom objects <paramref name="first"/> started in
