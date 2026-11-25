@@ -111,12 +111,13 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	/// the same driver profile (AMD's changes trilinear filtering otherwise). <paramref name="source2Names"/> false uses
 	/// Borealis's, to show the difference. <paramref name="presentation"/> lets it present to windows; with
 	/// <paramref name="frames"/> the first block of each engine frame starts the device's next frame, as the process's
-	/// device does. <paramref name="markers"/> writes progress markers for the device-loss report
-	/// (<see cref="DeviceOptions.ProgressMarkers"/>). <paramref name="pipelineCacheFolder"/> keeps the device's pipeline
+	/// device does. <paramref name="markers"/> writes progress markers for the device-loss report at each list's ends
+	/// (<see cref="DeviceOptions.ProgressMarkers"/>), and <paramref name="passMarkers"/> at each pass's too
+	/// (<see cref="DeviceOptions.PassProgressMarkers"/>). <paramref name="pipelineCacheFolder"/> keeps the device's pipeline
 	/// cache there (<see cref="DeviceOptions.PipelineCacheFolder"/>); with <paramref name="frames"/>, it's saved in the
 	/// background every <see cref="PipelineCacheSaveFrames"/> frames when pipelines were made.
 	/// </summary>
-	public static BorealisGpuRenderBackend Create( bool validation = false, Action<DeviceMessage> message = null, bool source2Names = true, bool presentation = false, bool frames = false, bool markers = false, string pipelineCacheFolder = null, bool gpuAssisted = false, bool syncValidation = false, bool gpuAssistedDescriptors = false )
+	public static BorealisGpuRenderBackend Create( bool validation = false, Action<DeviceMessage> message = null, bool source2Names = true, bool presentation = false, bool frames = false, bool markers = false, string pipelineCacheFolder = null, bool gpuAssisted = false, bool syncValidation = false, bool gpuAssistedDescriptors = false, bool passMarkers = false )
 	{
 		var gpu = GpuDevice.Create( new DeviceOptions
 		{
@@ -131,6 +132,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 			GpuAssistedDescriptorChecks = gpuAssistedDescriptors,
 			Presentation = presentation,
 			ProgressMarkers = markers,
+			PassProgressMarkers = passMarkers,
 			// The process's device notes frames that stop (where the frame thread waited, how far the queues got)
 			HangWatch = frames && Environment.GetEnvironmentVariable( "BOREALIS_HANGWATCH" ) != "0",
 			PipelineCacheFolder = pipelineCacheFolder,

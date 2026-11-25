@@ -249,6 +249,7 @@ public sealed unsafe class CommandList
 		StartsResumed = EndsSuspended = false;
 
 		MarkerSlot = device.ProgressMarkers ? device.TakeMarkerSlot( name ) : -1;
+		passMarkers = MarkerSlot >= 0 && device.PassMarkers;
 		openLabels.Clear();
 		Marker( "begin" );
 		labelled = name is not null && device.Instance.vkCmdBeginDebugUtilsLabelEXT != null;
@@ -548,10 +549,13 @@ public sealed unsafe class CommandList
 		byte first;
 	}
 
+	// Whether its labels write progress markers too (Device.PassMarkers), not just its beginning and end
+	bool passMarkers;
+
 	/// <summary>Start a named region, which RenderDoc and validation messages show.</summary>
 	public void BeginLabel( string name )
 	{
-		if ( MarkerSlot >= 0 )
+		if ( passMarkers )
 		{
 			openLabels.Push( name );
 			Marker( name );
@@ -582,7 +586,7 @@ public sealed unsafe class CommandList
 	/// <summary>End the region <see cref="BeginLabel"/> started.</summary>
 	public void EndLabel()
 	{
-		if ( MarkerSlot >= 0 ) Marker( openLabels.TryPop( out var label ) ? EndMarkers.GetValue( label, static l => $"end {l}" ) : "end" );
+		if ( passMarkers ) Marker( openLabels.TryPop( out var label ) ? EndMarkers.GetValue( label, static l => $"end {l}" ) : "end" );
 		if ( device.Instance.vkCmdEndDebugUtilsLabelEXT == null ) return;
 		device.Instance.vkCmdEndDebugUtilsLabelEXT( Handle );
 	}

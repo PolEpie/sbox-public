@@ -112,6 +112,7 @@ internal static class MapRun
 		using var gpu = GpuDevice.Create( new DeviceOptions
 		{
 			ProgressMarkers = Args.Has( "-markers" ),
+			PassProgressMarkers = Args.Has( "-markers" ),
 			ApplicationName = driverNames ? "Sbox" : "Borealis Lab map",
 			EngineName = driverNames ? "Source2" : "Borealis",
 			Validation = Args.Has( "-validation" ) || Args.Has( "-sync-validation" ),

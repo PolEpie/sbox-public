@@ -672,6 +672,7 @@ public sealed unsafe partial class Device : IDisposable
 		BufferAddresses = e12.values[VkPhysicalDeviceVulkan12Features.BufferDeviceAddress] != 0 && vk.vkGetBufferDeviceAddress != null;
 		memoryBudget = extensions.Contains( "VK_EXT_memory_budget" );
 		bufferMarkers = extensions.Contains( "VK_AMD_buffer_marker" );
+		passMarkers = options.PassProgressMarkers;
 		shaderStatistics = extensions.Contains( "VK_KHR_pipeline_executable_properties" );
 		pipelineLibraries = extensions.Contains( "VK_EXT_graphics_pipeline_library" );
 		enabled = enabled with { meshShaders = extensions.Contains( "VK_EXT_mesh_shader" ) && vk.vkCmdDrawMeshTasksIndirectEXT != null && vk.vkCmdDrawMeshTasksIndirectCountEXT != null };
