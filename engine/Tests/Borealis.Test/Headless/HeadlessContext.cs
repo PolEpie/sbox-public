@@ -303,7 +303,7 @@ internal sealed class HeadlessContext : GpuContext
 	public override void Resolve( in RenderOutput output )
 	{
 		if ( output.Target is not { Samples: > 1 } target ) return;
-		Record( Command( GpuOp.Resolve ) with { Texture = target.Resolved, Source = bound.Color } );
+		Record( Command( GpuOp.Resolve ) with { Texture = target.Resolved, Source = target.Color } );
 	}
 
 	public override void ResolveScratch( in RenderOutput output )
@@ -361,6 +361,9 @@ internal sealed class HeadlessContext : GpuContext
 
 	public override void Clear( Color color, bool clearColor = true, bool clearDepth = true )
 		=> Record( Command( GpuOp.Clear ) with { Texture = clearColor ? bound.Color : null, Depth = clearDepth ? bound.Depth : null } );
+
+	public override void ClearDepthRegion( int x, int y, int width, int height )
+		=> Record( Command( GpuOp.ClearDepthRegion ) with { Depth = bound.Depth, Region = new RectInt( x, y, width, height ) } );
 
 	public override void SetConstants<T>( StringToken name, in T value )
 	{
