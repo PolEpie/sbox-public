@@ -775,14 +775,14 @@ public sealed class SurfaceShaders : IDisposable
 		return Task.Run( async () =>
 		{
 			SurfaceProgram program = null;
-			var path = Find( file );
-			if ( path is null )
+			try
 			{
-				Error?.Invoke( $"{file}: no such shader in {string.Join( ", ", folders )}" );
-			}
-			else
-			{
-				try
+				var path = Find( file );
+				if ( path is null )
+				{
+					Error?.Invoke( $"{file}: no such shader in {string.Join( ", ", folders )}" );
+				}
+				else
 				{
 					var raw = SlangCompiler.IsRaw( File.ReadAllText( path ) );
 					var compiled = await (raw ? compiler.CompileRawAsync( path, priority ) : compiler.CompileSurfaceAsync( path, priority )).ConfigureAwait( false );
@@ -790,33 +790,35 @@ public sealed class SurfaceShaders : IDisposable
 					if ( Manifest?.Take( file, program ) is { Count: > 0 } requests ) program.Prewarm( requests );
 					if ( compiled.GpuDrivenError is { } gpuDrivenError ) Error?.Invoke( $"{file}: no GPU-driven passes, its draws go the classic way: {gpuDrivenError}" );
 				}
-				catch ( ShaderCompileException e )
-				{
-					Error?.Invoke( $"{file}: {e.Errors}" );
-				}
-				catch ( Exception e ) when ( e is IOException or UnauthorizedAccessException or InvalidOperationException or GpuException )
-				{
-					// Draws go on without it, as for a compile error
-					Error?.Invoke( $"{file}: {e.Message}" );
-				}
 			}
-
-			lock ( programs )
+			catch ( ShaderCompileException e )
 			{
-				compiling.Remove( file );
-				priorities.Remove( file );
-				var changes = changedWhileCompiling.Remove( file, out var changed ) ? changed : [];
+				Error?.Invoke( $"{file}: {e.Errors}" );
+			}
+			catch ( Exception e )
+			{
+				// Draws go on without it, as for a compile error
+				Error?.Invoke( $"{file}: {e.Message}" );
+			}
+			finally
+			{
+				lock ( programs )
+				{
+					compiling.Remove( file );
+					priorities.Remove( file );
+					var changes = changedWhileCompiling.Remove( file, out var changed ) ? changed : [];
 
-				// One that failed tries again after any change, as Changed has it
-				var stale = program is null ? changes.Count > 0 : changes.Exists( c => program.Compiled.Dependencies.Contains( c, StringComparer.OrdinalIgnoreCase ) );
-				if ( disposed || stale )
-				{
-					if ( program is not null ) retired.Add( program );
-					program = null;
-				}
-				else
-				{
-					programs[file] = program;
+					// One that failed tries again after any change, as Changed has it
+					var stale = program is null ? changes.Count > 0 : changes.Exists( c => program.Compiled.Dependencies.Contains( c, StringComparer.OrdinalIgnoreCase ) );
+					if ( disposed || stale )
+					{
+						if ( program is not null ) retired.Add( program );
+						program = null;
+					}
+					else
+					{
+						programs[file] = program;
+					}
 				}
 			}
 
@@ -879,7 +881,7 @@ internal sealed class SurfaceProgram : IDisposable
 	// Pipelines' keys are record structs, not tuples: a tuple of eight or more keeps the rest in a tuple of its own, which its
 	// hash and equality box until the JIT has optimised them, so every draw's lookup allocated in a run's first seconds
 	readonly record struct PipelineKey( PassObjects Pass, VertexLayout Layout, Format Color, Format Depth, int Samples, ulong Constants, bool Ids, bool OpaqueFade, SurfaceRenderState State, bool DepthEqual, ulong Features, bool Normals, OverlayStencil Stencil );
-	readonly record struct ImmediateKey( PassObjects Pass, VertexLayout Layout, Format Color, Format Depth, int Samples, ulong Constants, SurfaceRenderState State, PrimitiveTopology Topology, bool Ids, bool OpaqueFade, ToolsPass Tools, OverlayStencil Stencil );
+	readonly record struct ImmediateKey( PassObjects Pass, VertexLayout Layout, Format Color, Format Depth, int Samples, SpecializationConstant[] VertexConstants, SpecializationConstant[] PixelConstants, SurfaceRenderState State, PrimitiveTopology Topology, bool Ids, bool OpaqueFade, ToolsPass Tools, OverlayStencil Stencil );
 	readonly record struct ToolsKey( PassObjects Pass, VertexLayout Layout, Format Color, Format Depth, int Samples, ulong Constants, bool OpaqueFade, SurfaceRenderState State, bool DepthEqual, bool Normals, ToolsPass Tools, OverlayStencil Stencil );
 
 	readonly ConcurrentDictionary<PipelineKey, PipelineHandle> pipelines = new();
@@ -1115,11 +1117,11 @@ internal sealed class SurfaceProgram : IDisposable
 	/// the start of the default stream as a classic draw's are; the default stream is 2. In a tools pass the colour pass draws
 	/// with the engine's pixel stage, as scene draws do.
 	/// </summary>
-	public PipelineHandle ImmediatePipeline( PassObjects pass, VertexLayout layout, Format color, Format depth, int samples, SpecializationConstant[] vertexConstants, SpecializationConstant[] pixelConstants, ulong constantsKey, SurfaceRenderState state, PrimitiveTopology topology, bool ids, bool opaqueFade, ToolsPass tools, OverlayStencil stencil )
+	public PipelineHandle ImmediatePipeline( PassObjects pass, VertexLayout layout, Format color, Format depth, int samples, SpecializationConstant[] vertexConstants, SpecializationConstant[] pixelConstants, SurfaceRenderState state, PrimitiveTopology topology, bool ids, bool opaqueFade, ToolsPass tools, OverlayStencil stencil )
 	{
 		tools = color == Format.Unknown ? ToolsPass.None : ToolsViewStage.ReadyPass( device.Shaders, tools );
 		if ( !depth.HasStencil() ) stencil = OverlayStencil.None;
-		var key = new ImmediateKey( pass, layout, color, depth, samples, constantsKey, state, topology, ids, opaqueFade, tools, stencil );
+		var key = new ImmediateKey( pass, layout, color, depth, samples, vertexConstants, pixelConstants, state, topology, ids, opaqueFade, tools, stencil );
 		lock ( pipelines )
 		{
 			if ( immediatePipelines.TryGetValue( key, out var made ) ) return made;

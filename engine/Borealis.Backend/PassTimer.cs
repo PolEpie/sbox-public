@@ -143,8 +143,15 @@ internal sealed class PassTimer : IDisposable
 	public int Begin( CommandList list, string name, ScopeKind kind, bool count = true )
 	{
 		if ( slot < 0 ) return -1;
-		var begin = Interlocked.Increment( ref usedTimestamps[slot] ) - 1;
-		if ( begin >= PerSlot - 1 ) return -1;
+		ref var used = ref usedTimestamps[slot];
+		int begin;
+		do
+		{
+			begin = Volatile.Read( ref used );
+			if ( begin >= PerSlot - 1 ) return -1;
+		}
+		while ( Interlocked.CompareExchange( ref used, begin + 1, begin ) != begin );
+
 		var query = -1;
 		// Not on an async compute list: the pool counts graphics stages, which a compute-only queue can't begin (device lost)
 		if ( statistics is not null && count && kind != ScopeKind.List && list.Queue == QueueType.Graphics )

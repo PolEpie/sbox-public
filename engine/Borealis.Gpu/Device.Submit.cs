@@ -223,6 +223,10 @@ public sealed unsafe partial class Device
 				{
 					for ( int i = 0; i < DescriptorPoolsLow; i++ ) device.freeDescriptorPools.Add( device.CreateDescriptorPool() );
 				}
+				catch ( GpuException )
+				{
+					// Out of memory ahead: the list that needs a pool reports it
+				}
 				finally
 				{
 					Volatile.Write( ref device.makingDescriptorPools, 0 );
@@ -309,6 +313,7 @@ public sealed unsafe partial class Device
 		doing = Enter( "BeginFrame: trim the allocator" );
 		Allocator.Trim( FrameNumber );
 		doing.Dispose();
+		ApplySamplerSettings();
 		doing = Enter( "BeginFrame: replace textures" );
 		ApplyReplacements();
 		doing.Dispose();
@@ -381,8 +386,9 @@ public sealed unsafe partial class Device
 		}
 		carried.Clear();
 
-		// Spare lists before the frame's come back: those every frame in flight left unused (TrimSpares)
+		// Spares before the frame's resources come back: those every frame in flight left unused (TrimSpares)
 		for ( int q = 0; q < freeLists.Length; q++ ) freeListsLow[q] = Math.Min( freeListsLow[q], freeLists[q].Count );
+		freeDescriptorPoolsLow = Math.Min( freeDescriptorPoolsLow, freeDescriptorPools.Count );
 
 		foreach ( var list in recycle )
 		{
@@ -474,17 +480,18 @@ public sealed unsafe partial class Device
 		public int Compare( UploadPage a, UploadPage b ) => device.Get( a.Buffer ).Memory.Block.Used.CompareTo( device.Get( b.Buffer ).Memory.Block.Used );
 	}
 	readonly int[] freeListsLow = [int.MaxValue, int.MaxValue];
+	int freeDescriptorPoolsLow = int.MaxValue;
 	ulong trimFrom;
 	long trimFromTicks;
 
 	/// <summary>
-	/// Free upload pages and spare command lists that stayed unused for <see cref="UploadPageIdleFrames"/> frames, past
+	/// Free spare upload pages, command lists and descriptor pools that stayed unused for <see cref="UploadPageIdleFrames"/> frames, past
 	/// <see cref="KeptFreeUploadPages"/> and <see cref="KeptFreeCommandLists"/>: a load's uploads take hundreds of pages
 	/// (Construct's held 1.4 GB of mapped memory from then on), and a map's frames take over a hundred lists, whose command
 	/// pools keep the driver's command memory (Construct's held ~370 MB of video memory in the menu after it); steady
 	/// frames take a few. The pages freed are those in the emptiest memory blocks, so blocks drain rather than each keeping
-	/// a page or two (Construct had 100 MiB of 4 MiB holes in upload blocks). Lists go by a longer window of their own
-	/// (<see cref="CommandListSpareSeconds"/>).
+	/// a page or two (Construct had 100 MiB of 4 MiB holes in upload blocks). Command lists and descriptor pools go by a
+	/// longer window of their own (<see cref="CommandListSpareSeconds"/>).
 	/// </summary>
 	void TrimSpares()
 	{
@@ -500,7 +507,11 @@ public sealed unsafe partial class Device
 			freePagesLow[c] = Math.Min( freePagesLow[c], Math.Min( spare, freeAtFrameStart[c] ) );
 		}
 
-		if ( FrameNumber - listTrimFrom >= UploadPageIdleFrames && ListsKeptLongEnough() ) TrimSpareLists();
+		if ( FrameNumber - listTrimFrom >= UploadPageIdleFrames && ListsKeptLongEnough() )
+		{
+			TrimSpareLists();
+			TrimSpareDescriptorPools();
+		}
 		if ( FrameNumber - trimFrom < UploadPageIdleFrames || !Allocator.KeptLongEnough( trimFromTicks ) ) return;
 
 		for ( int c = 0; c < FreePages.Length; c++ )
@@ -591,6 +602,13 @@ public sealed unsafe partial class Device
 
 		listTrimFrom = FrameNumber;
 		listTrimFromTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+	}
+
+	void TrimSpareDescriptorPools()
+	{
+		for ( int i = DescriptorPoolsLow; i < freeDescriptorPoolsLow && freeDescriptorPools.TryTake( out var pool ); i++ )
+			Vk.vkDestroyDescriptorPool( Vk.Device, pool, null );
+		freeDescriptorPoolsLow = int.MaxValue;
 	}
 
 	readonly CommandList[] keptLists = new CommandList[KeptFreeCommandLists];
@@ -1181,7 +1199,15 @@ public sealed unsafe partial class Device
 	}
 
 	// The list this thread's writes go into while it defers them, or null
-	CommandList DeferredUploads() => deferringDevice == this ? deferredList ??= BeginCommandList( QueueType.Graphics, "Deferred uploads" ) : null;
+	CommandList DeferredUploads()
+	{
+		if ( deferringDevice != this ) return null;
+		if ( deferredList is not null ) return deferredList;
+
+		var list = BeginCommandList( QueueType.Graphics, "Deferred uploads" );
+		list.Barrier( PipelineStage.AllCommands, MemoryAccess.MemoryWrite, PipelineStage.Transfer, MemoryAccess.TransferWrite );
+		return deferredList = list;
+	}
 
 	/// <summary>
 	/// The list this thread's writes go into in a <see cref="DeferUploads"/> scope (begun on first use), or null outside one:
@@ -1198,7 +1224,8 @@ public sealed unsafe partial class Device
 	/// <summary>
 	/// Copy <paramref name="data"/> into a buffer at <paramref name="offset"/> now, and wait for it (or, in a
 	/// <see cref="DeferUploads"/> scope, with the scope's list). For loading; per-frame data goes through
-	/// <see cref="CommandList.UpdateBuffer"/>.
+	/// <see cref="CommandList.UpdateBuffer"/>. The caller must synchronize uses of the destination range on other queues.
+	/// Mapped buffers are written directly by the CPU; the caller must ensure no in-flight work on any queue uses that range.
 	/// </summary>
 	public void WriteBuffer( BufferHandle buffer, ReadOnlySpan<byte> data, long offset = 0 )
 	{
@@ -1223,6 +1250,7 @@ public sealed unsafe partial class Device
 		var list = BeginCommandList( QueueType.Graphics, "WriteBuffer" );
 		try
 		{
+			list.Barrier( PipelineStage.AllCommands, MemoryAccess.MemoryWrite, PipelineStage.Transfer, MemoryAccess.TransferWrite );
 			list.UpdateBuffer( buffer, data, offset );
 		}
 		catch
@@ -1269,7 +1297,7 @@ public sealed unsafe partial class Device
 	}
 
 	/// <summary>
-	/// Copy <paramref name="data"/> into a buffer now, and wait for it.
+	/// Copy <paramref name="data"/> into a buffer, with the same synchronization requirements as the byte overload.
 	/// </summary>
 	public void WriteBuffer<T>( BufferHandle buffer, ReadOnlySpan<T> data, long offset = 0 ) where T : unmanaged => WriteBuffer( buffer, MemoryMarshal.AsBytes( data ), offset );
 

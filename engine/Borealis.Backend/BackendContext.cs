@@ -71,7 +71,6 @@ internal sealed partial class BackendContext : GpuContext
 			BindVersion = -1;
 			layouts.Clear();
 			Layouts = ownLayouts ? layouts : null;
-			Readbacks.Clear();
 			TimerScope = Counting = -1;
 			Submitted = false;
 		}
@@ -219,10 +218,11 @@ internal sealed partial class BackendContext : GpuContext
 	public override void Submit()
 	{
 		if ( recording is null ) return;
-		if ( Census ) CensusScope( null, pop: false );
 
 		try
 		{
+			if ( Census ) CensusScope( null, pop: false );
+
 			if ( borrowed )
 			{
 				// The owner submits; leave the list as a scope boundary for whoever records next
@@ -246,8 +246,22 @@ internal sealed partial class BackendContext : GpuContext
 
 			recording.Submitted = true;
 			var point = waitCount == 0 && device.BatchSubmits ? Gpu.SubmitLater( recording.List ) : Gpu.Submit( recording.List, waits[..waitCount] );
+			var readbacks = recording.Readbacks;
+			var transferred = 0;
+			try
+			{
+				for ( ; transferred < readbacks.Count; transferred++ )
+				{
+					var (buffer, bytes, callback) = readbacks[transferred];
+					device.AddReadback( point, buffer, bytes, callback );
+				}
+			}
+			finally
+			{
+				readbacks.RemoveRange( 0, transferred );
+			}
+
 			if ( signal.Handle != IntPtr.Zero ) device.Signalled( signal, point );
-			foreach ( var (buffer, bytes, callback) in recording.Readbacks ) device.AddReadback( point, buffer, bytes, callback );
 		}
 		finally
 		{
@@ -439,10 +453,22 @@ internal sealed partial class BackendContext : GpuContext
 			measuredTransitions = measuredTicks = measuredBarriers = 0;
 		}
 
-		if ( !borrowed && recording is { Submitted: false } owned )
+		if ( !borrowed && recording is { } owned )
 		{
-			owned.Submitted = true;
-			owned.List?.Discard();
+			try
+			{
+				if ( !owned.Submitted )
+				{
+					owned.Submitted = true;
+					owned.List?.Discard();
+				}
+			}
+			finally
+			{
+				// Undelivered readbacks have no data: cancel their callbacks and release their buffers.
+				foreach ( var (buffer, _, _) in owned.Readbacks ) Gpu.Destroy( buffer );
+				owned.Readbacks.Clear();
+			}
 		}
 
 		recording = null;

@@ -25,11 +25,10 @@ public sealed partial class ShaderDrawer
 		if ( SurfacePass( program, state, color, mode, attributes.GetCombo( LightmapId ) is > 0 ) is not { } pass ) return false;
 
 		var ids = InstanceIds.Buffer.IsValid;
-		var vertexConstants = SurfaceStageConstants( pass.Pass.Vertex, attributes, out var vertexKey );
-		ulong pixelKey = 0;
-		var pixelConstants = pass.Pass.Pixel is { } pixel ? SurfaceStageConstants( pixel, attributes, out pixelKey ) : null;
+		var vertexConstants = SurfaceStageConstants( pass.Pass.Vertex, attributes );
+		var pixelConstants = pass.Pass.Pixel is { } pixel ? SurfaceStageConstants( pixel, attributes ) : null;
 		var fade = attributes.GetCombo( OpaqueFadeId ) is > 0;
-		var pipeline = program.ImmediatePipeline( pass, SurfaceLayoutOf( draw.Layout ), color, depth, samples, vertexConstants, pixelConstants, vertexKey * 31 + pixelKey, state, draw.Topology, ids, fade, ToolsPass, OverlayStencil );
+		var pipeline = program.ImmediatePipeline( pass, SurfaceLayoutOf( draw.Layout ), color, depth, samples, vertexConstants, pixelConstants, state, draw.Topology, ids, fade, ToolsPass, OverlayStencil );
 
 		if ( BackendDevice.DrawMarkers ) list.Marker( $"{material.Name} {pass.Pass.Name} (engine draw)" );
 		list.SetPipeline( pipeline );
@@ -103,7 +102,6 @@ public sealed partial class ShaderDrawer
 		public int Version;
 		public bool PerPixel;
 		public SpecializationConstant[] Constants;
-		public ulong Key;
 	}
 
 	readonly StageConstants[] stageConstants = new StageConstants[4];
@@ -113,7 +111,7 @@ public sealed partial class ShaderDrawer
 	static readonly int OpaqueFadeId = Borealis.Source2.Shaders.AttributeIds.Of( "D_OPAQUE_FADE" );
 	static readonly int SkyboxComboId = Borealis.Source2.Shaders.AttributeIds.Of( "D_SKYBOX" );
 
-	SpecializationConstant[] SurfaceStageConstants( CompiledStage stage, ShaderAttributes attributes, out ulong key )
+	SpecializationConstant[] SurfaceStageConstants( CompiledStage stage, ShaderAttributes attributes )
 	{
 		var perPixel = device.Surfaces.MaterialOffsetPerPixel;
 		if ( attributes.Stable )
@@ -121,33 +119,29 @@ public sealed partial class ShaderDrawer
 			foreach ( ref var kept in stageConstants.AsSpan() )
 			{
 				if ( ReferenceEquals( kept.Stage, stage ) && ReferenceEquals( kept.Attributes, attributes ) && kept.Version == attributes.Version && kept.PerPixel == perPixel )
-				{
-					key = kept.Key;
 					return kept.Constants;
-				}
 			}
 		}
 
-		var made = MakeSurfaceStageConstants( stage, attributes, perPixel, out key );
+		var made = MakeSurfaceStageConstants( stage, attributes, perPixel );
 		if ( attributes.Stable )
 		{
-			stageConstants[stageConstantsNext] = new StageConstants { Stage = stage, Attributes = attributes, Version = attributes.Version, PerPixel = perPixel, Constants = made, Key = key };
+			stageConstants[stageConstantsNext] = new StageConstants { Stage = stage, Attributes = attributes, Version = attributes.Version, PerPixel = perPixel, Constants = made };
 			stageConstantsNext = (stageConstantsNext + 1) & 3;
 		}
 
 		return made;
 	}
 
-	// Constant sets already made per stage, reused instead of allocated per draw
-	readonly ConditionalWeakTable<CompiledStage, List<SpecializationConstant[]>> internedConstants = new();
+	// Interned per stage so all drawers use the same identity for equal values in a program's pipeline cache
+	static readonly ConditionalWeakTable<CompiledStage, List<SpecializationConstant[]>> internedConstants = new();
 
 	[ThreadStatic] static SpecializationConstant[] constantsScratch;
 
-	SpecializationConstant[] MakeSurfaceStageConstants( CompiledStage stage, ShaderAttributes attributes, bool perPixel, out ulong key )
+	SpecializationConstant[] MakeSurfaceStageConstants( CompiledStage stage, ShaderAttributes attributes, bool perPixel )
 	{
 		var fade = attributes.GetCombo( OpaqueFadeId ) is > 0;
 		var skybox = attributes.GetCombo( SkyboxComboId ) is > 0;
-		key = (perPixel ? 1u : 2u) + (fade ? 4u : 0u) + (skybox ? 8u : 0u);
 
 		var length = stage.Specializations.Count + 3;
 		if ( constantsScratch is null || constantsScratch.Length < length ) constantsScratch = new SpecializationConstant[Math.Max( length, 16 )];
@@ -158,7 +152,6 @@ public sealed partial class ShaderDrawer
 			var value = attributes.Get( slot.Attribute ) is float[] { Length: > 0 } given ? (int)given[0]
 				: attributes.GetCombo( slot.Attribute ) ?? (int)(slot.Annotations?.Default is { Length: > 0 } d ? d[0] : 0);
 			constants[i] = new SpecializationConstant( (uint)slot.Id, (uint)value );
-			key = key * 1000003 + (uint)value + 1;
 		}
 
 		constants[^3] = new SpecializationConstant( BackendContext.SkyboxId, skybox ? 1u : 0u );

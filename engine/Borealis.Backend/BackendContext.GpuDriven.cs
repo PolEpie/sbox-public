@@ -565,7 +565,7 @@ internal sealed partial class BackendContext
 					// An owner's fragments keep their draw records by instance; anything else looks them up by key. The owner's
 					// lock is held only around its records and the draw table, which takes no other lock, and is let go whatever
 					// throws, so a worker drawing the same owner in another segment can't wait on it forever
-					var owned = batch.Owner is null ? null : tables.DrawsOf( batch.Owner, pooled.GeometryRecord, vertexMaterial, pixelMaterial, flags );
+					var owned = batch.Owner is null ? null : tables.DrawsOf( batch.Owner, pooled.GeometryRecord, vertexMaterial, pixelMaterial, flags, pooled.IndexPageSlot );
 					var ownedTaken = false;
 					try
 					{
@@ -1026,9 +1026,10 @@ internal sealed partial class BackendContext
 						var version = MaterialVersion( material );
 						var visible = visibility is not null;
 						var epoch = tables.VisibilityEpoch;
+						var recordEpoch = tables.RecordEpoch;
 						if ( memoTaken && ReferenceEquals( kept.Material, material ) && kept.Version == version && !tables.Rings( material ) && ReferenceEquals( kept.Stages, stages ) && kept.DepthOnly == bucket.DepthOnly && kept.PixelRecord == pixelRecord
 							&& kept.VertexAttributes == vertexAttributes && kept.PixelAttributes == pixelAttributes && ReferenceEquals( kept.Owner, aggregate ) && kept.Fragments == fragmentCount
-							&& kept.Flags == flags && kept.Pooled == pooled && ReferenceEquals( kept.Layout, geometry.Layout ) && ReferenceEquals( kept.Classic, bucket.Classic ) && kept.Positions == positions && kept.Visibility == visible && kept.VisibilityEpoch == epoch )
+							&& kept.Flags == flags && kept.Pooled == pooled && ReferenceEquals( kept.Layout, geometry.Layout ) && ReferenceEquals( kept.Classic, bucket.Classic ) && kept.Positions == positions && kept.Visibility == visible && kept.VisibilityEpoch == epoch && kept.RecordEpoch == recordEpoch )
 						{
 							memoHits++;
 						}
@@ -1044,7 +1045,7 @@ internal sealed partial class BackendContext
 									WriteFragments( s.Tables, s.Aggregate, s.Pooled, s.Vertex, s.Pixel, s.Flags, bytes );
 									if ( s.Meshlets is not null && s.Model is not null ) RequestMeshlets( s.Meshlets, s.Aggregate, s.Pooled, s.Model, s.Mesh, s.DrawCall );
 									if ( s.Lods is not null && s.Model is not null ) RequestLods( s.Lods, s.Aggregate, s.Pooled, s.Model, s.Mesh, s.DrawCall, s.Color );
-								} );
+								}, releasable: true, indexPage: used.IndexPageSlot );
 							var (first, firstVertex) = visible ? tables.Visibility( aggregate, fragmentCount, pooled.VertexCount ) : (GpuDrivenTables.NoVisibility, GpuDrivenTables.NoVisibility);
 							kept = new GpuDrivenRecordMemo.Slot
 							{
@@ -1069,6 +1070,7 @@ internal sealed partial class BackendContext
 								VisibilityFirst = first,
 								VertexBase = firstVertex,
 								VisibilityEpoch = epoch,
+								RecordEpoch = recordEpoch,
 							};
 						}
 
@@ -1737,7 +1739,7 @@ internal sealed partial class BackendContext
 		if ( device.GpuDrivenResidentCull && cull.View is not null && !cull.KeepsOrder ) device.ResidentCulls.Seen( cull.View, cull.Plan, key, device.GpuDrivenFrame );
 
 		var plans = device.PlansFor( cull.Plan );
-		var plan = plans.Find( key, cull.PlanVersion, prefix.Length, device.GpuDrivenTables.VisibilityEpoch );
+		var plan = plans.Find( key, cull.PlanVersion, prefix.Length, device.GpuDrivenTables );
 		if ( plan is null ) return null;
 		if ( PlanCurrent( plan, shaderMode ) ) return plan;
 
@@ -2001,6 +2003,7 @@ internal sealed partial class BackendContext
 			Key = PlanKey( shaderMode, cull, color, depth, samples ),
 			Version = cull.PlanVersion,
 			VisibilityEpoch = device.GpuDrivenTables.VisibilityEpoch,
+			RecordEpoch = device.GpuDrivenTables.RecordEpoch,
 			Batches = batches.Length,
 			Commands = commands,
 			Fragments = fragments,
@@ -2654,7 +2657,7 @@ internal sealed partial class BackendContext
 		var key = flags | (uint)versions.ToHashCode() << 8;
 		var state = (Context: this, Tables: tables, Lighting: lighting, Restore: restore, Draw: (pooled.GeometryRecord, vertexMaterial, pixelMaterial, flags, firstIndex, indexCount, baseVertex, pooled.IndexPageSlot));
 		return tables.FragmentsOf( owner, pooled.GeometryRecord, vertexMaterial, pixelMaterial, key, (lighting.Length + 7) / 8, state,
-			static ( s, bytes ) => s.Context.WriteMeshLightingDraws( s.Tables, s.Lighting, s.Restore, s.Draw, MemoryMarshal.Cast<byte, uint>( bytes ) ), releasable: true );
+			static ( s, bytes ) => s.Context.WriteMeshLightingDraws( s.Tables, s.Lighting, s.Restore, s.Draw, MemoryMarshal.Cast<byte, uint>( bytes ) ), releasable: true, indexPage: pooled.IndexPageSlot );
 	}
 
 	void WriteMeshLightingDraws( GpuDrivenTables tables, ShaderParameters[] lighting, ShaderParameters restore, (uint Geometry, uint Vertex, uint Pixel, uint Flags, uint FirstIndex, uint IndexCount, int BaseVertex, int IndexPage) d, Span<uint> words )

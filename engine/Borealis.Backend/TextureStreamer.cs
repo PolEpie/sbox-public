@@ -350,7 +350,7 @@ internal sealed class TextureStreamer
 			if ( texture.Pinned || now - texture.LastAskedTime < idle ) continue;
 			// The wall-clock idle timeout can expire before both frame-based ask windows roll over.
 			texture.Asked = texture.AskedBefore = int.MaxValue;
-			if ( builds.Count >= MaxBuilds || texture.Building is not null || texture.ResidentTop >= texture.TailTop ) continue;
+			if ( builds.Count >= BuildsAtOnce || texture.Building is not null || texture.ResidentTop >= texture.TailTop ) continue;
 			StartBuild( texture, texture.TailTop, texture.BytesFrom( texture.TailTop ) );
 			IdleGivenBack++;
 		}
@@ -709,7 +709,7 @@ internal sealed class TextureStreamer
 
 		foreach ( var texture in candidates )
 		{
-			if ( available >= 0 || builds.Count >= MaxBuilds ) break;
+			if ( available >= 0 || builds.Count >= BuildsAtOnce ) break;
 			var top = texture.ResidentTop < texture.Wanted ? texture.Wanted : texture.ResidentTop + 1;
 			var bytes = texture.BytesFrom( top );
 			available += texture.ResidentBytes - bytes;

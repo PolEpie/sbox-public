@@ -36,6 +36,25 @@ public sealed unsafe partial class Device
 
 	internal void ExitGate() => Interlocked.Decrement( ref gateUsers );
 
+	bool TryBeginMove()
+	{
+		if ( Interlocked.CompareExchange( ref gateMoving, 1, 0 ) != 0 ) return false;
+		if ( Volatile.Read( ref gateUsers ) != 0 )
+		{
+			Volatile.Write( ref gateMoving, 0 );
+			return false;
+		}
+
+		Volatile.Write( ref moverThread, Environment.CurrentManagedThreadId );
+		return true;
+	}
+
+	void EndMove()
+	{
+		Volatile.Write( ref moverThread, 0 );
+		Volatile.Write( ref gateMoving, 0 );
+	}
+
 	/// <summary>
 	/// Hold moves (set while a load is going on, <c>BackendDevice.Loading</c>): what loads makes and uploads all the time, and
 	/// a move waits for the GPU; blocks drain once it's over.
@@ -119,15 +138,12 @@ public sealed unsafe partial class Device
 		if ( !Allocator.AnyDrainingToMove || IsLost || HoldRelocation ) return;
 		var started = System.Diagnostics.Stopwatch.GetTimestamp();
 
-		Interlocked.Exchange( ref gateMoving, 1 );
-		if ( Volatile.Read( ref gateUsers ) != 0 )
+		if ( !TryBeginMove() )
 		{
-			Volatile.Write( ref gateMoving, 0 );
 			RelocationsPutOff++;
 			return;
 		}
 
-		Volatile.Write( ref moverThread, Environment.CurrentManagedThreadId );
 		try
 		{
 			try
@@ -195,8 +211,7 @@ public sealed unsafe partial class Device
 			movedTextures.Clear();
 			movedViews.Clear();
 			oldViews.Clear();
-			Volatile.Write( ref moverThread, 0 );
-			Volatile.Write( ref gateMoving, 0 );
+			EndMove();
 		}
 	}
 
@@ -483,10 +498,12 @@ public sealed unsafe partial class Device
 	void DestroyViewLater( ulong view ) => Defer( new Garbage( new ViewRecord { View = view }, imageViewOnly: true ) );
 
 	/// <summary>Free a buffer at once: only when no pending work can use it.</summary>
-	void FreeBufferNow( in BufferRecord record )
+	void FreeBufferNow( in BufferRecord record ) => FreeBufferNow( record.Buffer, record.Memory, record.BindlessSlot );
+
+	void FreeBufferNow( ulong buffer, in Allocation memory, int bindlessSlot )
 	{
-		if ( record.BindlessSlot > 0 ) Bindless.RemoveBuffer( record.BindlessSlot - 1 );
-		Vk.vkDestroyBuffer( Vk.Device, record.Buffer, null );
-		FreeMemory( record.Memory );
+		if ( bindlessSlot > 0 ) Bindless.RemoveBuffer( bindlessSlot - 1 );
+		Vk.vkDestroyBuffer( Vk.Device, buffer, null );
+		FreeMemory( memory );
 	}
 }

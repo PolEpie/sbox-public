@@ -12,16 +12,17 @@ internal sealed class GpuDrivenPlans
 	readonly List<GpuDrivenPlan> plans = new();
 
 	/// <summary>
-	/// The plan for this kind of call made at <paramref name="version"/> of the list, or null; one whose records name
-	/// visibility runs only while <see cref="GpuDrivenTables.VisibilityEpoch"/> is the one it was made in.
+	/// The plan for this kind of call made at <paramref name="version"/> of the list, or null. Plans cannot outlive a
+	/// change in the draw and fragment records, or in the visibility runs for a call that names them.
 	/// </summary>
-	public GpuDrivenPlan Find( in GpuDrivenPlan.CallKey key, int version, int batches, int visibilityEpoch )
+	public GpuDrivenPlan Find( in GpuDrivenPlan.CallKey key, int version, int batches, GpuDrivenTables tables )
 	{
 		lock ( plans )
 		{
 			foreach ( var plan in plans )
 			{
-				if ( plan.Key == key ) return plan.Version == version && plan.Batches == batches && (plan.VisibilityEpoch == visibilityEpoch || !(key.Ids || key.Lists || key.Visibility)) ? plan : null;
+				if ( plan.Key == key ) return plan.Version == version && plan.Batches == batches && plan.RecordEpoch == tables.RecordEpoch
+					&& (plan.VisibilityEpoch == tables.VisibilityEpoch || !(key.Ids || key.Lists || key.Visibility)) ? plan : null;
 			}
 
 			return null;
@@ -83,6 +84,9 @@ internal sealed class GpuDrivenPlan
 
 	/// <summary>The visibility epoch its records' runs were named in (<see cref="GpuDrivenTables.VisibilityEpoch"/>).</summary>
 	public int VisibilityEpoch;
+
+	/// <summary>The draw and fragment record epoch the plan was made in (<see cref="GpuDrivenTables.RecordEpoch"/>).</summary>
+	public int RecordEpoch;
 
 	/// <summary>Its buckets' commands and fragments, its multi-draws' slots, and the compacted slots it uses.</summary>
 	public int Commands, Fragments, Written, CompactUsed;

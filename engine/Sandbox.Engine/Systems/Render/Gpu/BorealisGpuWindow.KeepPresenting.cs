@@ -16,6 +16,11 @@ internal sealed partial class BorealisGpuWindow
 
 		try
 		{
+			// No frame begins while the main thread is away. Recycle completed lists here and wait for room before submitting
+			// another, so every submission has a tracked list.
+			RecyclePresentedAgain( gpu );
+			if ( presentedAgain.Count >= MaxPresentedAgainKept ) return false;
+
 			if ( !acquiredAhead )
 			{
 				if ( swapChain.Current.IsValid ) return false;
@@ -29,10 +34,6 @@ internal sealed partial class BorealisGpuWindow
 			var width = Math.Min( from.Width, to.Width );
 			var height = Math.Min( from.Height, to.Height );
 
-			// No frame begins while the main thread is away, so the lists presented again with are recycled here once the GPU is
-			// done with them; left for their frame, each held a command pool of its own (about a thousand through one load)
-			RecyclePresentedAgain( gpu );
-
 			// The output is readable between blocks (GraphicsContext.FinishReadable), and left so; the image's old contents
 			// don't matter
 			var list = gpu.BeginCommandList( QueueType.Graphics, "Present the last frame again" );
@@ -42,7 +43,7 @@ internal sealed partial class BorealisGpuWindow
 			list.Barrier( new TextureBarrier { Texture = output, OldLayout = ImageLayout.CopySource, NewLayout = ImageLayout.ShaderRead, SourceStage = PipelineStage.Transfer, SourceAccess = MemoryAccess.TransferRead, DestinationStage = PipelineStage.AllCommands, DestinationAccess = MemoryAccess.MemoryRead, MipCount = 1, LayerCount = 1 } );
 			list.Barrier( new TextureBarrier { Texture = image, OldLayout = ImageLayout.CopyDestination, NewLayout = ImageLayout.Present, SourceStage = PipelineStage.Transfer, SourceAccess = MemoryAccess.TransferWrite, DestinationStage = PipelineStage.AllCommands, DestinationAccess = MemoryAccess.None, MipCount = 1, LayerCount = 1 } );
 			var submitted = gpu.Submit( list, default, swapChain );
-			if ( presentedAgain.Count < MaxPresentedAgainKept ) presentedAgain.Enqueue( (list, submitted) );
+			presentedAgain.Enqueue( (list, submitted) );
 			acquiredAhead = false;
 			swapChain.Present();
 			PresentedAgain++;

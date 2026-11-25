@@ -199,7 +199,7 @@ internal sealed partial class BackendContext
 			foreach ( var key in residentKeys )
 			{
 				if ( key.Filter != cull.Filter ) continue;
-				var plan = plans.Find( key, cull.PlanVersion, cull.PlanBatches, device.GpuDrivenTables.VisibilityEpoch );
+				var plan = plans.Find( key, cull.PlanVersion, cull.PlanBatches, device.GpuDrivenTables );
 				if ( plan is null || plan.Fragments == 0 || plan.Runs.Length == 0 ) continue;
 
 				// The visibility-driven pass's state, cleared now rather than before the segments: the prepass's culling stamps it

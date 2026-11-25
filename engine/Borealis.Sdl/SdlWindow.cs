@@ -244,8 +244,8 @@ public sealed unsafe class SdlWindow : IDisposable
 		get
 		{
 			Require();
-			int w, h;
-			SDL_GetWindowSize( handle, &w, &h );
+			int w = 0, h = 0;
+			Check( SDL_GetWindowSize( handle, &w, &h ), "SDL_GetWindowSize" );
 			return (w, h);
 		}
 	}
@@ -256,8 +256,8 @@ public sealed unsafe class SdlWindow : IDisposable
 		get
 		{
 			Require();
-			int w, h;
-			SDL_GetWindowSizeInPixels( handle, &w, &h );
+			int w = 0, h = 0;
+			Check( SDL_GetWindowSizeInPixels( handle, &w, &h ), "SDL_GetWindowSizeInPixels" );
 			return (w, h);
 		}
 	}

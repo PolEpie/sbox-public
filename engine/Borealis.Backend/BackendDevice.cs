@@ -1792,9 +1792,9 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	GpuMaterial Converted( string path )
 	{
 		if ( !Surfaces.HasConversions ) return null;
-		if ( (readMaterials.TryGetValue( path, out var read ) ? read : Content.TryRead( path ) is { } data ? ReadMaterial( data ) : null) is not { } file ) return null;
+		if ( (readMaterials.TryGetValue( path, out var read ) ? read.File : Content.TryRead( path ) is { } data ? ReadMaterial( data ) : null) is not { } file ) return null;
 		var converted = Converted( path, file, classicFallback: true );
-		if ( converted is not null ) readMaterials.TryRemove( path, out _ );
+		if ( converted is not null && read.File is not null ) readMaterials.TryRemove( new( path, read ) );
 		return converted;
 	}
 
@@ -2103,7 +2103,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 	{
 		MaterialFile file;
 		string why = null;
-		if ( readMaterials.TryRemove( path, out var read ) ) file = read;
+		if ( readMaterials.TryRemove( path, out var read ) ) file = read.File;
 		else if ( Content.TryRead( path ) is { } data )
 		{
 			file = ReadMaterial( data );
@@ -4035,6 +4035,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 			LodFadeNow = ((uint)(long)((LodFadeClock ?? clock.Elapsed.TotalSeconds) * 256) & 0x3fffu) | (GpuDrivenFrame & 0x3ffu) << 14;
 			MakeLodFades();
 			loadFrame++;
+			if ( (loadFrame & 63) == 0 ) FreeIdleReadAhead();
 			var shown = Volatile.Read( ref idsShownFrame );
 			IdsWhole = IdsNormals || shown != 0 && GpuDrivenFrame - shown <= 2;
 
@@ -4084,6 +4085,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 		Gpu.WaitIdle();
 		foreach ( var (_, ahead) in readTextures ) ReleaseAhead( ahead );
 		readTextures.Clear();
+		readMaterials.Clear();
 		Poll();
 		// Surface compilation uses the material cache's shared descriptor layouts.
 		surfaces?.Dispose();

@@ -543,6 +543,7 @@ internal sealed class MaterialObject
 	public readonly int MaterialVersion;
 	public readonly MaterialLayout Layout;
 	public readonly PipelineHandle Pipeline;
+	internal bool OwnsPipeline { get; init; }
 	public readonly bool DepthOnly;
 	public readonly bool UncompressedTangentFrame;
 
@@ -1008,6 +1009,7 @@ internal sealed class MaterialObjectCache : IDisposable
 {
 	public readonly Device Gpu;
 	public readonly ShaderDefaults Defaults;
+	internal readonly object Identity = new();
 	readonly Dictionary<string, BindingLayoutHandle> layouts = new();
 	readonly Dictionary<(ShaderVariant Variant, bool Immediate), MaterialLayout> variantLayouts = new();
 	// Found without a lock by every recording thread; changed under its own lock
@@ -1037,6 +1039,7 @@ internal sealed class MaterialObjectCache : IDisposable
 	long sweptFrame = -1;
 	readonly Lock sweepLock = new();
 	readonly List<(long Frame, SetEntry Set, ConstantVariant Constants, long Kept, int KeptSize)> retired = new();
+	Queue<(long Frame, PipelineHandle Pipeline)> retiredPipelines;
 
 	/// <summary>The device frame now, as sets and constants record their last use.</summary>
 	public long Frame => (long)Gpu.FrameNumber;
@@ -1160,6 +1163,11 @@ internal sealed class MaterialObjectCache : IDisposable
 			// Freed two frames after they were retired: a context that bound one just before it was marked dead submitted
 			// within its frame, and the device's own deferral covers the GPU from there
 			var due = frame - 2;
+			while ( retiredPipelines is not null && retiredPipelines.TryPeek( out var pipeline ) && pipeline.Frame <= due )
+			{
+				Gpu.Destroy( retiredPipelines.Dequeue().Pipeline );
+			}
+
 			var i = 0;
 			for ( ; i < retired.Count && retired[i].Frame <= due; i++ )
 			{
@@ -1192,7 +1200,7 @@ internal sealed class MaterialObjectCache : IDisposable
 			{
 				foreach ( var (key, entry) in keptConstants )
 				{
-					if ( entry.LastUsed >= before ) continue;
+					if ( !entry.TryRetire( before ) ) continue;
 					retired.Add( (frame, null, null, entry.Offset, key.Size) );
 					keptConstants.Remove( key );
 				}
@@ -1244,22 +1252,47 @@ internal sealed class MaterialObjectCache : IDisposable
 
 	/// <summary>
 	/// The object for a material drawn this way, made the first time (or again, after its material changed), with the
-	/// pipeline <paramref name="pipeline"/> makes for the layout's sets.
+	/// pipeline <paramref name="pipeline"/> makes for the layout's sets. A pipeline made only for this object must pass
+	/// <paramref name="ownsPipeline"/> so the cache can destroy it; shared device pipelines are owned by the device cache.
 	/// </summary>
-	public MaterialObject Get<TState>( in Key key, bool immediate, TState state, Func<TState, MaterialLayout, PipelineHandle> pipeline )
+	public MaterialObject Get<TState>( in Key key, bool immediate, TState state, Func<TState, MaterialLayout, PipelineHandle> pipeline, bool ownsPipeline = false )
 	{
 		if ( objects.TryGetValue( key, out var found ) && !found.Stale ) return found;
 
 		var layout = LayoutOf( key.Variant, immediate );
-		var made = new MaterialObject( this, key.Material, layout, pipeline( state, layout ), key.DepthOnly, key.UncompressedTangentFrame );
+		var handle = pipeline( state, layout );
+		MaterialObject made;
+		try
+		{
+			made = new MaterialObject( this, key.Material, layout, handle, key.DepthOnly, key.UncompressedTangentFrame ) { OwnsPipeline = ownsPipeline };
+		}
+		catch
+		{
+			if ( ownsPipeline ) Gpu.Destroy( handle );
+			throw;
+		}
+
 		Interlocked.Increment( ref objectsMade );
 		MaterialObject replaced;
 		lock ( objects )
 		{
-			if ( objects.TryGetValue( key, out replaced ) && !replaced.Stale ) return replaced;
-			objects[key] = made;
-			allObjects.Add( made );
-			if ( replaced is not null ) allObjects.Remove( replaced );
+			if ( objects.TryGetValue( key, out replaced ) && !replaced.Stale )
+			{
+				found = replaced;
+			}
+			else
+			{
+				found = made;
+				objects[key] = made;
+				allObjects.Add( made );
+				if ( replaced is not null ) allObjects.Remove( replaced );
+			}
+		}
+
+		if ( !ReferenceEquals( found, made ) )
+		{
+			if ( ownsPipeline ) Gpu.Destroy( handle );
+			return found;
 		}
 
 		if ( replaced is not null ) Retire( replaced );
@@ -1287,13 +1320,14 @@ internal sealed class MaterialObjectCache : IDisposable
 		foreach ( var value in dropped ?? [] ) Retire( value );
 	}
 
-	/// <summary>Retire an object's sets and constants; never called holding the objects' lock, which a sweep takes after its own.</summary>
+	/// <summary>Retire an object's resources; never called holding the objects' lock, which a sweep takes after its own.</summary>
 	void Retire( MaterialObject value )
 	{
 		lock ( sweepLock )
 		{
 			retireFrame = Frame;
 			value.Retire( retireSet ??= RetireSet, retireConstants ??= RetireConstants );
+			if ( value.OwnsPipeline ) (retiredPipelines ??= new()).Enqueue( (retireFrame, value.Pipeline) );
 		}
 	}
 
@@ -1321,10 +1355,30 @@ internal sealed class MaterialObjectCache : IDisposable
 		return offset;
 	}
 
-	sealed class Kept
+	internal sealed class Kept( long offset, long frame )
 	{
-		public long Offset;
-		public long LastUsed;
+		public readonly long Offset = offset;
+		long lastUsed = frame;
+
+		// A version hit needs no shared dictionary lock, but cannot revive an offset that a sweep reclaimed.
+		public bool TryTouch( long frame )
+		{
+			long last;
+			do
+			{
+				last = Volatile.Read( ref lastUsed );
+				if ( last < 0 ) return false;
+				if ( last >= frame ) return true;
+			}
+			while ( Interlocked.CompareExchange( ref lastUsed, frame, last ) != last );
+			return true;
+		}
+
+		public bool TryRetire( long before )
+		{
+			var last = Volatile.Read( ref lastUsed );
+			return last < before && Interlocked.CompareExchange( ref lastUsed, -1, last ) == last;
+		}
 	}
 
 	readonly Dictionary<(ulong Hash, int Size), Kept> keptConstants = new();
@@ -1333,23 +1387,26 @@ internal sealed class MaterialObjectCache : IDisposable
 	/// Pass constants for a binding that isn't dynamic: kept by content, so the same values land at the same place every
 	/// frame and the sets pointing at them stay valid. Evicted like sets, when nothing has asked for them for a while.
 	/// </summary>
-	public long KeepPassConstants( ReadOnlySpan<byte> data, int size )
+	public long KeepPassConstants( ReadOnlySpan<byte> data, int size ) => KeepPassConstantsEntry( data, size ).Offset;
+
+	internal Kept KeepPassConstantsEntry( ReadOnlySpan<byte> data, int size )
 	{
+		// Hash meaningful bytes only: explicit and implicit zero padding share one entry.
+		data = data[..(data.LastIndexOfAnyExcept( (byte)0 ) + 1)];
 		var hash = 14695981039346656037UL;
 		foreach ( var b in data ) hash = (hash ^ b) * 1099511628211UL;
 		lock ( keptConstants )
 		{
 			if ( keptConstants.TryGetValue( (hash, size), out var kept ) )
 			{
-				kept.LastUsed = Frame;
-				return kept.Offset;
+				kept.TryTouch( Frame );
+				return kept;
 			}
 
 			var offset = AllocateMaterialConstants( size, out var target );
-			target.Clear();
 			data.CopyTo( target );
-			keptConstants[(hash, size)] = new Kept { Offset = offset, LastUsed = Frame };
-			return offset;
+			target[data.Length..].Clear();
+			return keptConstants[(hash, size)] = new Kept( offset, Frame );
 		}
 	}
 
@@ -1399,7 +1456,11 @@ internal sealed class MaterialObjectCache : IDisposable
 	{
 		lock ( objects )
 		{
-			foreach ( var value in objects.Values ) value.Retire( s => Gpu.Destroy( s.Handle ), _ => { } );
+			foreach ( var value in objects.Values )
+			{
+				value.Retire( s => Gpu.Destroy( s.Handle ), _ => { } );
+				if ( value.OwnsPipeline ) Gpu.Destroy( value.Pipeline );
+			}
 			objects.Clear();
 			allObjects.Clear();
 		}
@@ -1412,6 +1473,10 @@ internal sealed class MaterialObjectCache : IDisposable
 			}
 
 			retired.Clear();
+			while ( retiredPipelines is not null && retiredPipelines.TryDequeue( out var pipeline ) )
+			{
+				Gpu.Destroy( pipeline.Pipeline );
+			}
 		}
 
 		lock ( layouts )

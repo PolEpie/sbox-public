@@ -706,15 +706,23 @@ public sealed unsafe partial class Device
 	/// </summary>
 	public SamplerHandle CreateSampler( in SamplerInfo info )
 	{
-		var sampler = MakeSampler( info, out var anisotropy, out var mipBias );
-		var (index, generation) = Samplers.Add( new SamplerRecord { Sampler = sampler, Index = Bindless.AddSampler( sampler ), Info = info, Anisotropy = anisotropy, MipBias = mipBias } );
-		var handle = new SamplerHandle( index, generation );
-		if ( info.MaxAnisotropy > 1 )
+		var gated = EnterGate();
+		try
 		{
-			lock ( anisotropicSamplers ) anisotropicSamplers.Add( handle );
-		}
+			var sampler = MakeSampler( info, out var anisotropy, out var mipBias );
+			var (index, generation) = Samplers.Add( new SamplerRecord { Sampler = sampler, Index = Bindless.AddSampler( sampler ), Info = info, Anisotropy = anisotropy, MipBias = mipBias } );
+			var handle = new SamplerHandle( index, generation );
+			if ( info.MaxAnisotropy > 1 )
+			{
+				lock ( anisotropicSamplers ) anisotropicSamplers.Add( handle );
+			}
 
-		return handle;
+			return handle;
+		}
+		finally
+		{
+			if ( gated ) ExitGate();
+		}
 	}
 
 	/// <summary>The anisotropy a sampler filters with, after the device's limit and <see cref="AnisotropyLimit"/>.</summary>
@@ -725,6 +733,8 @@ public sealed unsafe partial class Device
 
 	// Samplers made anisotropic, remade when the limit or the global mip bias changes
 	readonly HashSet<SamplerHandle> anisotropicSamplers = new();
+	float requestedAnisotropyLimit = float.MaxValue;
+	float requestedGlobalMipBias;
 
 	/// <summary>
 	/// The most anisotropy any sampler filters with: the player's setting (native's <c>r_max_anisotropy</c>), unlimited
@@ -735,14 +745,14 @@ public sealed unsafe partial class Device
 	/// <summary>
 	/// Limit every sampler's anisotropy, as native clamps each anisotropic sampler to <c>r_max_anisotropy</c>. Samplers made
 	/// anisotropic are remade in place: their handles and bindless slots stay, and the persistent sets that bind them are
-	/// rewritten. Waits for the GPU to go idle, so call it between frames, with nothing recording.
+	/// rewritten. Waits for the GPU to go idle; if the device gate is busy, retries at the next <see cref="BeginFrame"/>.
 	/// </summary>
 	public void SetAnisotropyLimit( float limit )
 	{
 		limit = Math.Max( limit, 1 );
-		if ( limit == AnisotropyLimit ) return;
-		AnisotropyLimit = limit;
-		RemakeAnisotropicSamplers( biasedOnly: false );
+		if ( limit.Equals( Volatile.Read( ref requestedAnisotropyLimit ) ) ) return;
+		Volatile.Write( ref requestedAnisotropyLimit, limit );
+		ApplySamplerSettings();
 	}
 
 	/// <summary>
@@ -756,14 +766,36 @@ public sealed unsafe partial class Device
 	/// <summary>
 	/// Set <see cref="GlobalMipBias"/>. The samplers it applies to are remade in place, as <see cref="SetAnisotropyLimit"/>
 	/// remakes them: their handles and bindless slots stay, and the persistent sets that bind them are rewritten. Waits for
-	/// the GPU to go idle when it changes, so call it between frames, with nothing recording.
+	/// the GPU to go idle; if the device gate is busy, retries at the next <see cref="BeginFrame"/>.
 	/// </summary>
 	public void SetGlobalMipBias( float bias )
 	{
 		if ( !float.IsFinite( bias ) ) bias = 0;
-		if ( bias == GlobalMipBias ) return;
-		GlobalMipBias = bias;
-		RemakeAnisotropicSamplers( biasedOnly: true );
+		if ( bias == Volatile.Read( ref requestedGlobalMipBias ) ) return;
+		Volatile.Write( ref requestedGlobalMipBias, bias );
+		ApplySamplerSettings();
+	}
+
+	void ApplySamplerSettings()
+	{
+		if ( IsLost || (Volatile.Read( ref requestedAnisotropyLimit ).Equals( AnisotropyLimit ) &&
+			Volatile.Read( ref requestedGlobalMipBias ) == GlobalMipBias) || !TryBeginMove() ) return;
+
+		try
+		{
+			var limit = Volatile.Read( ref requestedAnisotropyLimit );
+			var bias = Volatile.Read( ref requestedGlobalMipBias );
+			var limitChanged = !limit.Equals( AnisotropyLimit );
+			if ( !limitChanged && bias == GlobalMipBias ) return;
+
+			AnisotropyLimit = limit;
+			GlobalMipBias = bias;
+			RemakeAnisotropicSamplers( biasedOnly: !limitChanged );
+		}
+		finally
+		{
+			EndMove();
+		}
 	}
 
 	// Anisotropic samplers only, as native's: those are the material textures'. Vulkan adds a sampler's bias to explicit-LOD
@@ -773,13 +805,11 @@ public sealed unsafe partial class Device
 	// Every anisotropic sampler remade in place, or only those the global mip bias reaches
 	void RemakeAnisotropicSamplers( bool biasedOnly )
 	{
-		SamplerHandle[] remake;
-		lock ( anisotropicSamplers ) remake = [.. anisotropicSamplers];
-		if ( remake.Length == 0 ) return;
+		if ( anisotropicSamplers.Count == 0 ) return;
 
-		var old = new List<ulong>( remake.Length );
-		var remade = new HashSet<SamplerHandle>( remake.Length );
-		foreach ( var handle in remake )
+		var old = new List<ulong>( anisotropicSamplers.Count );
+		var remade = new HashSet<SamplerHandle>( anisotropicSamplers.Count );
+		foreach ( var handle in anisotropicSamplers )
 		{
 			ref var record = ref Get( handle );
 			if ( biasedOnly && !TakesGlobalMipBias( record.Info ) ) continue;
@@ -1365,13 +1395,21 @@ public sealed unsafe partial class Device
 	/// <summary>Destroy a sampler once the GPU is done with it.</summary>
 	public void Destroy( SamplerHandle sampler )
 	{
-		lock ( anisotropicSamplers ) anisotropicSamplers.Remove( sampler );
-		var record = Samplers.Remove( sampler.Index, sampler.Generation );
-		Defer( () =>
+		var gated = EnterGate();
+		try
 		{
-			Bindless.RemoveSampler( record.Index );
-			Vk.vkDestroySampler( Vk.Device, record.Sampler, null );
-		} );
+			lock ( anisotropicSamplers ) anisotropicSamplers.Remove( sampler );
+			var record = Samplers.Remove( sampler.Index, sampler.Generation );
+			Defer( () =>
+			{
+				Bindless.RemoveSampler( record.Index );
+				Vk.vkDestroySampler( Vk.Device, record.Sampler, null );
+			} );
+		}
+		finally
+		{
+			if ( gated ) ExitGate();
+		}
 	}
 
 	/// <summary>

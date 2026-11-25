@@ -4,6 +4,7 @@ using Borealis.Source2;
 using Borealis.Source2.Materials;
 using Borealis.Source2.Shaders;
 using Sandbox.Rendering;
+using System.Buffers;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using GpuCommandList = Borealis.Gpu.CommandList;
@@ -188,15 +189,6 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	const double SlowRenderThreadCompileMs = 20;
 	static readonly Sandbox.Diagnostics.PerformanceStats.Timings RenderThreadCompileTiming = Sandbox.Diagnostics.PerformanceStats.Timings.Get( "Borealis render thread compiles" );
 
-	/// <summary>The longest a scene's load waits for models in <see cref="WaitForContent"/>, so one that keeps asking still loads.</summary>
-	internal static double ContentWaitSeconds { get; set; } = 8;
-
-	/// <summary>
-	/// The longest it waits for textures to stream once the models are made: those follow the view, which the loading
-	/// screen's isn't always.
-	/// </summary>
-	internal static double TextureWaitSeconds { get; set; } = 3;
-
 	/// <summary>
 	/// Unseen renders of a loading scene's view so far (the bridge's, behind the loading screen): <see cref="WaitForContent"/>
 	/// lets the load finish after one more once the models are made, so the first frame after it finds its view made.
@@ -214,42 +206,47 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	/// <summary>The most frames it waits for an unseen render once the models are made (a scene with no camera has none).</summary>
 	internal static int UnseenRenderWaitFrames { get; set; } = 8;
 
+	const int ContentWaitLimitSeconds = 60;
+
 	/// <summary>
-	/// Once a scene's loading tasks are done: wait, behind the loading screen, while the game window's device still reads and
-	/// makes the models and textures the scene's frames asked for (<see cref="BackendDevice.LoadingModels"/>,
+	/// Once a scene's loading tasks are done: wait, behind the loading screen, until the game window's device has read and
+	/// made the models and textures the scene's frames asked for (<see cref="BackendDevice.LoadingModels"/>,
 	/// <see cref="BackendDevice.StreamingTextures"/>), and the shaders and pipelines its unseen renders asked for
-	/// (<see cref="BackendDevice.CompilingShaders"/>), up to <see cref="ContentWaitSeconds"/>. Native's load makes its models
-	/// before the first frame; without this a map drew its first seconds with models missing and textures at their tails, and
-	/// after an update its first frame compiled the shaders the frame draws with.
+	/// (<see cref="BackendDevice.CompilingShaders"/>), with a safety limit. Native's load makes its models before the first
+	/// frame; without this a map drew its first seconds with models missing and textures at their tails, and after an update
+	/// its first frame compiled the shaders the frame draws with.
 	/// </summary>
-	internal static async Task WaitForContent()
+	internal static async Task WaitForContent( Scene scene )
 	{
 		if ( (RenderBackend.Default as BorealisGpuRenderBackend)?.services is not { AsyncModels: true } services ) return;
 		var start = System.Diagnostics.Stopwatch.GetTimestamp();
-		double? madeAt = null;
+		var made = false;
 		var rendersAt = 0;
 		ulong madeFrame = 0;
-		while ( true )
+		while ( scene.IsValid )
 		{
-			var waited = System.Diagnostics.Stopwatch.GetElapsedTime( start ).TotalSeconds;
-			if ( waited >= ContentWaitSeconds ) break;
 			if ( services.LoadingModels || services.CompilingShaders )
 			{
-				madeAt = null;
+				made = false;
 			}
 			else
 			{
-				if ( madeAt is null )
+				if ( !made )
 				{
-					madeAt = waited;
+					made = true;
 					madeFrame = Application.FrameCount;
 					rendersAt = System.Threading.Volatile.Read( ref UnseenRenders );
 				}
 
 				// Frames, not seconds: a loading frame can take half a second
-				var since = waited - madeAt.Value;
 				var rendered = System.Threading.Volatile.Read( ref UnseenRenders ) > rendersAt || Application.FrameCount - madeFrame >= (ulong)UnseenRenderWaitFrames;
-				if ( rendered && !(services.StreamingTextures && since < TextureWaitSeconds) ) break;
+				if ( rendered && !services.StreamingTextures ) break;
+			}
+
+			if ( System.Diagnostics.Stopwatch.GetElapsedTime( start ).TotalSeconds >= ContentWaitLimitSeconds )
+			{
+				Log.Warning( $"Borealis content wait exceeded {ContentWaitLimitSeconds} seconds (LoadingModels: {services.LoadingModels}, CompilingShaders: {services.CompilingShaders}, StreamingTextures: {services.StreamingTextures})." );
+				break;
 			}
 
 			await GameTask.DelayRealtime( 10 );
@@ -1752,11 +1749,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 			if ( !(texture.Desc.IsArray || texture.Desc.IsCube) && (z != 0 || depth > 1) ) return true;
 
 			// From a worker: made with the update on the main thread, before the next block
-			if ( !ThreadSafe.IsMainThread )
-			{
-				workerUpdates.Enqueue( (texture, data.ToArray(), texture.InitialPixels, texture.InitialColor, x, y, z, width, height, depth) );
-				return true;
-			}
+			if ( !ThreadSafe.IsMainThread ) return QueueWorkerUpdate( texture, data, x, y, z, width, height, depth );
 
 			// A material's texture or the error texture has no copy of its own to write
 			TextureOf( texture );
@@ -1783,11 +1776,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 
 		// From a worker (an animated texture decodes and updates its frames on the thread pool): written at the start of the
 		// next block, so nothing records into the main thread's lists from another thread
-		if ( !ThreadSafe.IsMainThread )
-		{
-			workerUpdates.Enqueue( (texture, data[..size].ToArray(), texture.InitialPixels, texture.InitialColor, x, y, z, width, height, depth) );
-			return true;
-		}
+		if ( !ThreadSafe.IsMainThread ) return QueueWorkerUpdate( texture, data[..size], x, y, z, width, height, depth );
 
 		var from = context.LayoutOf( backing.Handle );
 		for ( int layer = 0; layer < layers; layer++ )
@@ -1800,7 +1789,15 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	}
 
 	// With what each texture was made from when the worker updated it, which the engine forgets once Update returns: UpdateKept
-	readonly System.Collections.Concurrent.ConcurrentQueue<(Texture Texture, byte[] Data, byte[] InitialPixels, Color? InitialColor, int X, int Y, int Z, int Width, int Height, int Depth)> workerUpdates = new();
+	readonly System.Collections.Concurrent.ConcurrentQueue<(Texture Texture, byte[] Data, int Size, byte[] InitialPixels, Color? InitialColor, int X, int Y, int Z, int Width, int Height, int Depth)> workerUpdates = new();
+
+	bool QueueWorkerUpdate( Texture texture, ReadOnlySpan<byte> data, int x, int y, int z, int width, int height, int depth )
+	{
+		var buffer = ArrayPool<byte>.Shared.Rent( data.Length );
+		data.CopyTo( buffer );
+		workerUpdates.Enqueue( (texture, buffer, data.Length, texture.InitialPixels, texture.InitialColor, x, y, z, width, height, depth) );
+		return true;
+	}
 
 	/// <summary>
 	/// <see cref="Update"/> of a texture with an update kept for later (made while the render thread drew, or on a worker).
@@ -1861,8 +1858,15 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	{
 		while ( workerUpdates.TryDequeue( out var update ) )
 		{
-			// Made (if it wasn't yet when the worker updated it) and written now, through the main thread's checks
-			if ( update.Texture.IsValid && !UpdateKept( update.Texture, update.Data, update.InitialPixels, update.InitialColor, update.X, update.Y, update.Z, update.Width, update.Height, update.Depth ) ) Release( update.Texture );
+			try
+			{
+				// Made (if it wasn't yet when the worker updated it) and written now, through the main thread's checks
+				if ( update.Texture.IsValid && !UpdateKept( update.Texture, update.Data.AsSpan( 0, update.Size ), update.InitialPixels, update.InitialColor, update.X, update.Y, update.Z, update.Width, update.Height, update.Depth ) ) Release( update.Texture );
+			}
+			finally
+			{
+				ArrayPool<byte>.Shared.Return( update.Data );
+			}
 		}
 	}
 
@@ -2877,7 +2881,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 		}
 
 		// Its readbacks' copies went with it: their callbacks never come, and their buffers go back as a read one's do
-		foreach ( var readback in uploadReadbacks ) (readback.ReturnTo ?? readBuffers).Enqueue( readback.Buffer );
+		foreach ( var readback in uploadReadbacks ) readback.ReturnTo.Enqueue( readback.Buffer );
 		uploadReadbacks.Clear();
 
 		if ( ReferenceEquals( lendNext, uploads ) )
@@ -3047,6 +3051,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 		StopFrameThread();
 		BorealisGpuFrameLatency.Forget( gpu );
 		Unregister( this );
+		while ( workerUpdates.TryDequeue( out var update ) ) ArrayPool<byte>.Shared.Return( update.Data );
 		if ( !lent ) list?.Discard();
 		list = null;
 		SubmitUploads();

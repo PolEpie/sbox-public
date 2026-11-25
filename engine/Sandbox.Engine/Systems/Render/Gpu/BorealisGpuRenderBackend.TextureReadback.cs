@@ -1,5 +1,6 @@
 using Borealis.Gpu;
 using System.Buffers;
+using System.Collections.Concurrent;
 using GpuFormat = Borealis.Gpu.Format;
 
 namespace Sandbox;
@@ -107,12 +108,25 @@ internal sealed partial class BorealisGpuRenderBackend
 		_ => ImageFormatOf( format ) is { } engine ? (engine, format.BytesPerBlock()) : null,
 	};
 
-	// Readback buffers of textureReadSize bytes that callbacks are done with
-	System.Collections.Concurrent.ConcurrentQueue<BufferHandle> textureReadBuffers = new();
+	// Callbacks return buffers here regardless of the capture size at completion.
+	readonly ConcurrentQueue<BufferHandle> returnedTextureReadBuffers = new();
+	readonly Queue<BufferHandle> textureReadBuffers = new();
 	int textureReadSize;
 
-	// Earlier sizes' queues, which buffers still being read return to, freed from here
-	readonly List<System.Collections.Concurrent.ConcurrentQueue<BufferHandle>> retiredReadBuffers = new();
+	void RecycleTextureReadBuffers()
+	{
+		while ( returnedTextureReadBuffers.TryDequeue( out var buffer ) )
+		{
+			if ( gpu.SizeOf( buffer ) == textureReadSize ) textureReadBuffers.Enqueue( buffer );
+			else gpu.Destroy( buffer );
+		}
+	}
+
+	void DestroyTextureReadBuffers()
+	{
+		while ( textureReadBuffers.TryDequeue( out var buffer ) ) gpu.Destroy( buffer );
+		while ( returnedTextureReadBuffers.TryDequeue( out var returned ) ) gpu.Destroy( returned );
+	}
 
 	/// <summary>
 	/// Read mip 0 of <paramref name="texture"/> back without waiting: copied to a readback buffer at this point of the block
@@ -125,18 +139,13 @@ internal sealed partial class BorealisGpuRenderBackend
 		var handle = TextureOf( texture );
 		var info = gpu.InfoOf( handle );
 		var size = info.Width * info.Height * info.Format.BytesPerBlock();
-		// A frame's worth of host memory each time: buffers of the size last read come back to be used again
-		foreach ( var retired in retiredReadBuffers )
-		{
-			while ( retired.TryDequeue( out var old ) ) gpu.Destroy( old );
-		}
 
 		if ( size != textureReadSize )
 		{
-			retiredReadBuffers.Add( textureReadBuffers );
-			textureReadBuffers = new();
+			while ( textureReadBuffers.TryDequeue( out var old ) ) gpu.Destroy( old );
 			textureReadSize = size;
 		}
+		if ( textureReadBuffers.Count == 0 ) RecycleTextureReadBuffers();
 
 		var readback = new Readback
 		{
@@ -144,7 +153,7 @@ internal sealed partial class BorealisGpuRenderBackend
 			Size = size,
 			Callback = callback,
 			Frame = gpu.FrameNumber,
-			ReturnTo = textureReadBuffers,
+			ReturnTo = returnedTextureReadBuffers,
 		};
 
 		context.CopyToBuffer( handle, readback.Buffer );

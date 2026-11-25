@@ -197,6 +197,7 @@ public sealed unsafe class CommandList
 	// Transient descriptor sets and upload memory, recycled with the frame
 	readonly List<ulong> descriptorPools = new();
 	int descriptorPool;
+	bool descriptorPoolHasSets;
 	readonly List<UploadPage> pages = new();
 	UploadPage page;
 
@@ -330,6 +331,7 @@ public sealed unsafe class CommandList
 		}
 
 		descriptorPool = 0;
+		descriptorPoolHasSets = false;
 		writtenSets.AsSpan().Clear();
 		TransientSetsWritten = 0;
 
@@ -628,8 +630,10 @@ public sealed unsafe class CommandList
 			if ( range.baseMipLevel == baseMip && range.levelCount == mips && range.baseArrayLayer == baseLayer && range.layerCount == layers && range.aspectMask == record.Aspect && pending.newLayout == barrier.OldLayout.ToVk() )
 			{
 				pending.newLayout = barrier.NewLayout.ToVk();
-				pending.dstStageMask = (ulong)barrier.DestinationStage;
-				pending.dstAccessMask = (ulong)barrier.DestinationAccess;
+				pending.srcStageMask |= (ulong)barrier.SourceStage;
+				pending.srcAccessMask |= (ulong)barrier.SourceAccess;
+				pending.dstStageMask |= (ulong)barrier.DestinationStage;
+				pending.dstAccessMask |= (ulong)barrier.DestinationAccess;
 				return;
 			}
 
@@ -699,6 +703,8 @@ public sealed unsafe class CommandList
 		both.oldLayout = pending.oldLayout;
 		both.srcStageMask |= pending.srcStageMask;
 		both.srcAccessMask |= pending.srcAccessMask;
+		both.dstStageMask |= pending.dstStageMask;
+		both.dstAccessMask |= pending.dstAccessMask;
 		imageBarriers[index] = WithMips( both, start, end );
 
 		// Below and above that only one of them moves each mip, as it would have alone
@@ -1336,10 +1342,17 @@ public sealed unsafe class CommandList
 			var allocate = new VkDescriptorSetAllocateInfo { sType = VkStructureType.DescriptorSetAllocateInfo, descriptorPool = descriptorPools[descriptorPool], descriptorSetCount = 1, pSetLayouts = &setLayout };
 			ulong set;
 			var result = vk.vkAllocateDescriptorSets( vk.Device, &allocate, &set );
-			if ( result == VkResult.Success ) return set;
-			if ( result is not (VkResult.ErrorOutOfPoolMemory or VkResult.ErrorFragmentedPool) ) result.Check( "vkAllocateDescriptorSets" );
+			if ( result == VkResult.Success )
+			{
+				descriptorPoolHasSets = true;
+				return set;
+			}
+
+			if ( !descriptorPoolHasSets || result is not (VkResult.ErrorOutOfPoolMemory or VkResult.ErrorFragmentedPool) )
+				result.Check( "vkAllocateDescriptorSets" );
 
 			descriptorPool++;
+			descriptorPoolHasSets = false;
 		}
 	}
 

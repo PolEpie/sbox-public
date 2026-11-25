@@ -17,10 +17,32 @@ namespace Borealis.Backend;
 public sealed partial class BackendDevice
 {
 	readonly ConcurrentDictionary<string, Task<ModelFile>> modelReads = new( StringComparer.OrdinalIgnoreCase );
-	readonly ConcurrentDictionary<string, MaterialFile> readMaterials = new( StringComparer.OrdinalIgnoreCase );
+	readonly ConcurrentDictionary<string, (MaterialFile File, long ReadAt)> readMaterials = new( StringComparer.OrdinalIgnoreCase );
 
 	// A texture read ahead and any image and upload buffer made for it on the worker, under loadedTextures' lock.
-	readonly Dictionary<string, (TextureFile File, Borealis.Gpu.TextureHandle Image, Borealis.Gpu.BufferHandle Staged)> readTextures = new( StringComparer.OrdinalIgnoreCase );
+	readonly Dictionary<string, (TextureFile File, Borealis.Gpu.TextureHandle Image, Borealis.Gpu.BufferHandle Staged, long ReadAt)> readTextures = new( StringComparer.OrdinalIgnoreCase );
+
+	// Keep read-ahead data through the build backlog, but not indefinitely if nothing loads its exact path.
+	const int ReadAheadSeconds = 30;
+
+	void FreeIdleReadAhead()
+	{
+		var due = Stopwatch.GetTimestamp() - ReadAheadSeconds * Stopwatch.Frequency;
+		foreach ( var entry in readMaterials )
+		{
+			if ( entry.Value.ReadAt <= due ) readMaterials.TryRemove( entry );
+		}
+
+		lock ( loadedTextures )
+		{
+			foreach ( var (path, ahead) in readTextures )
+			{
+				if ( ahead.ReadAt > due ) continue;
+				readTextures.Remove( path );
+				ReleaseAhead( ahead );
+			}
+		}
+	}
 
 	/// <summary>
 	/// A whole texture read ahead (<see cref="LoadTextureAsync"/>, a map's lightmaps, a model's texture that doesn't stream)
@@ -212,7 +234,7 @@ public sealed partial class BackendDevice
 			return made;
 		}
 
-		var read = modelReads.GetOrAdd( path, StartRead );
+		var read = ReadModel( path );
 		if ( !read.IsCompleted )
 		{
 			pending = true;
@@ -503,7 +525,7 @@ public sealed partial class BackendDevice
 			if ( loadedTextures.ContainsKey( path ) ) return LoadOnce( path, streamed: false, hold );
 		}
 
-		var read = textureReads.GetOrAdd( path, StartTextureRead );
+		var read = textureReads.GetOrAdd( path, static ( path, device ) => device.StartTextureRead( path ), this );
 		if ( !read.IsCompleted || !WithinBudget() )
 		{
 			pending = true;
@@ -540,7 +562,7 @@ public sealed partial class BackendDevice
 	public bool ModelRead( string path ) => modelReads.TryGetValue( path, out var read ) && read.IsCompleted;
 
 	/// <summary>A model's file as <see cref="LoadModelAsync"/> reads it, on a worker, shared with it: null where there's none.</summary>
-	public Task<ModelFile> ReadModel( string path ) => modelReads.GetOrAdd( path, StartRead );
+	public Task<ModelFile> ReadModel( string path ) => modelReads.GetOrAdd( path, static ( path, device ) => device.StartRead( path ), this );
 
 	Task<ModelFile> StartRead( string path )
 	{
@@ -594,7 +616,7 @@ public sealed partial class BackendDevice
 			file = read;
 		}
 
-		readMaterials.TryAdd( path, file );
+		readMaterials.TryAdd( path, (file, Stopwatch.GetTimestamp()) );
 
 		// Its shader too: the first load of one reads a large file, and a package's may recompile; and the render state its
 		// stencil check reads (a pass module's preprocessed lines)
@@ -616,7 +638,7 @@ public sealed partial class BackendDevice
 		}
 
 		using var zone = Zones.TextureRead.Start();
-		(TextureFile File, Borealis.Gpu.TextureHandle Image, Borealis.Gpu.BufferHandle Staged) ahead = default;
+		(TextureFile File, Borealis.Gpu.TextureHandle Image, Borealis.Gpu.BufferHandle Staged, long ReadAt) ahead = default;
 		try
 		{
 			// A streamed texture's tail, unless it doesn't stream; its mips pooled until Load has written them
@@ -638,6 +660,7 @@ public sealed partial class BackendDevice
 
 			lock ( loadedTextures )
 			{
+				ahead.ReadAt = Stopwatch.GetTimestamp();
 				if ( !loadedTextures.ContainsKey( path ) && readTextures.TryAdd( path, ahead ) ) ahead = default;
 			}
 		}
@@ -682,7 +705,7 @@ public sealed partial class BackendDevice
 		}
 	}
 
-	void ReleaseAhead( (TextureFile File, Borealis.Gpu.TextureHandle Image, Borealis.Gpu.BufferHandle Staged) ahead )
+	void ReleaseAhead( (TextureFile File, Borealis.Gpu.TextureHandle Image, Borealis.Gpu.BufferHandle Staged, long ReadAt) ahead )
 	{
 		if ( ahead.Image.IsValid ) Gpu.Destroy( ahead.Image );
 		if ( ahead.Staged.IsValid ) Gpu.Destroy( ahead.Staged );

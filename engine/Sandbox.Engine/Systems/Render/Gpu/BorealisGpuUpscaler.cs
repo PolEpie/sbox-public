@@ -54,6 +54,7 @@ internal sealed class BorealisGpuUpscaler : IDisposable
 	static bool settingsRead;
 	static int settingsChanges;
 	static (Mode Mode, float Scale) settings;
+	static float settingsSharpness;
 
 	static (Mode Mode, float Scale) ReadSettings()
 	{
@@ -65,6 +66,13 @@ internal sealed class BorealisGpuUpscaler : IDisposable
 			Mode.Fsr3 => QualityScale( ConVarSystem.GetInt( "r_fsr3_quality", 1, true ) ),
 			Mode.Dlss => QualityScale( ConVarSystem.GetInt( "r_dlss_quality", 1, true ) ),
 			_ => Math.Clamp( ConVarSystem.GetFloat( "r_render_scale", 1.0f, true ), 0.4f, 1.0f ),
+		};
+
+		settingsSharpness = mode switch
+		{
+			Mode.Fsr1 => Math.Clamp( ConVarSystem.GetFloat( "r_fsr_rcas_sharpness", 0.25f, true ), 0.0f, 1.0f ),
+			Mode.Fsr3 => Math.Clamp( ConVarSystem.GetFloat( "r_fsr3_sharpness", 0.5f, true ), 0.0f, 1.0f ),
+			_ => 0,
 		};
 
 		if ( mode == Mode.Off && scale < 1.0f ) mode = Mode.Stretch;
@@ -114,6 +122,7 @@ internal sealed class BorealisGpuUpscaler : IDisposable
 	TemporalUpscaler temporal;
 	CutDetector cuts;
 	bool debugReactiveMask;
+	float sharpness;
 	int jitterIndex;
 	double lastDispatch = -1;
 	bool resetHistory;
@@ -138,6 +147,7 @@ internal sealed class BorealisGpuUpscaler : IDisposable
 	{
 		this.debugReactiveMask = debugReactiveMask;
 		var (mode, scale) = allowed ? Settings() : (Mode.Off, 1.0f);
+		sharpness = allowed ? settingsSharpness : 0;
 		DisplaySize = display;
 		var render = new Vector2Int( Math.Max( 1, (int)(scale * display.x) ), Math.Max( 1, (int)(scale * display.y) ) );
 
@@ -453,7 +463,6 @@ internal sealed class BorealisGpuUpscaler : IDisposable
 		easuAttributes.Set( FsrOutputSize, fullSize );
 		easu.DispatchWithAttributes( easuAttributes, groups.x * 64, groups.y, 1 );
 
-		var sharpness = Math.Clamp( ConVarSystem.GetFloat( "r_fsr_rcas_sharpness", 0.25f, true ), 0.0f, 1.0f );
 		rcasAttributes.Set( FsrInput, intermediate );
 		rcasAttributes.Set( FsrOutput, output );
 		rcasAttributes.Set( FsrInputViewportSize, fullSize );
@@ -474,7 +483,7 @@ internal sealed class BorealisGpuUpscaler : IDisposable
 		{
 			JitterX = Jitter.x,
 			JitterY = Jitter.y,
-			Sharpness = Active == Mode.Fsr3 ? Math.Clamp( ConVarSystem.GetFloat( "r_fsr3_sharpness", 0.5f, true ), 0.0f, 1.0f ) : 0,
+			Sharpness = sharpness,
 			FrameTimeDeltaMs = delta,
 			CameraNear = zNear,
 			CameraFovVertical = verticalFov,
