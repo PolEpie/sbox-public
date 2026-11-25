@@ -370,8 +370,10 @@ public sealed unsafe partial class Device
 		doing.Dispose();
 		FrameSwitchedForTests?.Invoke();
 		doing = Enter( "BeginFrame: wait for the frame slot" );
+		var waitStart = Stopwatch.GetTimestamp();
 		graphicsQueue.Wait( frame.Graphics );
 		computeQueue.Wait( frame.Compute );
+		Interlocked.Add( ref frameSlotWaitTicks, Stopwatch.GetTimestamp() - waitStart );
 		doing.Dispose();
 		doing = Enter( "BeginFrame: recycle" );
 
@@ -399,6 +401,15 @@ public sealed unsafe partial class Device
 		recycle.Clear();
 		doing.Dispose();
 	}
+
+	long frameSlotWaitTicks;
+
+	/// <summary>
+	/// <see cref="Stopwatch"/> ticks <see cref="BeginFrame"/> has spent waiting for the GPU to finish the frame whose slot it
+	/// takes, added up: where the threads driving frames wait when the GPU is what limits the frame rate. Take the difference
+	/// over a run of frames.
+	/// </summary>
+	public long FrameSlotWaitTicks => Interlocked.Read( ref frameSlotWaitTicks );
 
 	// The frame's lists as BeginFrame recycles them, kept
 	readonly List<CommandList> recycling = new();

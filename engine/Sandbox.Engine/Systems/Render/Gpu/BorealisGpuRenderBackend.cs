@@ -476,6 +476,7 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 	{
 		// The last frame's read has finished before its slot can be begun again
 		FinishBusyRead();
+		UpdateGpuBound();
 
 		if ( busyTimer is null )
 		{
@@ -548,6 +549,48 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 
 		// Every frame while the dev tools' GPU view or a GPU counter capture (r_gpucounters) reads them
 		if ( busyReadOk ) busyReadFrom = NextBusyRead( busyReadFrame, Sandbox.Diagnostics.GpuProfilerStats.Enabled || counterTimeline is not null );
+	}
+
+	/// <summary>
+	/// Whether the GPU is what limits recent frames, as async compute needs to pay: it overlaps the GPU's work, for two more
+	/// submissions and a compute handoff on the CPU each frame (~0.03 ms in the editor on an RTX 3080). Bound once the GPU's
+	/// busy time (<see cref="GpuBusyMs"/>: every list on either queue added up, about what it takes without the overlap)
+	/// reaches 85% of the time between frames, or frame starts wait for the GPU for 10% of it (a GPU behind, vsync's pacing);
+	/// no longer once those fall below 70% and 2%. True until a frame's busy time is read, and without timestamps.
+	/// </summary>
+	internal bool GpuBound { get; private set; } = true;
+
+	long boundTicks, boundSlotWaits;
+	double boundFrameMs, boundSlotWaitShare;
+	ulong boundBusyFrame;
+
+	void UpdateGpuBound()
+	{
+		var now = System.Diagnostics.Stopwatch.GetTimestamp();
+		var waits = gpu.FrameSlotWaitTicks;
+		if ( boundTicks != 0 )
+		{
+			var ticks = now - boundTicks;
+			var ms = ticks * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+
+			// A hitch (a load, a breakpoint) says nothing about steady frames
+			if ( ms > 0 && ms < 100 )
+			{
+				var waitShare = (double)(waits - boundSlotWaits) / ticks;
+				boundFrameMs = boundFrameMs == 0 ? ms : boundFrameMs + (ms - boundFrameMs) * 0.1;
+				boundSlotWaitShare += (waitShare - boundSlotWaitShare) * 0.1;
+			}
+		}
+
+		boundTicks = now;
+		boundSlotWaits = waits;
+
+		// Decided as each busy time is read (every BusyReadFrames frames), with hysteresis on both, so frames don't keep
+		// switching between plans
+		if ( GpuBusyMs is not { } busy || GpuBusyFrame == boundBusyFrame || boundFrameMs <= 0 ) return;
+		boundBusyFrame = GpuBusyFrame;
+		var busyShare = busy / boundFrameMs;
+		GpuBound = GpuBound ? busyShare >= 0.7 || boundSlotWaitShare >= 0.02 : busyShare >= 0.85 || boundSlotWaitShare >= 0.1;
 	}
 
 	/// <summary>Frames between background saves of the pipeline cache.</summary>
