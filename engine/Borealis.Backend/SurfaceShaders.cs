@@ -290,6 +290,16 @@ public sealed class SurfaceShaders : IDisposable
 	/// </summary>
 	public bool SpecializeInBackground { get; set; } = true;
 
+	// Only the Deck and the core opaque Forward materials measured on it. Leave other adapters, shaders and passes to the
+	// driver. The opt-out lets Lab compare both sizes on the same build without changing the rest of the frame.
+	static readonly bool deckForwardWave32 = OperatingSystem.IsLinux() && Environment.GetEnvironmentVariable( "BOREALIS_DECK_FORWARD_WAVE32" ) != "0";
+
+	internal bool PreferForwardWave32( CompiledShader shader ) =>
+		deckForwardWave32 && device.Gpu.Capabilities.FragmentWave32
+		&& device.Gpu.Adapter is { VendorId: 0x1002, DeviceId: 0x163f or 0x1435 } // Steam Deck LCD and OLED
+		&& shader.Tier == ShaderTier.Surface && shader.Name is "Standard" or "Foliage" or "Blendable"
+		&& Path.GetDirectoryName( shader.Path ) == CoreShaders();
+
 	/// <summary>
 	/// Specialised pipelines made on workers at once, at most (<see cref="SpecializeInBackground"/>): a quarter of the logical
 	/// processors, one at least. Each starts once no pipeline a draw skips is pending (<see cref="Device.DeferredPipelines"/>),
@@ -877,6 +887,7 @@ public sealed class SurfaceShaders : IDisposable
 internal sealed class SurfaceProgram : IDisposable
 {
 	readonly BackendDevice device;
+	readonly bool preferForwardWave32;
 	readonly Dictionary<string, PassObjects> passes = new();
 	readonly ScenePasses depth, depthAlpha, depthTranslucent, forward, forwardAlpha, forwardTranslucent;
 
@@ -949,6 +960,7 @@ internal sealed class SurfaceProgram : IDisposable
 	{
 		this.device = device;
 		Compiled = compiled;
+		preferForwardWave32 = device.Surfaces.PreferForwardWave32( compiled );
 		LayoutHash = MaterialClassWriter.Hash( compiled.Material );
 		PlacesVertices = compiled.Generated is { } source && source.Contains( "SurfaceStageVertex", StringComparison.Ordinal );
 		Displaces = PlacesVertices || compiled.Generated is { } generated && (generated.Contains( "SurfaceVertexDisplaced", StringComparison.Ordinal ) || generated.Contains( "SurfaceOutputDisplacedWith", StringComparison.Ordinal ));
@@ -1158,7 +1170,11 @@ internal sealed class SurfaceProgram : IDisposable
 			if ( immediatePipelines.TryGetValue( key, out var made ) ) return made;
 			var info = Info( pass, layout, color, depth, samples, vertexConstants, pixelConstants, state, false, opaqueFade, false, false, stencil ) with { SkipUntilReady = false, Topology = topology };
 			if ( !ids ) info.VertexBuffers[1] = new VertexBufferLayout( 0, VertexStepRate.Instance );
-			if ( tools != ToolsPass.None ) ToolsViewStage.Apply( device.Shaders, ref info, tools, ToolsViews.ShaderColor( Compiled.Name ) );
+			if ( tools != ToolsPass.None )
+			{
+				info.FragmentWave32 = false;
+				ToolsViewStage.Apply( device.Shaders, ref info, tools, ToolsViews.ShaderColor( Compiled.Name ) );
+			}
 			using ( Zones.PipelineCreate.Start() ) made = device.Gpu.CreateGraphicsPipeline( info );
 			return immediatePipelines[key] = made;
 		}
@@ -1173,6 +1189,7 @@ internal sealed class SurfaceProgram : IDisposable
 		{
 			if ( toolsPipelines.TryGetValue( key, out var made ) ) return made;
 			var info = Info( pass, layout, color, depth, samples, vertexConstants, null, state, false, opaqueFade, depthEqual, normals, stencil );
+			info.FragmentWave32 = false;
 			ToolsViewStage.Apply( device.Shaders, ref info, tools, ToolsViews.ShaderColor( Compiled.Name ) );
 			using ( Zones.PipelineCreate.Start() ) made = device.Gpu.CreateGraphicsPipeline( info );
 			return toolsPipelines[key] = made;
@@ -1220,6 +1237,7 @@ internal sealed class SurfaceProgram : IDisposable
 						FragmentShader = pixel ? pass.Pixel : default,
 						FragmentEntry = pixel ? pass.Pass.Pixel.Entry : null,
 						FragmentConstants = pixel ? BackendContext.LikelySurfaceConstants( pass.Pass.Pixel, perPixel, device.Surfaces.SpecializationValues ) : null,
+						FragmentWave32 = preferForwardWave32 && WritesNormals( pass ),
 						Sets = pass.Sets,
 						Name = $"{Compiled.Name} {pass.Pass.Name}",
 					};
@@ -1412,6 +1430,7 @@ internal sealed class SurfaceProgram : IDisposable
 			FragmentConstants = pixel ? pixelConstants : null,
 			FragmentShader = pixel ? pass.Pixel : default,
 			FragmentEntry = pixel ? pass.Pass.Pixel.Entry : null,
+			FragmentWave32 = preferForwardWave32 && pixel && !depthOnly && !ids && !state.DrawsTranslucent && WritesNormals( pass ),
 			Sets = pass.Sets,
 			VertexBuffers = vertexCache
 				? [new( layout.Stride ), new( 4, VertexStepRate.Instance ), new( 4 ), new( 4 ), new( 0 )]

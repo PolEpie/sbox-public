@@ -577,12 +577,15 @@ public sealed unsafe partial class Device
 		return key.Key();
 	}
 
+	bool UsesFragmentWave32( in GraphicsPipelineInfo info ) => info.FragmentWave32 && Capabilities.FragmentWave32;
+
 	PartKey FragmentKey( in GraphicsPipelineInfo info, ulong layout )
 	{
 		var key = new PartKeyWriter( Vulkan.Vk.LibraryFragmentShader );
 		key.Add( ShaderHash( info.FragmentShader ) );
 		key.Add( info.FragmentShader.IsValid ? info.FragmentEntry ?? "main" : null );
 		key.Add( info.FragmentShader.IsValid ? info.FragmentConstants : null );
+		key.Add( info.FragmentShader.IsValid && UsesFragmentWave32( info ) );
 		key.Add( LayoutHash( layout ) );
 		return key.Key();
 	}
@@ -684,7 +687,20 @@ public sealed unsafe partial class Device
 			else Stage( Vulkan.Vk.StageVertex, info.VertexShader, info.VertexEntry, info.VertexConstants, stages, specializations, strings );
 		}
 
-		if ( fragmentPart && info.FragmentShader.IsValid ) Stage( Vulkan.Vk.StageFragment, info.FragmentShader, info.FragmentEntry, info.FragmentConstants, stages, specializations, strings );
+		VkPipelineShaderStageRequiredSubgroupSizeCreateInfo fragmentSubgroup;
+		if ( fragmentPart && info.FragmentShader.IsValid )
+		{
+			Stage( Vulkan.Vk.StageFragment, info.FragmentShader, info.FragmentEntry, info.FragmentConstants, stages, specializations, strings );
+			if ( UsesFragmentWave32( info ) )
+			{
+				fragmentSubgroup = new VkPipelineShaderStageRequiredSubgroupSizeCreateInfo
+				{
+					sType = VkStructureType.PipelineShaderStageRequiredSubgroupSizeCreateInfo,
+					requiredSubgroupSize = 32,
+				};
+				stages[stageCount - 1].pNext = &fragmentSubgroup;
+			}
+		}
 
 		var buffers = info.VertexBuffers ?? [];
 		var attributes = info.Attributes ?? [];

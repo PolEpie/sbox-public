@@ -313,4 +313,7 @@ public sealed class DeviceCapabilities
 	/// GPUs only have them in fragment, compute, task and mesh shaders, and reject vertex modules that use them.
 	/// </summary>
 	public bool VertexWaveOps { get; init; }
+
+	/// <summary>Whether a graphics pipeline can require 32-lane subgroups in its fragment stage.</summary>
+	public bool FragmentWave32 { get; init; }
 }
