@@ -48,6 +48,7 @@ public partial class Scene : GameObject
 			return;
 		}
 
+		var reveal = false;
 		try
 		{
 			var instance = IGameInstance.Current;
@@ -65,6 +66,11 @@ public partial class Scene : GameObject
 
 			// Remove all the tasks
 			LoadingScreen.UpdateLoadingTasks( [] );
+
+			if ( !IsValid ) return;
+
+			// The models and textures the renderer still loads in the background for what's loaded
+			if ( this is not PrefabScene ) await BorealisGpuRenderBackend.WaitForContent();
 
 			if ( !IsValid ) return;
 
@@ -88,6 +94,9 @@ public partial class Scene : GameObject
 				LoadingScreen.Subtitle = "Loading Finished..";
 			}
 
+			// Finish where the game ticks next, so its first tick and render are in the frame the loading screen goes in
+			if ( this is not PrefabScene ) await BorealisGpuRenderBackend.BeforeLoadFinishes();
+
 			if ( !IsValid ) return;
 
 			using ( Push() )
@@ -101,23 +110,23 @@ public partial class Scene : GameObject
 				// Run pending startups
 				RunPendingStarts();
 
-				if ( WantsSystemScene && this is not PrefabScene && !Application.IsUnitTest )
-				{
-					g_pRenderDevice.FlushPipelineCache();
-
-					// The previous scene's GPU memory was just freed, hand the empty blocks back
-					g_pRenderDevice.RequestGPUMemoryCompaction();
-				}
+				// Pipelines the load made go to disk: the drawing device's
+				if ( WantsSystemScene && this is not PrefabScene && !Application.IsUnitTest && RenderBackend.Default is BorealisGpuRenderBackend borealis )
+					borealis.FlushPipelineCache();
 
 				// Tell networking we've finished loading, lets players join
 				var sceneInformation = Components.Get<SceneInformation>();
 				SceneNetworkSystem.OnLoadedScene( sceneInformation?.Title );
 			}
+
+			// On Borealis.Gpu the screen stays up while the game's first frames draw behind it, the spawned player's view among them
+			reveal = this is not PrefabScene && WantsSystemScene && BorealisGpuRenderBackend.HoldsReveal;
 		}
 		finally
 		{
 			_loadingMainTask = default;
-			LoadingScreen.IsVisible = false;
+			if ( reveal ) _ = BorealisGpuRenderBackend.RevealWhenDrawn( this );
+			else LoadingScreen.IsVisible = false;
 		}
 	}
 }

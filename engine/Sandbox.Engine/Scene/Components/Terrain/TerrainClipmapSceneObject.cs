@@ -1,3 +1,4 @@
+using GpuDevice = Borealis.Gpu.Device;
 using Sandbox.Rendering;
 using static Sandbox.TerrainClipmap;
 
@@ -13,9 +14,37 @@ internal sealed class TerrainClipmapSceneObject : SceneCustomObject
 	public float HeightScale;
 
 	// A queued normal bake, run on the render thread before we draw so every pass this frame samples fresh data
-	public CommandList PendingBake;
+	public void QueueBake( CommandList bake )
+	{
+		lock ( _bakeLock )
+		{
+			_pendingBake = bake;
+			_pendingBakeEpoch = RenderSync.Overlapping && !RenderSync.OnRenderThread ? RenderSync.Epoch : -1;
+		}
+	}
 
-	private Frustum _cullFrustumLocal;
+	// The bake, and the hand-over it was queued after while a frame handed over could be drawing (else -1): that frame's
+	// drawing leaves it to the next frame, whose height map updates it reads are written once the frame is drawn
+	private CommandList _pendingBake;
+	private long _pendingBakeEpoch = -1;
+	private readonly System.Threading.Lock _bakeLock = new();
+
+	/// <summary>The queued bake the frame drawing on this thread runs, taken once; null if none, or it's the next frame's.</summary>
+	internal CommandList TakeBake()
+	{
+		lock ( _bakeLock )
+		{
+			if ( _pendingBake is null ) return null;
+			if ( _pendingBakeEpoch >= 0 && _pendingBakeEpoch == RenderSync.Epoch && RenderSync.OnRenderThread ) return null;
+
+			var bake = _pendingBake;
+			_pendingBake = null;
+			return bake;
+		}
+	}
+
+	// The view's frustum in terrain-local space, refreshed whenever the view is culled
+	private readonly Plane[] _cullPlanes = new Plane[6];
 	private Vector2 _clipCameraLocal;
 
 	// What the visible meshlets were culled for, so a view's later passes - its prepass, then its opaque pass - reuse them
@@ -23,14 +52,24 @@ internal sealed class TerrainClipmapSceneObject : SceneCustomObject
 	private (Frustum Frustum, Vector2 Camera, Transform Transform, float UnitsPerTexel, float HeightScale, int BlockSize)? _culledFor;
 	private readonly System.Threading.Lock _cullLock = new();
 
+	private Material _material;
+	private ShadowFrame[] _shadowFrames;
+
+	private struct ShadowFrame
+	{
+		public ulong Number;
+		public int Used;
+		public List<GpuBuffer<Meshlet>[]> Views;
+	}
+
 	private Tier[] _tiers = [];
 
 	private struct Tier
 	{
 		public Model Mesh;
-		public Meshlet[] Meshlets;
-		public GpuBuffer<Meshlet> FullBuffer;    // the whole layout, drawn by shadow passes
-		public GpuBuffer<Meshlet> VisibleBuffer; // frustum-culled subset, refreshed for each camera view
+		public TerrainClipmapCuller Culler; // owns the layout, in upload order
+		public GpuBuffer<Meshlet> FullBuffer;    // unchanged layout for fully visible tiers and shaders with unknown bounds
+		public GpuBuffer<Meshlet> VisibleBuffer; // camera culls
 		public Meshlet[] Visible;
 		public int VisibleCount;
 	}
@@ -39,13 +78,15 @@ internal sealed class TerrainClipmapSceneObject : SceneCustomObject
 
 	private static Tier GenerateTierMesh( Meshlet[] meshlets, int density, int blockSize, Material material )
 	{
+		var culler = new TerrainClipmapCuller( meshlets, blockSize );
+
 		var fullBuffer = new GpuBuffer<Meshlet>( meshlets.Length, GpuBuffer.UsageFlags.Structured, "TerrainMeshlets" );
-		fullBuffer.SetData( meshlets );
+		fullBuffer.SetData( culler.Meshlets );
 
 		return new Tier
 		{
 			Mesh = Model.Builder.AddMesh( BuildBlockMesh( blockSize, density, material ) ).Create(),
-			Meshlets = meshlets,
+			Culler = culler,
 			FullBuffer = fullBuffer,
 			VisibleBuffer = new GpuBuffer<Meshlet>( meshlets.Length, GpuBuffer.UsageFlags.Structured, "TerrainMeshlets" ),
 			Visible = new Meshlet[meshlets.Length],
@@ -59,6 +100,7 @@ internal sealed class TerrainClipmapSceneObject : SceneCustomObject
 	public void Build( Meshlet[] meshlets, int blockSize, int density, int displacedLevels, Material material )
 	{
 		DisposeBuffers();
+		_material = material;
 		BlockSize = blockSize;
 
 		// Two tiers: near is subdivided for displacement, far isn't. Either can be empty,
@@ -80,11 +122,12 @@ internal sealed class TerrainClipmapSceneObject : SceneCustomObject
 	internal void UpdateClipCamera( Vector3 cameraWorld )
 	{
 		var cameraLocal = Transform.PointToLocal( cameraWorld );
-		_clipCameraLocal = new Vector2( cameraLocal.x, cameraLocal.y );
-		Attributes.Set( "ClipCameraLocal", _clipCameraLocal );
+		var clipCamera = new Vector2( cameraLocal.x, cameraLocal.y );
+		lock ( _cullLock ) _clipCameraLocal = clipCamera;
+		Attributes.Set( "ClipCameraLocal", clipCamera );
 	}
 
-	private void UpdateView( Frustum frustum, Vector3 cameraWorld )
+	private Vector2 UpdateView( Frustum frustum, Vector3 cameraWorld )
 	{
 		var cameraLocal = Transform.PointToLocal( cameraWorld );
 		var clipCamera = new Vector2( cameraLocal.x, cameraLocal.y );
@@ -94,15 +137,16 @@ internal sealed class TerrainClipmapSceneObject : SceneCustomObject
 
 		lock ( _cullLock )
 		{
-			if ( _culledFor == key ) return;
+			if ( _culledFor == key ) return _clipCameraLocal;
 
-			_cullFrustumLocal = ToLocal( frustum, Transform );
+			TerrainClipmapCuller.ToLocalPlanes( frustum, Transform, _cullPlanes );
 			_clipCameraLocal = clipCamera;
 
 			foreach ( ref var tier in _tiers.AsSpan() )
 				Cull( ref tier );
 
 			_culledFor = key;
+			return _clipCameraLocal;
 		}
 	}
 
@@ -111,59 +155,109 @@ internal sealed class TerrainClipmapSceneObject : SceneCustomObject
 		base.RenderSceneObject();
 
 		// Run a queued normal bake once, before anything draws this frame
-		var bake = PendingBake;
-		PendingBake = null;
-		bake?.ExecuteOnRenderThread();
+		TakeBake()?.ExecuteOnRenderThread();
 
-		// Shadow passes need off-screen casters, so they draw the whole clipmap;
-		// camera passes draw the culled subset. Graphics.Attributes is per-pass,
-		// so these don't stomp other passes recording at the same time.
+		// Graphics.Attributes belongs to this pass. Use the same clipmap centre for both its cull and its shader.
 		bool shadow = Graphics.LayerType == SceneLayerType.Shadow;
 
-		if ( !shadow )
-			UpdateView(
+		Vector2 clipCamera;
+		if ( shadow )
+		{
+			lock ( _cullLock ) clipCamera = _clipCameraLocal;
+		}
+		else
+		{
+			clipCamera = UpdateView(
 				Graphics.Frustum.Scaled( Terrain.MeshletFrustumScale, Graphics.CameraPosition, Graphics.FieldOfView > 0.0f ),
 				Graphics.CameraPosition );
+		}
 
 		Attributes.MergeTo( Graphics.Attributes );
-		Graphics.Attributes.Set( "ClipCameraLocal", _clipCameraLocal );
+		Graphics.Attributes.Set( "ClipCameraLocal", clipCamera );
 		Graphics.Attributes.Set( "TerrainShadowPass", shadow );
+
+		// Built-in terrain shaders skip vertex displacement in shadow passes. Other shaders may move vertices
+		// outside the meshlet bounds, so their shadow passes must keep the whole layout.
+		if ( shadow && Graphics.Backend is BorealisGpuRenderBackend backend && UnitsPerTexel > 0
+			&& _material is { anonymousShader: null } material
+			&& (material.ShaderNameFromCode ?? material.ShaderName) is "shaders/terrain.shader" or "shaders/terrain_surface.shader" )
+		{
+			DrawCulledShadow( backend.Device, clipCamera );
+			return;
+		}
 
 		foreach ( ref var tier in _tiers.AsSpan() )
 		{
-			int count = shadow ? tier.Meshlets.Length : tier.VisibleCount;
+			int count = shadow ? tier.Culler.Meshlets.Length : tier.VisibleCount;
 			if ( count <= 0 ) continue;
 
-			Graphics.Attributes.Set( "TerrainMeshlets", shadow ? tier.FullBuffer : tier.VisibleBuffer );
-			Graphics.DrawModelInstanced( tier.Mesh, count );
+			DrawTier( tier.Mesh, shadow ? tier.FullBuffer : tier.VisibleBuffer, count );
 		}
+	}
+
+	private void DrawCulledShadow( GpuDevice device, Vector2 clipCamera )
+	{
+		// Shadow depth may be clamped. Only the clip-space side planes can rule out a caster.
+		Span<Plane> planes = stackalloc Plane[4];
+		TerrainClipmapCuller.ToLocalPlanes( Graphics.Frustum, Transform, planes );
+
+		Span<int> counts = stackalloc int[_tiers.Length];
+		GpuBuffer<Meshlet>[] buffers = null;
+		lock ( _cullLock )
+		{
+			for ( int i = 0; i < _tiers.Length; ++i )
+			{
+				ref readonly var tier = ref _tiers[i];
+				// The scratch array can be reused once the upload has copied its bytes into this draw's list.
+				int count = tier.Culler.Cull( planes, clipCamera, UnitsPerTexel, HeightScale, tier.Visible );
+				counts[i] = count;
+				if ( count == 0 || count == tier.Culler.Meshlets.Length ) continue;
+
+				buffers ??= AcquireShadowBuffers( device );
+				var buffer = buffers[i] ??= new GpuBuffer<Meshlet>( tier.Culler.Meshlets.Length, GpuBuffer.UsageFlags.Structured, "TerrainShadowMeshlets" );
+				buffer.SetData( tier.Visible.AsSpan( 0, count ) );
+			}
+		}
+
+		for ( int i = 0; i < _tiers.Length; ++i )
+		{
+			int count = counts[i];
+			if ( count == 0 ) continue;
+
+			ref readonly var tier = ref _tiers[i];
+			DrawTier( tier.Mesh, count == tier.Culler.Meshlets.Length ? tier.FullBuffer : buffers[i], count );
+		}
+	}
+
+	private GpuBuffer<Meshlet>[] AcquireShadowBuffers( GpuDevice device )
+	{
+		// A draw has exclusive buffers until the GPU completes its frame slot. Even identical frusta can't
+		// share a fresh upload: their command lists may execute in a different order than they were recorded.
+		_shadowFrames ??= new ShadowFrame[device.FramesInFlight];
+		ulong number = device.FrameNumber;
+		ref var frame = ref _shadowFrames[(int)(number % (ulong)_shadowFrames.Length)];
+		if ( frame.Number != number )
+		{
+			frame.Number = number;
+			frame.Used = 0;
+		}
+
+		frame.Views ??= new();
+		if ( frame.Used == frame.Views.Count )
+			frame.Views.Add( new GpuBuffer<Meshlet>[_tiers.Length] );
+
+		return frame.Views[frame.Used++];
+	}
+
+	private static void DrawTier( Model mesh, GpuBuffer<Meshlet> buffer, int count )
+	{
+		Graphics.Attributes.Set( "TerrainMeshlets", buffer );
+		Graphics.DrawModelInstanced( mesh, count );
 	}
 
 	private void Cull( ref Tier tier )
 	{
-		// Meshlets are level-ordered, so per-level constants only need recomputing when the level changes
-		int level = -1;
-		float vertexStep = 0, increment = 0;
-		Vector2 center = default;
-
-		int vis = 0;
-		for ( int i = 0; i < tier.Meshlets.Length; i++ )
-		{
-			ref readonly var m = ref tier.Meshlets[i];
-
-			if ( m.Level != level )
-			{
-				level = m.Level;
-				vertexStep = UnitsPerTexel * (1 << level);
-				increment = vertexStep * 2.0f;
-
-				// Per-level snap matching the shader's roundToIncrement, so the AABBs track the drawn geometry
-				center = _clipCameraLocal.SnapToGrid( increment );
-			}
-
-			if ( _cullFrustumLocal.IsInside( GetMeshletBounds( in m, center, vertexStep, increment ), partially: true ) )
-				tier.Visible[vis++] = m;
-		}
+		int vis = tier.Culler.Cull( _cullPlanes, _clipCameraLocal, UnitsPerTexel, HeightScale, tier.Visible );
 
 		if ( vis > 0 )
 			tier.VisibleBuffer.SetData( tier.Visible.AsSpan( 0, vis ) );
@@ -171,45 +265,27 @@ internal sealed class TerrainClipmapSceneObject : SceneCustomObject
 		tier.VisibleCount = vis;
 	}
 
-	private BBox GetMeshletBounds( in Meshlet m, Vector2 center, float vertexStep, float increment )
-	{
-		float ox = center.x + m.BlockOffset.x * vertexStep;
-		float oy = center.y + m.BlockOffset.y * vertexStep;
-		float ext = BlockSize * vertexStep;
-
-		// Grow by one snap increment so sub-cell rounding / vertex displacement never culls an on-screen block
-		return new BBox(
-			new Vector3( ox - increment, oy - increment, -increment ),
-			new Vector3( ox + ext + increment, oy + ext + increment, HeightScale + increment ) );
-	}
-
-	/// <summary>
-	/// Bring a world frustum into terrain space. Normals are left unnormalized since the box test only checks signs.
-	/// </summary>
-	internal static Frustum ToLocal( in Frustum frustum, in Transform transform )
-	{
-		var inverse = transform.Rotation.Inverse;
-		var scale = transform.Scale;
-		var position = transform.Position;
-
-		return new Frustum(
-			ToLocal( frustum.RightPlane, inverse, scale, position ), ToLocal( frustum.LeftPlane, inverse, scale, position ),
-			ToLocal( frustum.TopPlane, inverse, scale, position ), ToLocal( frustum.BottomPlane, inverse, scale, position ),
-			ToLocal( frustum.NearPlane, inverse, scale, position ), ToLocal( frustum.FarPlane, inverse, scale, position ) );
-	}
-
-	private static Plane ToLocal( in Plane plane, Rotation inverse, Vector3 scale, Vector3 position ) => new()
-	{
-		Normal = (inverse * plane.Normal) * scale,
-		Distance = plane.Distance - plane.Normal.Dot( position ),
-	};
-
 	private void DisposeBuffers()
 	{
 		foreach ( var tier in _tiers )
 		{
 			tier.FullBuffer?.Dispose();
 			tier.VisibleBuffer?.Dispose();
+		}
+
+		if ( _shadowFrames is not null )
+		{
+			foreach ( var frame in _shadowFrames )
+			{
+				if ( frame.Views is null ) continue;
+				foreach ( var buffers in frame.Views )
+				{
+					foreach ( var buffer in buffers )
+						buffer?.Dispose();
+				}
+			}
+
+			_shadowFrames = null;
 		}
 
 		_tiers = [];
