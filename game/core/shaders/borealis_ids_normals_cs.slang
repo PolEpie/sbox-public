@@ -112,6 +112,7 @@ float4 Resolve( uint2 vPixel, uint2 vId, float flDepth )
 	// bind pose this reads, so they're left to depth
 	ByteAddressBuffer chunk = g_bindless_VertexBuffers[ NonUniformResourceIndex( nChunk ) ];
 	uint2 vInstance = chunk.Load2( nInstance * 8 );
+	vInstance.x &= 0xffffffu; // the top byte is a LOD fade's (borealis_lod_fade.fxc)
 	uint nBase = chunk.Load( vCall.w + nInstance * 4 );
 	if ( nBase == None || g_TransformData[ vInstance.x ].m_nBlendWeightCount > 0 )
 		return 0;

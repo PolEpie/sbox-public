@@ -376,10 +376,10 @@ internal sealed class GpuDrivenTables : IDisposable
 		lock ( pagesLock )
 		{
 			var room = LevelRoom > 0 ? ((long)(rangeBytes * (double)LevelRoom) + 15) & ~15L : 0;
-			indexPages.TryGetValue( format, out var page );
-			page = Place( ref page, data.Length, IndexPageSize, BufferUsage.Index | BufferUsage.Storage, $"Borealis index page {format}", room );
+			indexPages.TryGetValue( format, out var current );
+			var page = Place( ref current, data.Length, IndexPageSize, BufferUsage.Index | BufferUsage.Storage, $"Borealis index page {format}", room );
 			page.Reserved += room;
-			indexPages[format] = page;
+			if ( ReferenceEquals( page, current ) ) indexPages[format] = current;
 			indexPagesBySlot[page.Slot] = page;
 			var offset = page.Used;
 			if ( data.Length > 0 ) gpu.WriteBuffer( page.Buffer, data, offset );
@@ -1499,6 +1499,17 @@ internal sealed class GpuDrivenTables : IDisposable
 	/// <summary>Turns of its frame slot a frame chunk past a slot's first can go unused before it's freed (a map's busy frames grew them).</summary>
 	internal const int IdleChunkTurns = 200;
 
+	/// <summary>
+	/// Turns a cull region chunk bigger than <see cref="ChunkBytes"/> (made for one cull's region) goes unused before it's
+	/// freed: a cull that outgrew it took a bigger one (a map loading grows them frame by frame), and held for
+	/// <see cref="IdleChunkTurns"/> the ones it outgrew took gigabytes of video memory, which pushed the map's own textures
+	/// and geometry to system memory.
+	/// </summary>
+	const int IdleLargeCullChunkTurns = 2;
+
+	/// <summary>Bytes of a frame chunk, unless one allocation needs more.</summary>
+	const long ChunkBytes = 4L << 20;
+
 	/// <summary>Frame chunks there are, for tests.</summary>
 	internal int FrameChunks
 	{
@@ -1600,7 +1611,9 @@ internal sealed class GpuDrivenTables : IDisposable
 				var chunk = chunks[i];
 				chunk.IdleTurns = chunk.Used == 0 ? chunk.IdleTurns + 1 : 0;
 				chunk.Used = 0;
-				if ( (i == 0 && keepFirst) || chunk.IdleTurns <= IdleChunkTurns ) continue;
+				if ( i == 0 && keepFirst ) continue;
+				var idleTurns = !keepFirst && chunk.Size > ChunkBytes ? IdleLargeCullChunkTurns : IdleChunkTurns;
+				if ( chunk.IdleTurns <= idleTurns ) continue;
 
 				// The frame that last used it is done; its buffer goes once the GPU is done like anything destroyed.
 				chunks.RemoveAt( i );
@@ -1645,7 +1658,7 @@ internal sealed class GpuDrivenTables : IDisposable
 
 			if ( found is null )
 			{
-				var size = Math.Max( 4L << 20, aligned );
+				var size = Math.Max( ChunkBytes, aligned );
 				var buffer = gpu.CreateBuffer( new BufferInfo { Size = size, Usage = BufferUsage.Storage | BufferUsage.Indirect, Memory = memory, Name = memory == MemoryLocation.Upload ? "Borealis GPU-driven frame" : "Borealis GPU-driven cull regions" } );
 				lock ( pagesLock ) owned.Add( buffer );
 				found = new Chunk { Buffer = buffer, Slot = gpu.BindlessIndex( buffer ), Size = size };

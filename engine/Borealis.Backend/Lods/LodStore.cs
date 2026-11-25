@@ -137,7 +137,9 @@ internal sealed class LodStore : IDisposable
 	/// and its slot may name another page later), with their levels; false while one is being built or waits to be placed,
 	/// to be asked again next frame. Their draws' LOD records are cleared at the next frame's start, before any record made
 	/// over one of their slots (<see cref="GpuDrivenTables"/> reuses them) is written: it reads no levels until its own
-	/// range's are published, rather than the freed range's levels' draw records.
+	/// range's are published, rather than the freed range's levels' draw records. A range built but asked for only by depth
+	/// passes is never placed (no colour pass draws it: <see cref="Request"/>), so it's dropped with its staging rather than
+	/// waited for.
 	/// </summary>
 	public bool TryForgetPage( int slot )
 	{
@@ -145,7 +147,16 @@ internal sealed class LodStore : IDisposable
 		{
 			foreach ( var (range, entry) in entries )
 			{
-				if ( range.PageSlot == slot && entry.State is Phase.Building or Phase.Built ) return false;
+				if ( range.PageSlot == slot && (entry.State is Phase.Building || entry.State is Phase.Built && entry.Color) ) return false;
+			}
+
+			for ( int i = ready.Count - 1; i >= 0; i-- )
+			{
+				var entry = ready[i];
+				if ( entry.Range.PageSlot != slot ) continue;
+				if ( entry.Staging.IsValid ) gpu.Destroy( entry.Staging );
+				entry.Staging = default;
+				ready.RemoveAt( i );
 			}
 
 			foreach ( var range in entries.Keys.Where( r => r.PageSlot == slot ).ToList() )
