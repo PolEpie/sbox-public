@@ -19,17 +19,45 @@ class ClutterLayer
 	private Dictionary<Vector2Int, List<ClutterInstance>> ModelInstancesByTile { get; } = [];
 
 	/// <summary>
-	/// Batches organized by model. LOD is computed on the GPU per view, so batches are keyed by model.
+	/// Batches organized by model. The engine picks LODs per instance and view, so batches are keyed by model.
 	/// </summary>
 	private readonly record struct ClutterBatchKey( Model Model, bool CastShadows );
 
-	private readonly Dictionary<ClutterBatchKey, ClutterBatchSceneObject> _batches = [];
+	/// <summary>
+	/// One <see cref="SceneModelInstances"/> per model across every tile: the engine multi-draws one object's instances
+	/// together, so an object per tile would make a draw per tile.
+	/// </summary>
+	private readonly Dictionary<ClutterBatchKey, SceneModelInstances> _batches = [];
 
-	private readonly Dictionary<Vector2Int, Dictionary<ClutterBatchKey, ClutterBatchSceneObject.PreparedInstances>> _preparedTiles = [];
-	private readonly Dictionary<ClutterBatchKey, List<ClutterBatchSceneObject.PreparedInstances>> _instancesByModel = [];
+	private readonly Dictionary<Vector2Int, Dictionary<ClutterBatchKey, PreparedInstances>> _preparedTiles = [];
+	private readonly Dictionary<ClutterBatchKey, List<PreparedInstances>> _instancesByModel = [];
 	private readonly HashSet<Vector2Int> _renderDirtyTiles = [];
 	private readonly HashSet<ClutterBatchKey> _changedModels = [];
-	private readonly List<ClutterBatchSceneObject.PreparedInstances> _retiredPrepared = [];
+	private readonly List<PreparedInstances> _retiredPrepared = [];
+
+	// A model's instances from every tile, gathered for SetInstances, which copies them.
+	private Transform[] _gathered = [];
+
+	/// <summary>
+	/// One tile's instances of one model. The pooled buffer returns once the tile leaves its batch.
+	/// </summary>
+	private sealed class PreparedInstances : IDisposable
+	{
+		public Transform[] Transforms { get; }
+		public int Count { get; }
+
+		private int _next;
+
+		public PreparedInstances( int count )
+		{
+			Count = count;
+			Transforms = System.Buffers.ArrayPool<Transform>.Shared.Rent( count );
+		}
+
+		public void Add( Transform transform ) => Transforms[_next++] = transform;
+
+		public void Dispose() => System.Buffers.ArrayPool<Transform>.Shared.Return( Transforms );
+	}
 
 	private readonly HashSet<Vector2Int> _activeCoords = [];
 	private readonly List<Vector2Int> _coordsToRemove = [];
@@ -320,9 +348,9 @@ class ClutterLayer
 				countsByModel[key] = count + 1;
 			}
 
-			var prepared = new Dictionary<ClutterBatchKey, ClutterBatchSceneObject.PreparedInstances>( countsByModel.Count );
+			var prepared = new Dictionary<ClutterBatchKey, PreparedInstances>( countsByModel.Count );
 			foreach ( var (key, count) in countsByModel )
-				prepared[key] = new ClutterBatchSceneObject.PreparedInstances( key.Model, count );
+				prepared[key] = new PreparedInstances( count );
 
 			foreach ( var instance in instances )
 			{
@@ -363,14 +391,29 @@ class ClutterLayer
 
 			if ( !_batches.TryGetValue( key, out var batch ) )
 			{
-				batch = new ClutterBatchSceneObject( scene.SceneWorld, key.Model, key.CastShadows );
+				batch = new SceneModelInstances( scene.SceneWorld, key.Model );
+				batch.Flags.CastShadows = key.CastShadows;
 				_batches[key] = batch;
 			}
 
-			batch.SetInstances( tiles );
+			int total = 0;
+			foreach ( var tile in tiles )
+				total += tile.Count;
+
+			if ( _gathered.Length < total )
+				_gathered = new Transform[Math.Max( total, _gathered.Length * 2 )];
+
+			int at = 0;
+			foreach ( var tile in tiles )
+			{
+				tile.Transforms.AsSpan( 0, tile.Count ).CopyTo( _gathered.AsSpan( at ) );
+				at += tile.Count;
+			}
+
+			batch.SetInstances( _gathered.AsSpan( 0, total ) );
 		}
 
-		// Batches must release the old tile references before their buffers can be reused.
+		// The batches copied the transforms, so the buffers can be reused.
 		foreach ( var tile in _retiredPrepared )
 			tile.Dispose();
 
