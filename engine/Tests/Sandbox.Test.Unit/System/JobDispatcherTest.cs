@@ -12,6 +12,51 @@ public class JobDispatcherTest
 	// Workers only take part when there are some and parallelism isn't capped at 1 (SBOX_MAX_PARALLELISM)
 	static bool Parallel => JobDispatcher.Workers.Count > 0 && JobDispatcher.MaxDegreeOfParallelism > 1;
 
+	/// <summary>
+	/// A caller whose synchronization context hears of its waits (the main thread's) joins without it: the context hears of no
+	/// wait (it would run queued work mid-batch) and nothing is allocated (the runtime allocates a handle array for each wait
+	/// it forwards to a context).
+	/// </summary>
+	[TestMethod]
+	[TestCategory( Allocations.Category )]
+	[DoNotParallelize]
+	public void JoiningUnderAWaitNotifiedContextAllocatesNothing()
+	{
+		if ( !Parallel ) Assert.Inconclusive( "No workers to wait for." );
+
+		var previous = SynchronizationContext.Current;
+		var context = new WaitNotifiedContext();
+		SynchronizationContext.SetSynchronizationContext( context );
+		try
+		{
+			// Items a worker takes are slow and the caller's are quick, so the caller always runs out of its own and waits for a
+			// worker's, however late the workers wake (there are enough items for the caller to still be busy when they do)
+			callerThread = Environment.CurrentManagedThreadId;
+			var items = JobDispatcher.Workers.Count * 4 + 1;
+			Allocations.AssertSettles( "a join that waits", () => JobDispatcher.For( items, 0, static ( _, _ ) => Thread.Sleep( Environment.CurrentManagedThreadId == callerThread ? 1 : 20 ), itemsPerBatch: 1 ) );
+			Assert.AreEqual( 0, context.Waits, "the caller's context heard of a wait while joining" );
+		}
+		finally
+		{
+			SynchronizationContext.SetSynchronizationContext( previous );
+		}
+	}
+
+	static int callerThread;
+
+	sealed class WaitNotifiedContext : SynchronizationContext
+	{
+		public int Waits;
+
+		public WaitNotifiedContext() => SetWaitNotificationRequired();
+
+		public override int Wait( IntPtr[] waitHandles, bool waitAll, int millisecondsTimeout )
+		{
+			Waits++;
+			return base.Wait( waitHandles, waitAll, millisecondsTimeout );
+		}
+	}
+
 	[TestMethod]
 	public void RunsEveryItemOnce()
 	{
@@ -141,6 +186,48 @@ public class JobDispatcherTest
 			if ( Parallel ) SpinWait.SpinUntil( () => Volatile.Read( ref ran ) > 0, 5000 );
 			handle.Join();
 			Assert.IsTrue( seen.All( x => x == value ), $"run {value}" );
+		}
+
+		if ( Parallel ) Assert.IsTrue( threads.Any( x => x != Environment.CurrentManagedThreadId ), "Workers took part" );
+	}
+
+	static float tiny = 1.5e-38f;
+	static float half = 0.75f;
+
+	/// <summary>
+	/// A product that comes out denormal is flushed to zero by a caller in the engine's floating-point mode (the main
+	/// thread's) and by every worker running its jobs, and kept by all of them in the runtime's default mode.
+	/// </summary>
+	[TestMethod]
+	[DoNotParallelize]
+	public void WorkersUseTheCallersFloatingPointMode()
+	{
+		if ( !OperatingSystem.IsWindows() ) Assert.Inconclusive( "The mode is only carried over on Windows." );
+
+		var previous = FloatingPointMode.Current;
+		var results = new int[512];
+		var threads = new int[512];
+		try
+		{
+			foreach ( var mode in new[] { FloatingPointMode.FlushDenormals, 0u, FloatingPointMode.FlushDenormals } )
+			{
+				FloatingPointMode.Set( mode );
+				var expected = BitConverter.SingleToInt32Bits( tiny * half );
+				Assert.AreEqual( mode == 0, expected != 0, "the caller's own product" );
+
+				JobDispatcher.For( results.Length, 0, ( _, i ) =>
+				{
+					Thread.SpinWait( 200 );
+					results[i] = BitConverter.SingleToInt32Bits( tiny * half );
+					threads[i] = Environment.CurrentManagedThreadId;
+				}, itemsPerBatch: 1 );
+
+				Assert.IsTrue( results.All( x => x == expected ), $"mode {mode:X8}: {results.Count( x => x != expected )} jobs differ" );
+			}
+		}
+		finally
+		{
+			FloatingPointMode.Set( previous );
 		}
 
 		if ( Parallel ) Assert.IsTrue( threads.Any( x => x != Environment.CurrentManagedThreadId ), "Workers took part" );
@@ -348,6 +435,29 @@ public class JobDispatcherTest
 		finally
 		{
 			SynchronizationContext.SetSynchronizationContext( previous );
+		}
+	}
+
+	/// <summary>
+	/// The caller wakes only a couple of workers itself and those wake the rest, so every worker still joins in: items that
+	/// each wait for all of the threads to be in at once only finish if they are.
+	/// </summary>
+	[TestMethod]
+	public void WokenWorkersWakeTheRest()
+	{
+		var threads = Math.Min( JobDispatcher.Workers.Count + 1, JobDispatcher.MaxDegreeOfParallelism );
+		if ( threads <= JobDispatcher.Workers.CallerWakes + 1 ) Assert.Inconclusive( "Too few workers to need waking in turn." );
+
+		for ( int run = 0; run < 20; run++ )
+		{
+			using var barrier = new Barrier( threads );
+			var met = 0;
+			JobDispatcher.For( threads, barrier, ( b, i ) =>
+			{
+				if ( b.SignalAndWait( 10_000 ) ) Interlocked.Increment( ref met );
+			}, itemsPerBatch: 1, maxDegreeOfParallelism: threads );
+
+			Assert.AreEqual( threads, met, $"run {run}: {threads} threads didn't all take part" );
 		}
 	}
 

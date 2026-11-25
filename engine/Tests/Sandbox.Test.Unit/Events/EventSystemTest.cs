@@ -119,6 +119,145 @@ public class EventSystemTest
 		Console.WriteLine( $"Collected after {attempts} attempt(s)" );
 	}
 
+	/// <summary>
+	/// Attributed handlers run whether static, on an instance, private on a base class, or taking arguments.
+	/// </summary>
+	[TestMethod]
+	public void AttributedHandlersRun()
+	{
+		using var system = CreateEventSystem();
+		system.RegisterAssembly( typeof( AttributedHandler ).Assembly );
+
+		var handler = new AttributedHandler();
+		system.Register( handler );
+		AttributedHandler.StaticCalls = 0;
+
+		system.Run( "eventsystemtest.static" );
+		system.Run( "eventsystemtest.instance" );
+		system.Run( "eventsystemtest.base" );
+		system.Run( "eventsystemtest.argument", 5 );
+
+		Assert.AreEqual( 1, AttributedHandler.StaticCalls );
+		Assert.AreEqual( 1, handler.InstanceCalls );
+		Assert.AreEqual( 1, handler.BaseCalls );
+		Assert.AreEqual( 5, handler.Argument );
+	}
+
+	/// <summary>
+	/// A handler's exception is reported as itself, not as the exception inside it.
+	/// </summary>
+	[TestMethod]
+	public void HandlerExceptionIsReportedAsItself()
+	{
+		using var system = CreateEventSystem();
+		system.RegisterAssembly( typeof( AttributedHandler ).Assembly );
+		system.Register( new AttributedHandler() );
+
+		var thrown = Assert.ThrowsException<System.Reflection.TargetInvocationException>( () => system.GetGroup( "eventsystemtest.throws", false ).Run( "eventsystemtest.throws" ) );
+
+		Assert.IsInstanceOfType<InvalidOperationException>( thrown.InnerException );
+		Assert.AreEqual( "handler", thrown.InnerException.Message );
+	}
+
+	/// <summary>
+	/// An instance handler runs for its type's targets only: none before one registers, again once it does, not after the last
+	/// unregisters, and again when one registers anew (the event list keeps which of its actions have targets).
+	/// </summary>
+	[TestMethod]
+	public void InstanceHandlersRunWhileTheirTypeHasTargets()
+	{
+		using var system = CreateEventSystem();
+		system.RegisterAssembly( typeof( AttributedHandler ).Assembly );
+		var first = new AttributedHandler();
+		var second = new AttributedHandler();
+
+		system.Run( "eventsystemtest.instance" );
+
+		system.Register( first );
+		system.Run( "eventsystemtest.instance" );
+		Assert.AreEqual( 1, first.InstanceCalls );
+
+		system.Register( second );
+		system.Unregister( first );
+		system.Run( "eventsystemtest.instance" );
+		Assert.AreEqual( 1, first.InstanceCalls );
+		Assert.AreEqual( 1, second.InstanceCalls );
+
+		system.Unregister( second );
+		system.Run( "eventsystemtest.instance" );
+		Assert.AreEqual( 1, second.InstanceCalls );
+
+		system.Register( first );
+		system.Run( "eventsystemtest.instance" );
+		Assert.AreEqual( 2, first.InstanceCalls );
+		Assert.AreEqual( 1, second.InstanceCalls );
+	}
+
+	/// <summary>
+	/// Handlers run in the event list's priority order (the lower priority first), whichever of their types got a target first.
+	/// </summary>
+	[TestMethod]
+	public void HandlersRunInPriorityOrderWhicheverGotTargetsFirst()
+	{
+		using var system = CreateEventSystem();
+		system.RegisterAssembly( typeof( AttributedHandler ).Assembly );
+		PriorityHandler.Order.Clear();
+
+		var low = new LowPriorityHandler();
+		var high = new HighPriorityHandler();
+
+		system.Register( low );
+		system.Run( "eventsystemtest.priority" );
+		system.Register( high );
+		system.Run( "eventsystemtest.priority" );
+
+		CollectionAssert.AreEqual( new[] { "low", "low", "high" }, PriorityHandler.Order );
+	}
+
+	private class PriorityHandler
+	{
+		public static readonly System.Collections.Generic.List<string> Order = new();
+	}
+
+	private sealed class LowPriorityHandler : PriorityHandler
+	{
+		[Event( "eventsystemtest.priority", Priority = 1 )]
+		public void OnPriority() => Order.Add( "low" );
+	}
+
+	private sealed class HighPriorityHandler : PriorityHandler
+	{
+		[Event( "eventsystemtest.priority", Priority = 10 )]
+		public void OnPriority() => Order.Add( "high" );
+	}
+
+	private class AttributedHandlerBase
+	{
+		public int BaseCalls;
+
+		[Event( "eventsystemtest.base" )]
+		void OnBase() => BaseCalls++;
+	}
+
+	private sealed class AttributedHandler : AttributedHandlerBase
+	{
+		public static int StaticCalls;
+		public int InstanceCalls;
+		public int Argument;
+
+		[Event( "eventsystemtest.static" )]
+		static void OnStatic() => StaticCalls++;
+
+		[Event( "eventsystemtest.instance" )]
+		public void OnInstance() => InstanceCalls++;
+
+		[Event( "eventsystemtest.argument" )]
+		public void OnArgument( int value ) => Argument = value;
+
+		[Event( "eventsystemtest.throws" )]
+		public void OnThrows() => throw new InvalidOperationException( "handler", new FormatException( "inner" ) );
+	}
+
 	private interface IEventInterface
 	{
 		void EventMethod();
