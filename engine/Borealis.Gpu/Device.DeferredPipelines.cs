@@ -374,7 +374,7 @@ public sealed unsafe partial class Device
 		var started = System.Diagnostics.Stopwatch.GetTimestamp();
 		try
 		{
-			using ( Zone( ZonePipeline ) ) pipeline = MakeCompute( info, PipelineLayout( info.Sets ) );
+			using ( Zone( ZonePipeline ) ) pipeline = MakeCompute( info, PipelineLayout( info.Sets, graphics: false ) );
 			Interlocked.Add( ref computeTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started );
 			Interlocked.Increment( ref computeMade );
 		}
