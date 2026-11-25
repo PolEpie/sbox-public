@@ -116,7 +116,7 @@ public sealed class ShaderLibrary : IDisposable
 			var (shader, found) = load.Value;
 			lock ( files )
 			{
-				if ( found ) files[key] = shader;
+				if ( found && !files.TryAdd( key, shader ) ) shader = files[key];
 			}
 
 			MakeRecordedModules( shader );
@@ -475,6 +475,11 @@ public sealed class ShaderLibrary : IDisposable
 		lock ( gpuDrivenPending ) return shader is not null && gpuDrivenPending.Contains( shader );
 	}
 
+	/// <summary>Raised each time a GPU-driven variant compiled in the background finishes, made or failed (<see cref="GpuDrivenPending"/>).</summary>
+	public int GpuDrivenReadyVersion => System.Threading.Volatile.Read( ref gpuDrivenReadyVersion );
+
+	int gpuDrivenReadyVersion;
+
 	/// <summary>
 	/// The cached compiled variant of a shader with none beside it, in <paramref name="path"/> (null when it can't be
 	/// had); false while it's compiling.
@@ -541,6 +546,7 @@ public sealed class ShaderLibrary : IDisposable
 			}
 
 			lock ( gpuDrivenPending ) gpuDrivenCompiled.Add( shader );
+			System.Threading.Interlocked.Increment( ref gpuDrivenReadyVersion );
 		} );
 
 		path = null;
