@@ -19,17 +19,17 @@ namespace Editor;
 [ResourceIdentity( "vmat" )]
 internal class SlangMaterialCompiler : ResourceCompiler
 {
-	protected override Task<bool> Compile()
+	protected override async Task<bool> Compile()
 	{
 		var bytes = Context.ReadSource();
-		if ( bytes is null ) return Task.FromResult( false );
+		if ( bytes is null ) return false;
 
 		var material = VmatSource.Parse( System.Text.Encoding.UTF8.GetString( bytes ) );
 		var shader = MaterialCompile.ShaderName( material.Shader );
-		if ( shader is null ) return Task.FromResult( false );
+		if ( shader is null ) return false;
 
 		var roots = Roots();
-		if ( ModuleOnly( shader, roots ) is not var (modulePath, standsFor) ) return Task.FromResult( false );
+		if ( ModuleOnly( shader, roots ) is not var (modulePath, standsFor) ) return false;
 
 		// A name standing for another shader (complex for standard) compiles as that one's material
 		shader = standsFor;
@@ -41,7 +41,7 @@ internal class SlangMaterialCompiler : ResourceCompiler
 		var compiled = MaterialCompile.Compile( material, relative, shader, inputs, file => roots.Exists( r => File.Exists( Path.Combine( r, file ) ) ), file => ImageSize( file, roots ) );
 
 		foreach ( var prerequisite in compiled.Prerequisites ) Context.AddCompiledReference( prerequisite );
-		if ( Context.Describing ) return Task.FromResult( true );
+		if ( Context.Describing ) return true;
 
 		// A compiled texture the material names must be in the game tree by now (built first, as a prerequisite), as the
 		// native compiler requires: a material pointing at one that isn't fails rather than compiling without it
@@ -51,18 +51,20 @@ internal class SlangMaterialCompiler : ResourceCompiler
 			if ( roots.Exists( r => File.Exists( Path.Combine( r, file ) ) ) || FileSystem.Mounted?.FileExists( file ) == true ) continue;
 
 			Context.Fail( $"Cannot find compiled texture \"{file}\" in the game tree" );
-			return Task.FromResult( true );
+			return true;
 		}
 
+		// Awaited, not blocked on: in a build job the textures encode on the job's thread (ContentCompilerHost.CompileChild),
+		// leaving the main thread to the other jobs
 		var root = roots[0];
 		foreach ( var texture in compiled.Generated )
 		{
 			var child = Context.CreateChild( Path.Combine( root, texture.Path ) );
 			child.SetInputData( texture.Definition );
-			if ( !child.Compile() )
+			if ( !await child.CompileAsync() )
 			{
 				Context.Fail( $"Couldn't compile {texture.Path} for {shader}" );
-				return Task.FromResult( true );
+				return true;
 			}
 		}
 
@@ -72,7 +74,7 @@ internal class SlangMaterialCompiler : ResourceCompiler
 		if ( data is null )
 		{
 			Context.Fail( $"Couldn't write the material's data for {shader}" );
-			return Task.FromResult( true );
+			return true;
 		}
 
 		// The shader's vertex inputs, which the model compiler lays out the meshes of models using the material by (as the
@@ -81,7 +83,7 @@ internal class SlangMaterialCompiler : ResourceCompiler
 
 		Context.ResourceVersion = 1; // VMAT_RESOURCE_VERSION_KV3
 		Context.Data.Write( data );
-		return Task.FromResult( true );
+		return true;
 	}
 
 	/// <summary>The folders a material's files are looked for in: its own content folder first, then the engine's core.</summary>
