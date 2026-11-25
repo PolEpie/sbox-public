@@ -130,10 +130,16 @@ internal sealed class BorealisGpuFrame : IDisposable
 
 	/// <summary>
 	/// The view's depth chain (<c>DepthChainDownsample</c>, which <c>Depth::Get</c> reads): the min and max of the frame's
-	/// depth, mipped, built by <see cref="Begin()"/> (and from the upscaled depth by <see cref="Upscaled"/>). Null for a frame
-	/// with no depth.
+	/// depth, mipped. Borealis's, built after its depth prepass, where it made one the depth's size (as native's post
+	/// processing reads its DepthDownsampleLayer's); else built by <see cref="Begin()"/>; from the upscaled depth by
+	/// <see cref="Upscaled"/>. Null for a frame with no depth.
 	/// </summary>
 	public Texture DepthChain => upscaled ? upscaledChain : sceneChain;
+
+	// Borealis's depth chain this frame (RenderSystem.DepthChain) and its engine texture once Begin took it, and the one Begin
+	// builds without it
+	BackendTexture adoptedChain;
+	Texture adoptedChainTexture, builtChain;
 
 	/// <summary>
 	/// The view constants the frame draws with, as <c>PerViewConstantBuffer_t</c>'s bytes: the upscaled ones once
@@ -157,10 +163,10 @@ internal sealed class BorealisGpuFrame : IDisposable
 
 	/// <summary>
 	/// Take a frame Borealis rendered into <paramref name="target"/> on the backend's device, with the view constants it drew
-	/// with, the bloom objects it drew (<see cref="RenderSystem.BloomObjects"/>) and the overlays' reactive depth
-	/// (<see cref="RenderSystem.ReactiveDepth"/>), if any.
+	/// with, the bloom objects it drew (<see cref="RenderSystem.BloomObjects"/>), the overlays' reactive depth
+	/// (<see cref="RenderSystem.ReactiveDepth"/>) and the depth chain it built (<see cref="RenderSystem.DepthChain"/>), if any.
 	/// </summary>
-	public void Adopt( ViewTarget target, in GpuViewConstants viewConstants, GpuTexture bloom = null, GpuTexture reactive = null )
+	public void Adopt( ViewTarget target, in GpuViewConstants viewConstants, GpuTexture bloom = null, GpuTexture reactive = null, GpuTexture depthChain = null )
 	{
 		this.target = target;
 		var color = target.Resolved ?? target.Color;
@@ -175,6 +181,11 @@ internal sealed class BorealisGpuFrame : IDisposable
 		if ( reactiveDepth is not null && !ReferenceEquals( reactiveDepth, reactive ) && reactiveDepth.IsValid ) backend.ForgetBorrowed( reactiveDepth.Handle );
 		reactiveDepth = reactive as BackendTexture;
 		ReactiveDepth = reactiveDepth is null ? null : FrameTexture( null, reactiveDepth, new Vector2Int( reactiveDepth.Width, reactiveDepth.Height ), ImageFormat.D32, depth: true );
+
+		if ( adoptedChainTexture is not null && adoptedChain.IsValid ) backend.ForgetBorrowed( adoptedChain.Handle );
+		adoptedChainTexture = null;
+		adoptedChain = depthChain as BackendTexture;
+		sceneChain = null;
 
 		if ( constants.Length != System.Runtime.CompilerServices.Unsafe.SizeOf<GpuViewConstants>() ) constants = new byte[System.Runtime.CompilerServices.Unsafe.SizeOf<GpuViewConstants>()];
 		System.Runtime.InteropServices.MemoryMarshal.Write( constants, in viewConstants );
@@ -583,10 +594,20 @@ internal sealed class BorealisGpuFrame : IDisposable
 			var attributes = Graphics.Attributes;
 			attributes.SetDataShared( ViewConstantsName, constants );
 
-			// What reads the view's depth through Depth::Get; the previous frame's aliases it, as Borealis's does
+			// What reads the view's depth through Depth::Get; the previous frame's aliases it, as Borealis's does. Borealis's own
+			// chain where it built one this size, else built from the frame's depth
 			if ( Depth is not null )
 			{
-				backend.BuildDepthChain( Depth, sceneChain = Chain( sceneChain, Depth.Width, Depth.Height ) );
+				if ( adoptedChain is { IsValid: true } chain && chain.Width == Depth.Width && chain.Height == Depth.Height )
+				{
+					sceneChain = adoptedChainTexture = FrameTexture( null, chain, new Vector2Int( chain.Width, chain.Height ), ImageFormat.RG3232F, depth: false );
+				}
+				else
+				{
+					backend.BuildDepthChain( Depth, builtChain = Chain( builtChain, Depth.Width, Depth.Height ) );
+					sceneChain = builtChain;
+				}
+
 				attributes.Set( DepthChainName, sceneChain );
 				attributes.Set( DepthChainPrevFrameName, sceneChain );
 			}
@@ -664,6 +685,7 @@ internal sealed class BorealisGpuFrame : IDisposable
 		if ( target.Depth is not null ) BackendDevice.SetLayout( target.Depth, backend.LayoutOf( SceneDepth ) );
 		if ( bloomObjects is not null ) BackendDevice.SetLayout( bloomObjects, backend.LayoutOf( BloomObjects ) );
 		if ( reactiveDepth is not null ) BackendDevice.SetLayout( reactiveDepth, backend.LayoutOf( ReactiveDepth ) );
+		if ( adoptedChainTexture is not null ) BackendDevice.SetLayout( adoptedChain, backend.LayoutOf( adoptedChainTexture ) );
 	}
 
 	/// <summary>
@@ -686,6 +708,9 @@ internal sealed class BorealisGpuFrame : IDisposable
 		if ( reactiveDepth is not null ) backend.ForgetBorrowed( reactiveDepth.Handle );
 		reactiveDepth = null;
 		ReactiveDepth = null;
+		if ( adoptedChainTexture is not null ) backend.ForgetBorrowed( adoptedChain.Handle );
+		adoptedChainTexture = null;
+		adoptedChain = null;
 		target = null;
 	}
 
@@ -695,7 +720,7 @@ internal sealed class BorealisGpuFrame : IDisposable
 		if ( SceneColor is not null && !frameTextures.ContainsValue( SceneColor ) ) SceneColor.Dispose();
 		if ( SceneDepth is not null && !frameTextures.ContainsValue( SceneDepth ) ) SceneDepth.Dispose();
 		frameTextures.Clear();
-		sceneChain?.Dispose();
+		builtChain?.Dispose();
 		upscaledChain?.Dispose();
 		upscaledTarget?.Dispose();
 		upscaledTarget = null;
@@ -708,6 +733,6 @@ internal sealed class BorealisGpuFrame : IDisposable
 		resolveScratch?.Dispose();
 		foreach ( var (texture, _) in depthAlone.Values ) texture.Dispose();
 		depthAlone.Clear();
-		SceneColor = SceneDepth = sceneChain = upscaledChain = upscaledColor = upscaledDepth = resolvedDepth = resolveScratch = null;
+		SceneColor = SceneDepth = sceneChain = builtChain = adoptedChainTexture = upscaledChain = upscaledColor = upscaledDepth = resolvedDepth = resolveScratch = null;
 	}
 }

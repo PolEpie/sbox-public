@@ -328,7 +328,7 @@ internal sealed partial class SceneBridge
 		using ( new Drawing( this, state ) )
 			state.System.Render( render.World, state.View, state.GpuTarget, stages, inWindow );
 
-		frame.Adopt( state.GpuTarget, state.System.Frame.Constants, state.System.BloomObjects, state.System.ReactiveDepth );
+		frame.Adopt( state.GpuTarget, state.System.Frame.Constants, state.System.BloomObjects, state.System.ReactiveDepth, state.System.DepthChain );
 
 		gpuView.LayerType = SceneLayerType.Translucent;
 		if ( upscaling ) gpuView.Viewport = state.View.Viewport;

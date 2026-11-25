@@ -347,6 +347,7 @@ public sealed partial class RenderSystem : IDisposable
 		frame.Begin( world, view, output, stages );
 		BloomObjects = null;
 		ReactiveDepth = null;
+		DepthChain = null;
 
 		var allocStart = GC.GetAllocatedBytesForCurrentThread();
 		var start = Stopwatch.GetTimestamp();
@@ -744,6 +745,12 @@ public sealed partial class RenderSystem : IDisposable
 	/// size of its output, or null when it drew none. Valid until this system renders again.
 	/// </summary>
 	internal GpuTexture ReactiveDepth { get; set; }
+
+	/// <summary>
+	/// The depth chain the last frame built after its depth prepass (<see cref="DepthChainLayer"/>: min and max of its depth,
+	/// mipped, which <c>Depth::Get</c> reads), readable, or null when it built none. Valid until this system renders again.
+	/// </summary>
+	internal GpuTexture DepthChain { get; set; }
 
 	/// <summary>
 	/// Milliseconds since the last lap, starting the next.

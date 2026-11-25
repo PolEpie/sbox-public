@@ -46,6 +46,10 @@ internal sealed class DepthChainLayer : RenderLayer
 
 		// Readable by the draws and passes after it: a device that tracks layouts by hand binds only what's readable
 		rc.BarrierComputeToPixelShaderRead( chain );
+
+		// What the camera's stages after the frame read too (RenderSystem.DepthChain), as native's post processing reads its
+		// DepthDownsampleLayer's
+		frame.System.DepthChain = chain;
 		chain = null;
 	}
 }
