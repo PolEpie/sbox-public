@@ -381,6 +381,13 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 		if ( frame % PipelineCacheSaveFrames == 0 ) SavePipelineCacheInBackground();
 	}
 
+	[ConVar( "r_borealis_forward_wave32", Help = "Use 32-lane subgroups for opaque Borealis surface shaders on supported AMD GPUs." )]
+	internal static bool ForwardWave32
+	{
+		get => SurfaceShaders.ForwardWave32;
+		set => SurfaceShaders.ForwardWave32 = value;
+	}
+
 	/// <summary>
 	/// Native's <c>r_max_anisotropy</c> (its render device's, which Borealis.Gpu runs without): the texture quality
 	/// profiles and the player's saved setting set it.

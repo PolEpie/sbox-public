@@ -290,15 +290,17 @@ public sealed class SurfaceShaders : IDisposable
 	/// </summary>
 	public bool SpecializeInBackground { get; set; } = true;
 
-	// Only the Deck and the core opaque Forward materials measured on it. Leave other adapters, shaders and passes to the
-	// driver. The opt-out lets Lab compare both sizes on the same build without changing the rest of the frame.
-	static readonly bool deckForwardWave32 = OperatingSystem.IsLinux() && Environment.GetEnvironmentVariable( "BOREALIS_DECK_FORWARD_WAVE32" ) != "0";
+	/// <summary>
+	/// Prefer Wave32 for opaque surface Forward on supported AMD hardware. The game exposes
+	/// <c>r_borealis_forward_wave32</c>; the standalone Lab accepts <c>-no-forward-wave32</c>.
+	/// </summary>
+	public static bool ForwardWave32
+	{
+		get => forwardWave32;
+		set => forwardWave32 = value;
+	}
 
-	internal bool PreferForwardWave32( CompiledShader shader ) =>
-		deckForwardWave32 && device.Gpu.Capabilities.FragmentWave32
-		&& device.Gpu.Adapter is { VendorId: 0x1002, DeviceId: 0x163f or 0x1435 } // Steam Deck LCD and OLED
-		&& shader.Tier == ShaderTier.Surface && shader.Name is "Standard" or "Foliage" or "Blendable"
-		&& Path.GetDirectoryName( shader.Path ) == CoreShaders();
+	static volatile bool forwardWave32 = !BackendDevice.HasSwitch( "-no-forward-wave32" );
 
 	/// <summary>
 	/// Specialised pipelines made on workers at once, at most (<see cref="SpecializeInBackground"/>): a quarter of the logical
@@ -887,7 +889,6 @@ public sealed class SurfaceShaders : IDisposable
 internal sealed class SurfaceProgram : IDisposable
 {
 	readonly BackendDevice device;
-	readonly bool preferForwardWave32;
 	readonly Dictionary<string, PassObjects> passes = new();
 	readonly ScenePasses depth, depthAlpha, depthTranslucent, forward, forwardAlpha, forwardTranslucent;
 
@@ -898,8 +899,8 @@ internal sealed class SurfaceProgram : IDisposable
 
 	// Pipelines' keys are record structs, not tuples: a tuple of eight or more keeps the rest in a tuple of its own, which its
 	// hash and equality box until the JIT has optimised them, so every draw's lookup allocated in a run's first seconds
-	readonly record struct PipelineKey( PassObjects Pass, VertexLayout Layout, Format Color, Format Depth, int Samples, ulong Constants, bool Ids, bool OpaqueFade, SurfaceRenderState State, bool DepthEqual, ulong Features, bool Normals, OverlayStencil Stencil );
-	readonly record struct ImmediateKey( PassObjects Pass, VertexLayout Layout, Format Color, Format Depth, int Samples, SpecializationConstant[] VertexConstants, SpecializationConstant[] PixelConstants, SurfaceRenderState State, PrimitiveTopology Topology, bool Ids, bool OpaqueFade, ToolsPass Tools, OverlayStencil Stencil );
+	readonly record struct PipelineKey( PassObjects Pass, VertexLayout Layout, Format Color, Format Depth, int Samples, ulong Constants, bool Ids, bool OpaqueFade, SurfaceRenderState State, bool DepthEqual, ulong Features, bool Normals, OverlayStencil Stencil, bool FragmentWave32 );
+	readonly record struct ImmediateKey( PassObjects Pass, VertexLayout Layout, Format Color, Format Depth, int Samples, SpecializationConstant[] VertexConstants, SpecializationConstant[] PixelConstants, SurfaceRenderState State, PrimitiveTopology Topology, bool Ids, bool OpaqueFade, ToolsPass Tools, OverlayStencil Stencil, bool FragmentWave32 );
 	readonly record struct ToolsKey( PassObjects Pass, VertexLayout Layout, Format Color, Format Depth, int Samples, ulong Constants, bool OpaqueFade, SurfaceRenderState State, bool DepthEqual, bool Normals, ToolsPass Tools, OverlayStencil Stencil );
 
 	readonly ConcurrentDictionary<PipelineKey, PipelineHandle> pipelines = new();
@@ -934,6 +935,7 @@ internal sealed class SurfaceProgram : IDisposable
 		public CompiledPass Pass;
 		public ShaderHandle Vertex, Pixel;
 		public BindingLayoutHandle[] Sets;
+		internal bool SupportsForwardWave32;
 
 		/// <summary>The pixel stage's outputs, read once (<see cref="FitOutputs"/>); its modules without some of them, by locations.</summary>
 		internal IReadOnlyList<SpirvInput> PixelOutputs;
@@ -960,7 +962,6 @@ internal sealed class SurfaceProgram : IDisposable
 	{
 		this.device = device;
 		Compiled = compiled;
-		preferForwardWave32 = device.Surfaces.PreferForwardWave32( compiled );
 		LayoutHash = MaterialClassWriter.Hash( compiled.Material );
 		PlacesVertices = compiled.Generated is { } source && source.Contains( "SurfaceStageVertex", StringComparison.Ordinal );
 		Displaces = PlacesVertices || compiled.Generated is { } generated && (generated.Contains( "SurfaceVertexDisplaced", StringComparison.Ordinal ) || generated.Contains( "SurfaceOutputDisplacedWith", StringComparison.Ordinal ));
@@ -973,6 +974,7 @@ internal sealed class SurfaceProgram : IDisposable
 			return module;
 		}
 
+		var forwardWave32 = device.Gpu.Adapter.VendorId == 0x1002 && device.Gpu.Capabilities.FragmentWave32;
 		foreach ( var (name, pass) in compiled.Passes )
 		{
 			var sets = new BindingLayoutHandle[ShaderAbi.BindlessSet];
@@ -989,7 +991,9 @@ internal sealed class SurfaceProgram : IDisposable
 				}
 			}
 
-			passes[name] = new PassObjects { Pass = pass, Vertex = Module( pass.Vertex ), Pixel = Module( pass.Pixel ), Sets = sets };
+			var objects = new PassObjects { Pass = pass, Vertex = Module( pass.Vertex ), Pixel = Module( pass.Pixel ), Sets = sets };
+			objects.SupportsForwardWave32 = forwardWave32 && WritesNormals( objects );
+			passes[name] = objects;
 		}
 
 		depth = ScenePassesOf( ShaderPasses.Depth );
@@ -1137,7 +1141,8 @@ internal sealed class SurfaceProgram : IDisposable
 		if ( ids && !BackendDevice.IsIdsFormat( color ) ) color = device.IdsFormat;
 		tools = ids || color == Format.Unknown ? ToolsPass.None : ToolsViewStage.ReadyPass( device.Shaders, tools );
 		if ( tools != ToolsPass.None ) return ToolsPipeline( pass, layout, color, depth, samples, vertexConstants, constantsKey, state, opaqueFade, depthEqual, normals, tools, stencil );
-		var key = new PipelineKey( pass, layout, color, depth, samples, constantsKey, ids, opaqueFade, state, depthEqual, specialized?.Key ?? 0, normals, stencil );
+		var wave32 = WantsForwardWave32( pass, color, ids, state );
+		var key = new PipelineKey( pass, layout, color, depth, samples, constantsKey, ids, opaqueFade, state, depthEqual, specialized?.Key ?? 0, normals, stencil, wave32 );
 
 		// Most draws hit a published pipeline. Keep misses and prewarming serialized without blocking those readers.
 		if ( pipelines.TryGetValue( key, out var pipeline ) ) return pipeline;
@@ -1164,17 +1169,15 @@ internal sealed class SurfaceProgram : IDisposable
 	{
 		tools = color == Format.Unknown ? ToolsPass.None : ToolsViewStage.ReadyPass( device.Shaders, tools );
 		if ( !depth.HasStencil() ) stencil = OverlayStencil.None;
-		var key = new ImmediateKey( pass, layout, color, depth, samples, vertexConstants, pixelConstants, state, topology, ids, opaqueFade, tools, stencil );
+		var wave32 = tools == ToolsPass.None && WantsForwardWave32( pass, color, false, state );
+		var key = new ImmediateKey( pass, layout, color, depth, samples, vertexConstants, pixelConstants, state, topology, ids, opaqueFade, tools, stencil, wave32 );
 		lock ( pipelines )
 		{
 			if ( immediatePipelines.TryGetValue( key, out var made ) ) return made;
-			var info = Info( pass, layout, color, depth, samples, vertexConstants, pixelConstants, state, false, opaqueFade, false, false, stencil ) with { SkipUntilReady = false, Topology = topology };
+			var info = Info( pass, layout, color, depth, samples, vertexConstants, pixelConstants, state, false, opaqueFade, false, false, stencil )
+				with { SkipUntilReady = false, Topology = topology, FragmentWave32 = wave32 };
 			if ( !ids ) info.VertexBuffers[1] = new VertexBufferLayout( 0, VertexStepRate.Instance );
-			if ( tools != ToolsPass.None )
-			{
-				info.FragmentWave32 = false;
-				ToolsViewStage.Apply( device.Shaders, ref info, tools, ToolsViews.ShaderColor( Compiled.Name ) );
-			}
+			if ( tools != ToolsPass.None ) ToolsViewStage.Apply( device.Shaders, ref info, tools, ToolsViews.ShaderColor( Compiled.Name ) );
 			using ( Zones.PipelineCreate.Start() ) made = device.Gpu.CreateGraphicsPipeline( info );
 			return immediatePipelines[key] = made;
 		}
@@ -1189,7 +1192,6 @@ internal sealed class SurfaceProgram : IDisposable
 		{
 			if ( toolsPipelines.TryGetValue( key, out var made ) ) return made;
 			var info = Info( pass, layout, color, depth, samples, vertexConstants, null, state, false, opaqueFade, depthEqual, normals, stencil );
-			info.FragmentWave32 = false;
 			ToolsViewStage.Apply( device.Shaders, ref info, tools, ToolsViews.ShaderColor( Compiled.Name ) );
 			using ( Zones.PipelineCreate.Start() ) made = device.Gpu.CreateGraphicsPipeline( info );
 			return toolsPipelines[key] = made;
@@ -1237,7 +1239,7 @@ internal sealed class SurfaceProgram : IDisposable
 						FragmentShader = pixel ? pass.Pixel : default,
 						FragmentEntry = pixel ? pass.Pass.Pixel.Entry : null,
 						FragmentConstants = pixel ? BackendContext.LikelySurfaceConstants( pass.Pass.Pixel, perPixel, device.Surfaces.SpecializationValues ) : null,
-						FragmentWave32 = preferForwardWave32 && WritesNormals( pass ),
+						FragmentWave32 = pass.SupportsForwardWave32 && SurfaceShaders.ForwardWave32,
 						Sets = pass.Sets,
 						Name = $"{Compiled.Name} {pass.Pass.Name}",
 					};
@@ -1274,7 +1276,8 @@ internal sealed class SurfaceProgram : IDisposable
 			{
 				var r = request;
 				var normals = r.Normals && r.Color != Format.Unknown && !r.Ids;
-				var key = new PipelineKey( r.Pass, r.Layout, r.Color, r.Depth, r.Samples, r.ConstantsKey, r.Ids, r.OpaqueFade, r.State, r.DepthEqual, 0ul, normals, r.Stencil );
+				var wave32 = WantsForwardWave32( r.Pass, r.Color, r.Ids, r.State );
+				var key = new PipelineKey( r.Pass, r.Layout, r.Color, r.Depth, r.Samples, r.ConstantsKey, r.Ids, r.OpaqueFade, r.State, r.DepthEqual, 0ul, normals, r.Stencil, wave32 );
 				if ( pipelines.ContainsKey( key ) || !building.Add( key ) ) continue;
 
 				var ahead = new Prewarming();
@@ -1303,7 +1306,9 @@ internal sealed class SurfaceProgram : IDisposable
 		var made = default( PipelineHandle );
 		try
 		{
-			using ( Zones.PipelineCreate.Start() ) made = device.Gpu.CreateGraphicsPipeline( Info( r.Pass, r.Layout, r.Color, r.Depth, r.Samples, r.VertexConstants, r.PixelConstants, r.State, r.Ids, r.OpaqueFade, r.DepthEqual, normals, r.Stencil ) with { SkipUntilReady = false } );
+			using ( Zones.PipelineCreate.Start() )
+				made = device.Gpu.CreateGraphicsPipeline( Info( r.Pass, r.Layout, r.Color, r.Depth, r.Samples, r.VertexConstants, r.PixelConstants, r.State, r.Ids, r.OpaqueFade, r.DepthEqual, normals, r.Stencil )
+					with { SkipUntilReady = false, FragmentWave32 = key.FragmentWave32 } );
 		}
 		catch ( Exception e ) when ( e is GpuException or InvalidOperationException or ArgumentException )
 		{
@@ -1334,7 +1339,8 @@ internal sealed class SurfaceProgram : IDisposable
 		{
 			if ( specialized is not null )
 			{
-				var info = Info( pass, layout, color, depth, samples, vertexConstants, [.. pixelConstants ?? [], .. specialized.Constants], state, ids, opaqueFade, depthEqual, normals, key.Stencil );
+				var info = Info( pass, layout, color, depth, samples, vertexConstants, [.. pixelConstants ?? [], .. specialized.Constants], state, ids, opaqueFade, depthEqual, normals, key.Stencil )
+					with { FragmentWave32 = key.FragmentWave32 };
 				if ( !device.Surfaces.SpecializeInBackground )
 				{
 					if ( BackendDevice.DumpSurfaceShaders is { } dumpNow ) Dump( dumpNow, pass, info.FragmentConstants, specialized );
@@ -1351,7 +1357,9 @@ internal sealed class SurfaceProgram : IDisposable
 				return unspecialized;
 			}
 
-			using ( Zones.PipelineCreate.Start() ) pipeline = device.Gpu.CreateGraphicsPipeline( Info( pass, layout, color, depth, samples, vertexConstants, pixelConstants, state, ids, opaqueFade, depthEqual, normals, key.Stencil ) );
+			using ( Zones.PipelineCreate.Start() )
+				pipeline = device.Gpu.CreateGraphicsPipeline( Info( pass, layout, color, depth, samples, vertexConstants, pixelConstants, state, ids, opaqueFade, depthEqual, normals, key.Stencil )
+					with { FragmentWave32 = key.FragmentWave32 } );
 			pipelines[key] = pipeline;
 
 			// A miss, never a frame's every draw: kept for the next run to make ahead
@@ -1405,6 +1413,9 @@ internal sealed class SurfaceProgram : IDisposable
 	public bool WritesNormals( PassObjects pass ) => Compiled.Tier == ShaderTier.Surface
 		&& pass.Pass.Pixel?.Entry is "ForwardPs" or "ForwardAlphaTestPs" or "ForwardPsGpuDriven" or "ForwardAlphaTestPsGpuDriven";
 
+	static bool WantsForwardWave32( PassObjects pass, Format color, bool ids, in SurfaceRenderState state ) =>
+		pass.SupportsForwardWave32 && SurfaceShaders.ForwardWave32 && color != Format.Unknown && !ids && !state.DrawsTranslucent;
+
 	internal GraphicsPipelineInfo Info( PassObjects pass, VertexLayout layout, Format color, Format depth, int samples, SpecializationConstant[] vertexConstants, SpecializationConstant[] pixelConstants, SurfaceRenderState state, bool ids, bool opaqueFade, bool depthEqual, bool normals, OverlayStencil stencil = OverlayStencil.None )
 	{
 		// A vertex-cache draw reads its vertex ids from streams 2 and 3, as floats, and the default stream from 4, as
@@ -1430,7 +1441,6 @@ internal sealed class SurfaceProgram : IDisposable
 			FragmentConstants = pixel ? pixelConstants : null,
 			FragmentShader = pixel ? pass.Pixel : default,
 			FragmentEntry = pixel ? pass.Pass.Pixel.Entry : null,
-			FragmentWave32 = preferForwardWave32 && pixel && !depthOnly && !ids && !state.DrawsTranslucent && WritesNormals( pass ),
 			Sets = pass.Sets,
 			VertexBuffers = vertexCache
 				? [new( layout.Stride ), new( 4, VertexStepRate.Instance ), new( 4 ), new( 4 ), new( 0 )]
