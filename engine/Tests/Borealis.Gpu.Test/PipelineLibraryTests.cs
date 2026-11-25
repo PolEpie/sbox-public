@@ -10,7 +10,6 @@ namespace BorealisGpuTests;
 /// made whole.
 /// </summary>
 [TestClass]
-[DoNotParallelize]
 public class PipelineLibraryTests : GpuTest
 {
 	const int Width = 320, Height = 200;

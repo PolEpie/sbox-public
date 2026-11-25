@@ -11,7 +11,7 @@ namespace BorealisGpuTests;
 /// </summary>
 [TestClass]
 [DoNotParallelize]
-public class CaptureTests : GpuTest
+public class CaptureTests : RenderGpuTest
 {
 	const int Width = 64, Height = 64;
 
