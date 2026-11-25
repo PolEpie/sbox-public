@@ -542,7 +542,9 @@ public sealed class BackendModel : GpuMesh, IBackendGeometry, ISkinnedGeometry
 	/// </summary>
 	internal long LastUsedFrame => System.Threading.Volatile.Read( ref lastUsedFrame );
 
-	bool IBackendGeometry.Use()
+	bool IBackendGeometry.Use() => Use();
+
+	internal bool Use()
 	{
 		if ( Freed ) return false;
 

@@ -44,16 +44,21 @@ internal sealed partial class BackendContext
 			// Kept on the context and emptied for each dispatch: dispatches allocate nothing in steady state
 			var attributes = dispatchAttributes ??= new ShaderAttributes();
 			attributes.Clear();
-			foreach ( var (name, token) in dispatchCombos.GetValue( shader, static s => [.. s[ShaderProgramType.Compute].DynamicCombos.Select( c => (c.Name, Token( c.Name )) )] ) )
+			foreach ( var (id, token) in dispatchCombos.GetValue( shader, static s => [.. s[ShaderProgramType.Compute].DynamicCombos.Select( c => (AttributeIds.Of( c.Name ), Token( c.Name )) )] ) )
 			{
-				if ( (given?.GetCombo( token ) ?? LookupCombo( token )) is int value ) attributes.SetCombo( name, value );
+				if ( (given?.GetCombo( token ) ?? LookupCombo( token )) is int value ) attributes.SetComboById( id, value );
 			}
 
 			var variant = drawer.Variant( shader, attributes );
 			if ( variant?.Compute?.Bytecode is null ) return;
 
 			var plan = dispatchPlans.GetValue( variant, DispatchPlan.Of );
-			foreach ( var (token, id) in plan.Constants ) SetDispatchFloats( attributes, id, Value( token ) );
+			Span<float> floats = stackalloc float[16];
+			foreach ( var (token, id) in plan.Constants )
+			{
+				var count = Components( Value( token ), floats );
+				if ( count != 0 ) SetDispatchFloats( attributes, id, floats[..count] );
+			}
 
 			CloseScope();
 			var written = dispatchWritten;
@@ -143,7 +148,7 @@ internal sealed partial class BackendContext
 	}
 
 	static readonly ConditionalWeakTable<ShaderVariant, DispatchPlan> dispatchPlans = new();
-	static readonly ConditionalWeakTable<ShaderFile, (string Name, StringToken Token)[]> dispatchCombos = new();
+	static readonly ConditionalWeakTable<ShaderFile, (int Id, StringToken Token)[]> dispatchCombos = new();
 
 	// Arrays for constants of more than four floats (matrices), one an attribute id, refilled each dispatch
 	readonly Dictionary<int, float[]> dispatchFloats = new();
@@ -152,17 +157,16 @@ internal sealed partial class BackendContext
 	/// A parameter's value as floats under an attribute id: one to four in the arrays the attributes own, more in an array this
 	/// context keeps for the id, so a dispatch allocates nothing in steady state.
 	/// </summary>
-	void SetDispatchFloats( ShaderAttributes into, int id, object value )
+	void SetDispatchFloats( ShaderAttributes into, int id, ReadOnlySpan<float> values )
 	{
-		if ( ScratchFloats( value ) is not { } f ) return;
-		if ( f.Length is >= 1 and <= 4 )
+		if ( values.Length <= 4 )
 		{
-			into.SetFloatsById( id, f.AsSpan() );
+			into.SetFloatsById( id, values );
 			return;
 		}
 
-		if ( !dispatchFloats.TryGetValue( id, out var kept ) || kept.Length != f.Length ) dispatchFloats[id] = kept = new float[f.Length];
-		f.CopyTo( kept, 0 );
+		if ( !dispatchFloats.TryGetValue( id, out var kept ) || kept.Length != values.Length ) dispatchFloats[id] = kept = new float[values.Length];
+		values.CopyTo( kept );
 		into.SetById( id, (object)kept );
 	}
 

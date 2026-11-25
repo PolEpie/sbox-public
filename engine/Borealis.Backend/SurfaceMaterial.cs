@@ -74,22 +74,21 @@ public abstract class SurfaceMaterial : GpuMaterial, IStreamDependent
 	/// <see cref="AlphaTest"/> and <see cref="TwoSided"/> on top. Resolved again when a field changes. A blended one draws
 	/// in the translucent layer.
 	/// </summary>
-	public SurfaceRenderState RenderState
+	public SurfaceRenderState RenderState => ResolveState().State;
+
+	Resolved ResolveState()
 	{
-		get
-		{
-			var v = StateVersion;
-			var known = resolved;
-			if ( known is not null && known.Version == v ) return known.State;
-			SurfaceRenderState state;
-			lock ( record ) state = States.Resolve( record );
-			state = state with { AlphaTest = state.AlphaTest || alphaTest, TwoSided = state.TwoSided || twoSided };
-			resolved = new Resolved( v, state );
-			return state;
-		}
+		var v = StateVersion;
+		var known = resolved;
+		if ( known is not null && known.Version == v ) return known;
+		SurfaceRenderState state;
+		lock ( record ) state = States.Resolve( record );
+		state = state with { AlphaTest = state.AlphaTest || alphaTest, TwoSided = state.TwoSided || twoSided };
+		var depthOnly = state is { Blend: SurfaceBlend.Opaque, DepthWrite: true, DepthTest: true, DepthBias: 0, SlopeDepthBias: 0, TwoSided: false, AlphaTest: false, Translucent: false };
+		return resolved = new Resolved( v, state, depthOnly );
 	}
 
-	sealed record Resolved( int Version, SurfaceRenderState State );
+	sealed record Resolved( int Version, SurfaceRenderState State, bool DepthOnly );
 
 	Resolved resolved;
 
@@ -346,7 +345,7 @@ public abstract class SurfaceMaterial : GpuMaterial, IStreamDependent
 	/// one-sided, depth tested and written, without alpha test or depth bias: its depth is the shared depth-only material's,
 	/// as native's fast path draws a <c>ShadowFastPath</c> material's.
 	/// </summary>
-	public override bool DepthOnlyNow => Program is { Displaces: false, Stale: false } && RenderState is { Blend: SurfaceBlend.Opaque, DepthWrite: true, DepthTest: true, DepthBias: 0, SlopeDepthBias: 0, TwoSided: false, AlphaTest: false, Translucent: false };
+	public override bool DepthOnlyNow => Program is { Displaces: false, Stale: false } && ResolveState().DepthOnly;
 
 	/// <summary>Until its program is found, or while a hotload has dropped it.</summary>
 	public override bool DepthOnlyPending => Program is null or { Stale: true };

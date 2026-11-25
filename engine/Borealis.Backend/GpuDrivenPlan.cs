@@ -101,12 +101,15 @@ internal sealed class GpuDrivenPlan
 	public (GpuMaterial Material, ShaderParameters Attributes, ShaderVariant Variant, int VertexAttributes, int PixelAttributes)[] Checks;
 
 	/// <summary>Every material the batches draw with, and its version then.</summary>
-	public (GpuMaterial Material, int Version)[] Materials;
+	public (BackendMaterial Material, int Version)[] Materials;
+	public (SurfaceMaterial Material, int Version)[] SurfaceMaterials;
+	public GpuMaterial[] OtherMaterials;
 
 	/// <summary>Every set of object attributes the batches draw with (their lighting records come from them), and its version then.</summary>
 	public (BackendParameters Attributes, int Version)[] Attributes;
 
-	/// <summary>Every geometry the batches draw: the plan is made again once one of them is freed (<see cref="IBackendGeometry.Use"/>).</summary>
+	/// <summary>Geometry with a lifetime check or a frame-use side effect; kept plans must still call Use.</summary>
+	public BackendModel[] Models;
 	public IBackendGeometry[] Geometries;
 
 	/// <summary>What its bucket checks read of the pass's attributes, made once a check has passed (<see cref="GpuDrivenPlanReads"/>); null until then.</summary>
@@ -158,16 +161,40 @@ internal sealed class GpuDrivenPlan
 /// in full; and each surface bucket's material and program. A pass's attributes are made again each frame, so their
 /// version moves on every frame, but the few values the checks read mostly don't: with those the same and the plan's
 /// materials and object attributes at their versions, every bucket checks as it did, and isn't worked out again.
-/// <see cref="Values"/> and <see cref="Passed"/> are read and written under its lock, by any worker.
+/// The first successful fingerprint stays immutable so the usual hit does not take a lock.
 /// </summary>
 internal sealed class GpuDrivenPlanReads
 {
 	public StringToken[] Combos, Integers, Hashed;
 	public (SurfaceMaterial Material, SurfaceProgram Program)[] Surfaces;
 
-	/// <summary>By name, combos then integers then hashes: a combo or integer with 1 in the high word when it's set, a hash as it is.</summary>
-	public long[] Values;
+	public int ValueCount => Combos.Length + Integers.Length + Hashed.Length;
 
-	/// <summary>Whether <see cref="Values"/> are those of a check that passed.</summary>
-	public bool Passed;
+	long[] first, recent;
+
+	internal bool Matches( ReadOnlySpan<long> values )
+	{
+		var baseline = System.Threading.Volatile.Read( ref first );
+		if ( baseline is null ) return false;
+		if ( values.SequenceEqual( baseline ) ) return true;
+		if ( System.Threading.Volatile.Read( ref recent ) is null ) return false;
+		lock ( this ) return values.SequenceEqual( recent );
+	}
+
+	internal void Keep( ReadOnlySpan<long> values )
+	{
+		lock ( this )
+		{
+			if ( first is null )
+			{
+				System.Threading.Volatile.Write( ref first, values.ToArray() );
+			}
+			else if ( !values.SequenceEqual( first ) )
+			{
+				// A different pass can pass the full check too. Reuse this storage if the fingerprint changes again.
+				if ( recent is null ) System.Threading.Volatile.Write( ref recent, values.ToArray() );
+				else values.CopyTo( recent );
+			}
+		}
+	}
 }

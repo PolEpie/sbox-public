@@ -14,6 +14,7 @@ public sealed class RenderWorld
 	public const int MaxSubWorlds = 64;
 
 	RenderObject[] _objects = new RenderObject[InitialCapacity];
+	int[] _objectTypeIndices = new int[InitialCapacity];
 	Vector3[] _boundsCenters = new Vector3[InitialCapacity];
 	Vector3[] _boundsExtents = new Vector3[InitialCapacity];
 	Matrix[] _localToWorld = new Matrix[InitialCapacity];
@@ -89,9 +90,12 @@ public sealed class RenderWorld
 	readonly List<Type> _objectTypes = [];
 
 	/// <summary>
-	/// All types ever added, used to warm feature caches before parallel culling.
+	/// All types ever added, in the order of their stable <see cref="ObjectTypeIndices"/>.
 	/// </summary>
 	internal ReadOnlySpan<Type> ObjectTypes => System.Runtime.InteropServices.CollectionsMarshal.AsSpan( _objectTypes );
+
+	/// <summary>The registered type's index for each entry, in the same order as <see cref="Objects"/>.</summary>
+	internal ReadOnlySpan<int> ObjectTypeIndices => _objectTypeIndices.AsSpan( 0, Count );
 
 	// A leaf in the tree, or one of these
 	const int NotAdded = -1;
@@ -361,12 +365,18 @@ public sealed class RenderWorld
 	void Insert( RenderObject obj, int subWorld )
 	{
 		var type = obj.GetType();
-		if ( !_objectTypes.Contains( type ) ) _objectTypes.Add( type );
+		var typeIndex = _objectTypes.IndexOf( type );
+		if ( typeIndex < 0 )
+		{
+			typeIndex = _objectTypes.Count;
+			_objectTypes.Add( type );
+		}
 
 		if ( Count == _objects.Length )
 		{
 			var capacity = _objects.Length * 2;
 			Array.Resize( ref _objects, capacity );
+			Array.Resize( ref _objectTypeIndices, capacity );
 			Array.Resize( ref _boundsCenters, capacity );
 			Array.Resize( ref _boundsExtents, capacity );
 			Array.Resize( ref _localToWorld, capacity );
@@ -388,6 +398,7 @@ public sealed class RenderWorld
 		if ( obj is MeshObject { AttributesFrom: not null } ) AttributeSources++;
 		if ( obj is InstancedMeshObject ) InstancedObjects++;
 		_objects[index] = obj;
+		_objectTypeIndices[index] = typeIndex;
 		_subWorlds[index] = (byte)subWorld;
 		_treeLeaves[index] = NotAdded;
 		_dynamicTreeLeaves[index] = NotAdded;
@@ -439,6 +450,7 @@ public sealed class RenderWorld
 		{
 			var moved = _objects[last];
 			_objects[index] = moved;
+			_objectTypeIndices[index] = _objectTypeIndices[last];
 			_boundsCenters[index] = _boundsCenters[last];
 			_boundsExtents[index] = _boundsExtents[last];
 			_localToWorld[index] = _localToWorld[last];

@@ -188,16 +188,15 @@ internal sealed class ShadowSystem : IShadowRenderer, IDisposable
 	public JobHandle BeginCull()
 	{
 		if ( passes.Count == 0 ) return default;
+		var typeFeatures = system.PrepareCullFeatures( world );
 
 		if ( !system.ParallelRecording )
 		{
-			CullPasses();
+			CullPasses( typeFeatures );
 			return default;
 		}
 
-		// Lookups that miss write the shared cache, which the main view's features mustn't race
-		system.WarmFeatureTypes( world );
-		return JobDispatcher.Begin( 1, this, static ( shadows, _ ) => shadows.CullPasses() );
+		return JobDispatcher.Begin( 1, (Shadows: this, TypeFeatures: typeFeatures), static ( state, _ ) => state.Shadows.CullPasses( state.TypeFeatures ) );
 	}
 
 	/// <summary>
@@ -455,7 +454,7 @@ internal sealed class ShadowSystem : IShadowRenderer, IDisposable
 	/// Group views sharing a light-sphere query, then cull balanced chunks.
 	/// Workers read the world and write only per-view lists; cascades use separate groups.
 	/// </summary>
-	void CullPasses()
+	void CullPasses( int[] typeFeatures )
 	{
 		using var rendererAllocations = Borealis.RendererAllocations.Measure();
 		var count = passes.Count;
@@ -492,15 +491,12 @@ internal sealed class ShadowSystem : IShadowRenderer, IDisposable
 
 		if ( chunkCount == 1 )
 		{
-			CullChunk( 0 );
+			CullChunk( 0, typeFeatures );
 			return;
 		}
 
-		// Warm feature lookups before concurrent reads.
-		system.WarmFeatureTypes( world );
-
 		// Workers and the caller share chunk claiming.
-		JobDispatcher.For( chunkCount, this, static ( shadows, chunk ) => shadows.CullChunk( chunk ), itemsPerBatch: 1 );
+		JobDispatcher.For( chunkCount, (Shadows: this, TypeFeatures: typeFeatures), static ( state, chunk ) => state.Shadows.CullChunk( chunk, state.TypeFeatures ), itemsPerBatch: 1 );
 	}
 
 	readonly List<UnsettledMarks> unsettledMarks = new();
@@ -616,7 +612,7 @@ internal sealed class ShadowSystem : IShadowRenderer, IDisposable
 	/// <summary>
 	/// Cull the groups in chunk <paramref name="chunk"/>, with that chunk's own candidate list.
 	/// </summary>
-	void CullChunk( int chunk )
+	void CullChunk( int chunk, int[] typeFeatures )
 	{
 		using var zone = Zones.ShadowCull.Start();
 		var candidates = chunkCandidates[chunk];
@@ -628,7 +624,7 @@ internal sealed class ShadowSystem : IShadowRenderer, IDisposable
 			// Culled the same way as the main view, into counts nobody reads
 			var stats = new RenderStats();
 			for ( int i = first; i < groupStarts[g + 1]; i++ )
-				system.Cull( world, passes[i], candidates, inTree, inFrustum, ref stats );
+				system.Cull( world, passes[i], candidates, inTree, inFrustum, typeFeatures, ref stats );
 		}
 	}
 

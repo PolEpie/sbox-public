@@ -511,7 +511,7 @@ internal sealed partial class MeshRenderFeature : RenderFeature
 		var sortCamera = pass.View.Position;
 
 		// What texture sizes the view's draws ask streaming for
-		var textureSizes = new TextureSizes( pass.View, root );
+		var textureSizes = RenderHost.Current.Device.StreamsTextures ? new TextureSizes( pass.View, root ) : default;
 
 		foreach ( var bucket in buckets )
 			bucket.Count = 0;
@@ -600,6 +600,8 @@ internal sealed partial class MeshRenderFeature : RenderFeature
 
 		for ( int bit = 0; bit < buckets.Length; bit++ )
 		{
+			if ( buckets[bit].Count == 0 && (bit != 0 || layers.Instanced.Count == 0) ) continue;
+
 			// A batched list groups its objects by bin; the others sort theirs
 			if ( Lists[bit].Sort == ListSort.Batched ) GroupByBin( buckets[bit], Lists[bit].Draws );
 			else SortBucket( buckets[bit] );
@@ -664,21 +666,25 @@ internal sealed partial class MeshRenderFeature : RenderFeature
 	internal bool ReadersTaken( ViewPass view ) => view.State<RunLists>( this ).ReadersTaken;
 
 	/// <summary>
-	/// For the aggregates' feature: a GPU-driven draw of <see cref="RunLists.GpuDriven"/> as its batch would be, with the
-	/// material, lighting and first instance <see cref="DrawItems"/> would use; null when it has no material.
+	/// Write an aggregate layer's mesh draw as a GPU-driven batch, with the material, lighting and first instance
+	/// <see cref="DrawItems"/> would use. A draw without a material leaves a default batch in its place.
 	/// </summary>
-	internal GpuContext.GpuDrivenBatch? GpuDrivenBatch( ViewPass view, DrawItem item, bool depth, bool forceDepthOnly )
+	internal void WriteGpuDrivenBatch( ViewPass view, DrawItem item, bool depth, bool forceDepthOnly, out GpuContext.GpuDrivenBatch batch )
 	{
 		var lists = view.State<RunLists>( this );
-		return BatchOf( CollectionsMarshal.AsSpan( lists.Opaque )[item.Run], item, depth, forceDepthOnly );
+		TryBatchOf( CollectionsMarshal.AsSpan( lists.Opaque )[item.Run], item, depth, forceDepthOnly, out batch );
 	}
 
-	/// <summary>A run's draw as a GPU-driven batch of its instances, as <see cref="GpuDrivenBatch(ViewPass, DrawItem, bool, bool)"/> makes one.</summary>
-	GpuContext.GpuDrivenBatch? BatchOf( in Run run, DrawItem item, bool depth, bool forceDepthOnly )
+	/// <summary>Write a run's draw as a GPU-driven batch of its instances; false when it has no material.</summary>
+	bool TryBatchOf( in Run run, DrawItem item, bool depth, bool forceDepthOnly, out GpuContext.GpuDrivenBatch batch )
 	{
 		ref readonly var draw = ref run.Mesh.DrawsForLod( run.Lod )[item.Draw];
 		var material = MaterialFor( run, draw, depth, forceDepthOnly, out var strip );
-		if ( material is null ) return null;
+		if ( material is null )
+		{
+			batch = default;
+			return false;
+		}
 
 		var probe = depth || run.Probe is null || !RenderMesh.NeedsLightProbe( material ) ? null : run.Probe;
 		var lighting = draw.Lightmapped ? (depth ? null : run.Lightmap) : probe;
@@ -693,7 +699,8 @@ internal sealed partial class MeshRenderFeature : RenderFeature
 			vertexCache = UsesVertexCache( run, draw );
 		}
 
-		return new GpuContext.GpuDrivenBatch( material, run.Mesh, draw, lighting, strip, -1, run.Count, first, (long)(draw.IndexCount / 3) * run.Count, null, Instances: true, TextureSize: textureSize, Skinned: run.Skinned, VertexCache: vertexCache, OwnAttributes: run.Skinned ? run.Attributes : null );
+		batch = new GpuContext.GpuDrivenBatch( material, run.Mesh, draw, lighting, strip, -1, run.Count, first, (long)(draw.IndexCount / 3) * run.Count, null, Instances: true, TextureSize: textureSize, Skinned: run.Skinned, VertexCache: vertexCache, OwnAttributes: run.Skinned ? run.Attributes : null );
+		return true;
 	}
 
 	/// <summary>Whether a skinned run's draw reads the vertex cache: its mesh skins by compute, or deformation or morphs force it to.</summary>

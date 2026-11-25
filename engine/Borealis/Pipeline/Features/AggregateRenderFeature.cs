@@ -503,7 +503,7 @@ internal sealed partial class AggregateRenderFeature : RenderFeature
 			for ( int i = 0; i < batches.Length; i++ ) list[count++] = DeviceBatch( batches[i], depth, forceDepthOnly );
 
 			// Then the mesh draws, each its instances
-			foreach ( var item in meshDraws ) list[count++] = Meshes.GpuDrivenBatch( view, item, depth, forceDepthOnly ) ?? default;
+			foreach ( var item in meshDraws ) Meshes.WriteGpuDrivenBatch( view, item, depth, forceDepthOnly, out list[count++] );
 		}
 
 		context.DrawGpuDriven( mode, alone ? deviceBatches : list.AsSpan( 0, count ), args.AsSpan( 0, argCount ), transforms, depthBias, slopeBias, drawn, CullFor( view, depth, resident, resident?.Version ?? 0, residentCount ) );

@@ -118,11 +118,13 @@ public sealed class ShaderAttributes
 	public void Set( string name, TextureViewHandle view ) => Put( AttributeIds.Of( name ), Box( viewBoxes, view ) );
 
 	/// <summary>A constant buffer's bytes.</summary>
-	public void SetData( string name, byte[] data )
+	public void SetData( string name, byte[] data ) => SetDataById( AttributeIds.Of( name ), data );
+
+	internal void SetDataById( int id, byte[] data )
 	{
 		external = true;
 		version++;
-		Put( AttributeIds.Of( name ), data );
+		Put( id, data );
 	}
 
 	/// <summary>A dynamic combo (<c>D_*</c>).</summary>
@@ -282,6 +284,13 @@ public sealed class ShaderAttributes
 
 	/// <summary>Moves on when a handle is added, replaced or cleared; numbers in owned arrays and combos don't move it.</summary>
 	internal int Revision => under is null ? revision : HashCode.Combine( revision, under.revision, RuntimeHelpers.GetHashCode( under ) );
+
+	// A single layer's structure revision is exact; the composite revision above is a hash.
+	internal bool TryGetStructureRevision( out int value )
+	{
+		value = revision;
+		return under is null && !external;
+	}
 
 	/// <summary>Moves on any set, replace or clear; equal versions mean equal values only while <see cref="Stable"/>.</summary>
 	internal int Version => under is null ? version : HashCode.Combine( version, under.version, RuntimeHelpers.GetHashCode( under ) );
@@ -905,6 +914,7 @@ public sealed partial class ShaderDrawer : IDisposable
 	/// </summary>
 	public ShaderVariant Variant( ShaderFile shader, ShaderAttributes attributes, string mode = null )
 	{
+		pendingVariant = false;
 		mode ??= shader.Modes[0].Name;
 		var material = MaterialOf( shader );
 		var materialVersion = material?.Version ?? 0;
@@ -919,7 +929,6 @@ public sealed partial class ShaderDrawer : IDisposable
 			if ( ReferenceEquals( memo.Attributes, attributes ) && memo.Version == version && ReferenceEquals( memo.Shader, shader ) && ReferenceEquals( memo.Material, material ) && memo.MaterialVersion == materialVersion && (ReferenceEquals( memo.Mode, mode ) || memo.Mode == mode) ) return memo.Found;
 		}
 
-		pendingVariant = false;
 		var found = FindVariant( shader, attributes, mode, material?.Features ?? [] );
 
 		// Not while its module compiles: it changes when that's done
@@ -986,6 +995,8 @@ public sealed partial class ShaderDrawer : IDisposable
 
 	// Whether the last VariantByName's variant was one whose module is still compiling
 	bool pendingVariant;
+
+	internal bool VariantPending => pendingVariant;
 
 	ShaderVariant VariantByName( ShaderFile shader, ShaderAttributes attributes, string mode, FeatureKey features, ulong specialization )
 	{
@@ -1256,14 +1267,22 @@ public sealed partial class ShaderDrawer : IDisposable
 	}
 
 	readonly Dictionary<int, StructureKey> structures = new();
+	(ShaderAttributes Source, int Revision, long Id) lastStructure;
 
 	long StructureOf( ShaderAttributes attributes )
 	{
+		var stable = attributes.TryGetStructureRevision( out var revision );
+		if ( stable && ReferenceEquals( attributes, lastStructure.Source ) && revision == lastStructure.Revision ) return lastStructure.Id;
+
 		var hash = attributes.StructureHash();
 		structures.TryGetValue( hash, out var first );
 		for ( var known = first; known is not null; known = known.Next )
 		{
-			if ( attributes.SameStructure( known.Reference ) ) return known.Id;
+			if ( attributes.SameStructure( known.Reference ) )
+			{
+				if ( stable ) lastStructure = (attributes, revision, known.Id);
+				return known.Id;
+			}
 		}
 
 		// Past the limit: forget them all; ids stay unique, so what was resolved under them is only resolved again
@@ -1276,6 +1295,7 @@ public sealed partial class ShaderDrawer : IDisposable
 		var made = new StructureKey { Next = first, Id = cache.NextEpoch() };
 		made.Reference.CopyValuesFrom( attributes );
 		structures[hash] = made;
+		if ( stable ) lastStructure = (attributes, revision, made.Id);
 		return made.Id;
 	}
 
@@ -1328,6 +1348,7 @@ public sealed partial class ShaderDrawer : IDisposable
 		passList = uploadList = null;
 		foreach ( var state in attributeStates ) state?.Forget();
 		structures.Clear();
+		lastStructure = default;
 		Array.Clear( variantMemo );
 		Array.Clear( objectMemo );
 		Array.Clear( stageConstants );
@@ -1825,8 +1846,6 @@ public sealed partial class ShaderDrawer : IDisposable
 
 		public override float[] Floats( string attribute ) => Attributes.Get( attribute ) as float[];
 
-		public override Binding Resolve( in ShaderResource resource, ShaderStage stage, bool dynamic, out uint dynamicOffset ) => Resolve( null, 0, 0, resource, stage, dynamic, out dynamicOffset );
-
 		public override Binding Resolve( MaterialLayout layout, int set, int slot, in ShaderResource resource, ShaderStage stage, bool dynamic, out uint dynamicOffset )
 		{
 			dynamicOffset = 0;
@@ -1853,7 +1872,7 @@ public sealed partial class ShaderDrawer : IDisposable
 
 				case ShaderResourceKind.ConstantBuffer:
 					{
-						var placeholder = layout is null ? drawer.defaults.For( resource ) : layout.Placeholder( set, slot );
+						var placeholder = layout.Placeholder( set, slot );
 						if ( dynamic ) placeholder.Type = BindingType.UniformBufferDynamic;
 						return placeholder;
 					}

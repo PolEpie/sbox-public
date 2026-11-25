@@ -64,30 +64,39 @@ public class TextureSizeTests
 	[TestMethod]
 	public void InstancedRunAsksForItsNearestObject()
 	{
-		using var material = new HeadlessMaterial( "box", "complex" );
-		var mesh = new RenderMesh( new HeadlessMesh( "box" ), UnitBox, [[new RenderMesh.Draw( 0, 0, 0, 36, 24, 0, material, UvDensity: 4 )]] );
-
-		var world = new RenderWorld();
-		world.Add( new MeshObject( mesh, new Transform( new Vector3( 30, 4, 0 ) ) ) );
-		world.Add( new MeshObject( mesh, new Transform( new Vector3( 20, 0, 0 ) ) ) );
-		world.Add( new MeshObject( mesh, new Transform( new Vector3( 50, -4, 0 ) ) ) );
-
-		using var target = ViewTarget.Create( new Vector2Int( 1000, 1000 ) );
-		using var system = new RenderSystem();
-
-		GpuCommand[] forward;
-		using ( var frame = Device.Capture() )
+		// Draws are only sized for a device that streams textures
+		Device.StreamTextures = true;
+		try
 		{
-			RenderHost.Current.NextFrame();
-			system.Render( world, LookingDownX(), target );
-			forward = frame.Commands.Where( c => c.IsDraw && c.In( "Opaque Forward" ) ).ToArray();
-		}
+			using var material = new HeadlessMaterial( "box", "complex" );
+			var mesh = new RenderMesh( new HeadlessMesh( "box" ), UnitBox, [[new RenderMesh.Draw( 0, 0, 0, 36, 24, 0, material, UvDensity: 4 )]] );
 
-		// One draw of the run of all three (an occlusion-culled one, whose instances the GPU counts), asking for what the
-		// nearest one needs: its nearest face is 19 away
-		Assert.AreEqual( 1, forward.Length );
-		Assert.AreEqual( 3, system.GetFeature<MeshRenderFeature>().RunsFor( system.MainPass ).Opaque.Single().Count );
-		Assert.AreEqual( (int)(4 * (500.0f / 19.0f)), forward[0].TextureSize );
+			var world = new RenderWorld();
+			world.Add( new MeshObject( mesh, new Transform( new Vector3( 30, 4, 0 ) ) ) );
+			world.Add( new MeshObject( mesh, new Transform( new Vector3( 20, 0, 0 ) ) ) );
+			world.Add( new MeshObject( mesh, new Transform( new Vector3( 50, -4, 0 ) ) ) );
+
+			using var target = ViewTarget.Create( new Vector2Int( 1000, 1000 ) );
+			using var system = new RenderSystem();
+
+			GpuCommand[] forward;
+			using ( var frame = Device.Capture() )
+			{
+				RenderHost.Current.NextFrame();
+				system.Render( world, LookingDownX(), target );
+				forward = frame.Commands.Where( c => c.IsDraw && c.In( "Opaque Forward" ) ).ToArray();
+			}
+
+			// One draw of the run of all three (an occlusion-culled one, whose instances the GPU counts), asking for what the
+			// nearest one needs: its nearest face is 19 away
+			Assert.AreEqual( 1, forward.Length );
+			Assert.AreEqual( 3, system.GetFeature<MeshRenderFeature>().RunsFor( system.MainPass ).Opaque.Single().Count );
+			Assert.AreEqual( (int)(4 * (500.0f / 19.0f)), forward[0].TextureSize );
+		}
+		finally
+		{
+			Device.StreamTextures = false;
+		}
 	}
 
 	/// <summary>

@@ -13,7 +13,6 @@ public sealed partial class RenderSystem : IDisposable
 	static readonly StringToken TransformBufferName = new( "g_TransformBuffer" );
 
 	readonly List<RenderFeature> features = new();
-	readonly Dictionary<Type, int> featureByType = new();
 	readonly GpuContext context = RenderHost.Current.Device.CreateContext();
 	readonly TransformBuffer transforms = new();
 	readonly ViewEnvironment environment = new();
@@ -148,7 +147,6 @@ public sealed partial class RenderSystem : IDisposable
 
 		feature.Index = features.Count;
 		features.Add( feature );
-		featureByType.Clear();
 	}
 
 	/// <summary>

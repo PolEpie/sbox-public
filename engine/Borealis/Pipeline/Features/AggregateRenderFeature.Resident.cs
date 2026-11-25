@@ -70,6 +70,9 @@ internal sealed partial class AggregateRenderFeature
 		/// <summary>Per depth kind, <see cref="GpuMaterial.DepthOnlyEpoch"/> when its batches' materials were last asked.</summary>
 		public readonly int[] DeviceDepthEpoch = [-1, -1, -1, -1];
 
+		/// <summary>Unforced depth batches that can change their material without changing the list.</summary>
+		internal DepthBatchGroups DepthBatches;
+
 		/// <summary>
 		/// Per depth kind, arrays that start with <see cref="Device"/>'s batches, for calls that hand the device more batches
 		/// after them (<see cref="TakeCombined"/>): the list is copied into one when it changes, not into every call's.
@@ -1872,6 +1875,63 @@ internal sealed partial class AggregateRenderFeature
 		return root.ShowsTags( key.Tags, key.IsWorld );
 	}
 
+	/// <summary>
+	/// The unforced depth prefix, grouped by source material and whether it strips pixels off the fast path.
+	/// Each group has the same outcome in <see cref="MaterialFor"/>; its members are a chain of batch indices.
+	/// </summary>
+	internal sealed class DepthBatchGroups
+	{
+		readonly int[] next;
+		readonly List<int> heads = new();
+
+		public DepthBatchGroups( ReadOnlySpan<GpuContext.GpuDrivenBatch> batches )
+		{
+			next = new int[batches.Length];
+			var groups = new Dictionary<GpuMaterial, (int KeepsPixel, int StripsPixel)>( ReferenceEqualityComparer.Instance );
+			for ( int i = 0; i < batches.Length; i++ )
+			{
+				var draw = batches[i].Draw;
+				if ( draw.ShadowFastPath || draw.Material is not { } material ) continue;
+
+				ref var pair = ref CollectionsMarshal.GetValueRefOrAddDefault( groups, material, out _ );
+				ref var group = ref (draw.Translucent || draw.AlphaTest ? ref pair.KeepsPixel : ref pair.StripsPixel);
+				if ( group == 0 )
+				{
+					next[i] = -1;
+					heads.Add( i );
+					group = heads.Count;
+				}
+				else
+				{
+					next[i] = heads[group - 1];
+					heads[group - 1] = i;
+				}
+			}
+		}
+
+		public bool Refresh( AggregateRenderFeature feature, Span<GpuContext.GpuDrivenBatch> batches, bool rebuilt )
+		{
+			var changed = false;
+			foreach ( var head in heads )
+			{
+				ref var first = ref batches[head];
+				var material = feature.MaterialFor( first.Draw, true, false, out var strip );
+				if ( !rebuilt && ReferenceEquals( first.Material, material ) && first.StripPixelShader == strip ) continue;
+
+				// On a rebuild the members were made individually: bring them all to the group's current choice.
+				for ( int i = head; i >= 0; i = next[i] )
+				{
+					ref var batch = ref batches[i];
+					if ( ReferenceEquals( batch.Material, material ) && batch.StripPixelShader == strip ) continue;
+					batch = batch with { Material = material, StripPixelShader = strip };
+					changed = true;
+				}
+			}
+
+			return changed;
+		}
+	}
+
 	/// <summary>Which of a list's device batch arrays a layer draws: by whether it draws depth, and whether it forces the depth-only material.</summary>
 	static int DeviceKind( bool depth, bool forceDepthOnly ) => (depth ? 1 : 0) | (forceDepthOnly ? 2 : 0);
 
@@ -1929,7 +1989,8 @@ internal sealed partial class AggregateRenderFeature
 
 			var changed = false;
 			var batches = CollectionsMarshal.AsSpan( list.Batches );
-			if ( made is null || made.Length < list.DeviceCount || !ReferenceEquals( list.DeviceDepthOnly[kind], depthOnlyMaterial ) )
+			var rebuilt = made is null || made.Length < list.DeviceCount || !ReferenceEquals( list.DeviceDepthOnly[kind], depthOnlyMaterial );
+			if ( rebuilt )
 			{
 				if ( made is null || made.Length < list.DeviceCount )
 				{
@@ -1937,6 +1998,7 @@ internal sealed partial class AggregateRenderFeature
 					list.Device[kind] = made = BatchPool.Rent( list.DeviceCount );
 					made.AsSpan().Clear();
 					list.DeviceMeshes[kind] = false;
+					if ( depth && !forceDepthOnly ) list.DepthBatches = null;
 					changed = true;
 				}
 
@@ -1951,29 +2013,24 @@ internal sealed partial class AggregateRenderFeature
 
 				list.DeviceDepthOnly[kind] = depthOnlyMaterial;
 			}
-			else
+			else if ( list.DeviceInstances[kind] != residentInstances )
 			{
-				// Made for this list before: only what can have changed since (DeviceBatch with the rest as it was)
-				var instances = list.DeviceInstances[kind] != residentInstances;
-				var materials = depth && !forceDepthOnly && list.DeviceDepthEpoch[kind] != epoch;
-				if ( instances || materials )
+				for ( int i = 0; i < batches.Length; i++ )
 				{
-					for ( int i = 0; i < batches.Length; i++ )
-					{
-						ref var batch = ref made[i];
-
-						// Nothing to draw, which its draw and the depth-only material decided: so it stays
-						if ( batch.Material is null ) continue;
-
-						var instance = instances ? batches[i].Aggregate.FirstInstance : batch.FirstInstance;
-						var strip = batch.StripPixelShader;
-						var material = materials ? MaterialFor( batch.Draw, depth, forceDepthOnly, out strip ) : batch.Material;
-						if ( instance == batch.FirstInstance && ReferenceEquals( material, batch.Material ) && strip == batch.StripPixelShader ) continue;
-
-						batch = batch with { Material = material, StripPixelShader = strip, FirstInstance = instance };
-						changed = true;
-					}
+					ref var batch = ref made[i];
+					var instance = batches[i].Aggregate.FirstInstance;
+					if ( batch.Material is null || instance == batch.FirstInstance ) continue;
+					batch = batch with { FirstInstance = instance };
+					changed = true;
 				}
+			}
+
+			// A material's depth-only answer only changes with the epoch (or the batches were made again)
+			if ( depth && !forceDepthOnly && depthOnlyMaterial is not null && !batches.IsEmpty && (rebuilt || list.DeviceDepthEpoch[kind] != epoch) )
+			{
+				var prefix = made.AsSpan( 0, batches.Length );
+				var groups = list.DepthBatches ??= new DepthBatchGroups( prefix );
+				changed |= groups.Refresh( this, prefix, rebuilt );
 			}
 
 			list.DeviceInstances[kind] = residentInstances;

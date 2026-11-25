@@ -1345,6 +1345,8 @@ internal sealed class GpuDrivenTables : IDisposable
 	/// </summary>
 	public bool Rings( GpuMaterial material ) => Volatile.Read( ref ringing ) > 0 && material is not null && ringMaterials.ContainsKey( material );
 
+	internal bool HasRingingMaterials => Volatile.Read( ref ringing ) > 0;
+
 	/// <summary>Whether this stage of a material rings (<see cref="Rings(GpuMaterial)"/>), for tests.</summary>
 	internal bool Rings( GpuMaterial material, ShaderStage stage ) => recordsPerStage.TryGetValue( (material, stage), out var made ) && made.Ring && !made.Classic;
 

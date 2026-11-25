@@ -878,6 +878,13 @@ internal sealed class SurfaceProgram : IDisposable
 {
 	readonly BackendDevice device;
 	readonly Dictionary<string, PassObjects> passes = new();
+	readonly ScenePasses depth, depthAlpha, depthTranslucent, forward, forwardAlpha, forwardTranslucent;
+
+	readonly record struct ScenePasses( PassObjects Ordinary, PassObjects Skinned, PassObjects Lightmapped )
+	{
+		public PassObjects Select( bool vertexCache, bool lightmapped ) => vertexCache ? Skinned : lightmapped ? Lightmapped ?? Ordinary : Ordinary;
+	}
+
 	// Pipelines' keys are record structs, not tuples: a tuple of eight or more keeps the rest in a tuple of its own, which its
 	// hash and equality box until the JIT has optimised them, so every draw's lookup allocated in a run's first seconds
 	readonly record struct PipelineKey( PassObjects Pass, VertexLayout Layout, Format Color, Format Depth, int Samples, ulong Constants, bool Ids, bool OpaqueFade, SurfaceRenderState State, bool DepthEqual, ulong Features, bool Normals, OverlayStencil Stencil );
@@ -972,6 +979,13 @@ internal sealed class SurfaceProgram : IDisposable
 
 			passes[name] = new PassObjects { Pass = pass, Vertex = Module( pass.Vertex ), Pixel = Module( pass.Pixel ), Sets = sets };
 		}
+
+		depth = ScenePassesOf( ShaderPasses.Depth );
+		depthAlpha = ScenePassesOf( ShaderPasses.DepthAlphaTest );
+		depthTranslucent = ScenePassesOf( BackendContext.DepthTranslucentPass );
+		forward = ScenePassesOf( ShaderPasses.Forward );
+		forwardAlpha = ScenePassesOf( ShaderPasses.Forward + "AlphaTest" );
+		forwardTranslucent = ScenePassesOf( ShaderPasses.Forward + "Translucent" );
 	}
 
 	static BindingType Type( ShaderBinding binding ) => binding.Kind switch
@@ -985,6 +999,23 @@ internal sealed class SurfaceProgram : IDisposable
 
 	/// <summary>A pass by name, or null.</summary>
 	public PassObjects Pass( string name ) => passes.TryGetValue( name, out var pass ) ? pass : null;
+
+	ScenePasses ScenePassesOf( string name ) => new( Pass( name ), Pass( name + ShaderPasses.Skinned ), Pass( name + ShaderPasses.Lightmapped ) );
+
+	/// <summary>Choose the classic surface pass without resolving its name on each draw.</summary>
+	public PassObjects ScenePass( in SurfaceRenderState state, bool noColor, bool vertexCache, bool lightmapped )
+	{
+		if ( noColor )
+		{
+			// A translucent surface needs an explicit shadow pass (glass dithers by its opacity).
+			if ( !state.DepthWrite || state.Translucent )
+				return depthTranslucent.Ordinary is null ? null : depthTranslucent.Select( vertexCache, lightmapped );
+			return (state.AlphaTest ? depthAlpha : depth).Select( vertexCache, lightmapped );
+		}
+
+		if ( state.DrawsTranslucent ) return forwardTranslucent.Select( vertexCache, lightmapped );
+		return (state.AlphaTest && forwardAlpha.Ordinary is not null ? forwardAlpha : forward).Select( vertexCache, lightmapped );
+	}
 
 	/// <summary>
 	/// What pipelines for <paramref name="material"/> are specialised for: its feature values, the same object for every

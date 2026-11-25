@@ -240,23 +240,22 @@ public sealed partial class ShaderDrawer
 	{
 		var size = Math.Max( globals?.Size ?? 16, 16 );
 		var data = Scratch( size );
-		data.Clear();
-		if ( globals is not null )
+		if ( globals is null ) data.Clear();
+		else
 		{
 			var layout = BackendContext.GlobalLayouts.GetValue( globals, static g => new BackendContext.SurfaceGlobalsLayout( g ) );
-			layout.Defaults.AsSpan( 0, Math.Min( layout.Defaults.Length, size ) ).CopyTo( data );
+			layout.Defaults.AsSpan().CopyTo( data );
 			Span<float> one = stackalloc float[1];
-			for ( int a = 0; a < layout.Bound.Length; a++ )
+			foreach ( ref readonly var slot in layout.Slots.AsSpan() )
 			{
-				var member = globals.Members[layout.Bound[a]];
-				if ( layout.Ids[a] == TangentFrameId )
+				if ( slot.Id == TangentFrameId )
 				{
 					one[0] = tangent ? 1 : 0;
-					BackendContext.SurfaceGlobalsLayout.Write( data, member, one );
+					BackendContext.SurfaceGlobalsLayout.Write( data, slot.Offset, slot.Kind, slot.Components, one );
 				}
-				else if ( attributes.Get( layout.Ids[a] ) is float[] value )
+				else if ( attributes.Get( slot.Id ) is float[] value )
 				{
-					BackendContext.SurfaceGlobalsLayout.Write( data, member, value );
+					BackendContext.SurfaceGlobalsLayout.Write( data, slot.Offset, slot.Kind, slot.Components, value );
 				}
 			}
 		}

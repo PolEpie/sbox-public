@@ -338,6 +338,8 @@ internal sealed partial class BackendContext
 				if ( i == prefix && plan is null && prefix > 0 ) openBucket = prefixBuckets = gpuDrivenBucketCount;
 
 				ref readonly var batch = ref batches[i];
+				var source = batch.Mesh?.Geometry as IBackendGeometry;
+				DrawGeometry? orderedGeometry = null;
 
 				// In order: nothing after a batch left to the caller; else only the last bucket, on its index page
 				if ( inOrder )
@@ -351,7 +353,11 @@ internal sealed partial class BackendContext
 					commandsBefore = totalCommands;
 					openBucket = Math.Max( gpuDrivenBucketCount - 1, 0 );
 					if ( gpuDrivenBucketCount > 0 && gpuDrivenBuckets[gpuDrivenBucketCount - 1].Batches is { Count: > 0 } last
-						&& batch.Mesh?.Geometry is IBackendGeometry && GeometryOf( batch ).Pooled is { } inOrderPooled && inOrderPooled.IndexPageSlot != last[^1].Page ) openBucket = gpuDrivenBucketCount;
+						&& source is not null )
+					{
+						orderedGeometry = GeometryOf( batch, source );
+						if ( orderedGeometry.Value.Pooled is { } inOrderPooled && inOrderPooled.IndexPageSlot != last[^1].Page ) openBucket = gpuDrivenBucketCount;
+					}
 				}
 				if ( batch.TextureSize > 0 ) device.AskTextures( batch.Material, batch.TextureSize );
 
@@ -365,11 +371,10 @@ internal sealed partial class BackendContext
 					}
 
 					// A skinned one from the vertex cache with its skinned GPU-driven pass, under its own object attributes
-					if ( batch.Mesh?.Geometry is IBackendGeometry surfaceSource && surfaceSource.Use() && GeometryOf( batch ).Pooled is not null )
+					if ( source is not null && source.Use() && (orderedGeometry ?? GeometryOf( batch, source )).Pooled is { } surfacePooled )
 					{
 						SetObjectAttributes( batch.OwnAttributes, batch.ObjectAttributes );
 						NextPassState( cache );
-						if ( batchLighting.Length < batches.Length ) Array.Resize( ref batchLighting, Math.Max( batches.Length, batchLighting.Length * 2 ) );
 						if ( !lastAttributesSet || !ReferenceEquals( batch.ObjectAttributes, lastAttributes ) || !ReferenceEquals( batch.OwnAttributes, lastOwn ) )
 						{
 							(lastAttributes, lastOwn, lastAttributesSet) = (batch.ObjectAttributes, batch.OwnAttributes, true);
@@ -380,14 +385,14 @@ internal sealed partial class BackendContext
 						batchLighting[i] = lastLighting;
 						if ( SurfaceBucket( surface, shaderMode, batch.StripPixelShader || r.Color is null, batch.ObjectAttributes, lastKey, stencil, batch.Skinned, batch.VertexCache, batch.OwnAttributes ) is { } surfaceBucket )
 						{
-							surfaceBucket.Batches.Add( (GeometryOf( batch ).Pooled.Value.IndexPageSlot, i) );
+							surfaceBucket.Batches.Add( (surfacePooled.IndexPageSlot, i) );
 							device.Surfaces.CountGpuDriven();
 							surfaceBucket.Commands += batch.Count;
 							totalCommands += batch.Count;
 							var surfaceFragments = FragmentCount( batch );
 							gpuCull &= surfaceFragments > 0 && (batch.Instances || batch.Owner is ResidentMeshes || transforms.InstanceSlot( batch.FirstInstance + surfaceFragments - 1 ) == transforms.InstanceSlot( batch.FirstInstance ) + surfaceFragments - 1);
 							surfaceBucket.Fragments += surfaceFragments;
-							CountMeshletChunks( surfaceBucket, batch, surfaceFragments );
+							CountMeshletChunks( surfaceBucket, batch, surfaceFragments, surfacePooled.IndexFormat );
 							totalFragments += surfaceFragments;
 						}
 						else if ( batch.Skinned ) LeftClassic( surface.Name, shaderMode, batch.VertexCache ? "surface, no skinned GPU-driven pass" : "surface, no GPU-driven pass" );
@@ -397,8 +402,9 @@ internal sealed partial class BackendContext
 					continue;
 				}
 
-				if ( batch.Material is not BackendMaterial { Shader: { } shader } m || batch.Mesh?.Geometry is not IBackendGeometry source || !source.Use() ) continue;
-				if ( GeometryOf( batch ).Pooled is null )
+				if ( batch.Material is not BackendMaterial { Shader: { } shader } m || source is null || !source.Use() ) continue;
+				var geometry = orderedGeometry ?? GeometryOf( batch, source );
+				if ( geometry.Pooled is not { } pooled )
 				{
 					LeftClassic( shader, shaderMode, batch.VertexCache ? "vertex cache geometry not pooled" : "geometry not pooled" );
 					continue;
@@ -465,12 +471,11 @@ internal sealed partial class BackendContext
 				var pixelMaterial = 0u;
 				if ( device.GpuDrivenMaterialBuckets && !depthOnly && batch.OwnAttributes is null )
 				{
-					var uncompressed = GeometryOf( batch ).UncompressedTangentFrame;
-					pixelMaterial = MaterialRecord( tables, m, variant.Pixel, uncompressed );
+					pixelMaterial = MaterialRecord( tables, m, variant.Pixel, geometry.UncompressedTangentFrame );
 				}
 
 				var bucket = FindBucket( variant, batch.ObjectAttributes, lastKey, depthOnly, noColor, pixelMaterial, m, mode, stencil, batch.Skinned, batch.OwnAttributes );
-				bucket.Batches.Add( (GeometryOf( batch ).Pooled.Value.IndexPageSlot, i) );
+				bucket.Batches.Add( (pooled.IndexPageSlot, i) );
 				bucket.Commands += batch.Count;
 				totalCommands += batch.Count;
 
@@ -478,7 +483,7 @@ internal sealed partial class BackendContext
 				var fragmentCount = FragmentCount( batch );
 				gpuCull &= fragmentCount > 0 && (batch.Instances || batch.Owner is ResidentMeshes || transforms.InstanceSlot( batch.FirstInstance + fragmentCount - 1 ) == transforms.InstanceSlot( batch.FirstInstance ) + fragmentCount - 1);
 				bucket.Fragments += fragmentCount;
-				CountMeshletChunks( bucket, batch, fragmentCount );
+				CountMeshletChunks( bucket, batch, fragmentCount, pooled.IndexFormat );
 				totalFragments += fragmentCount;
 			}
 
@@ -658,9 +663,10 @@ internal sealed partial class BackendContext
 	}
 
 	/// <summary>What a batch draws from: its draw's geometry, or its vertex-cache form for a skinned draw from the cache.</summary>
-	static DrawGeometry GeometryOf( in GpuDrivenBatch batch )
+	static DrawGeometry GeometryOf( in GpuDrivenBatch batch ) => GeometryOf( batch, (IBackendGeometry)batch.Mesh.Geometry );
+
+	static DrawGeometry GeometryOf( in GpuDrivenBatch batch, IBackendGeometry source )
 	{
-		var source = (IBackendGeometry)batch.Mesh.Geometry;
 		if ( batch.VertexCache && source is ISkinnedGeometry skinned && skinned.VertexCacheFor( batch.Draw.Mesh, batch.Draw.DrawCall ) is { } cache ) return cache.Geometry;
 		return source.For( batch.Draw.Mesh, batch.Draw.DrawCall );
 	}
@@ -714,6 +720,25 @@ internal sealed partial class BackendContext
 	ShaderAttributes cullAttributes;
 	byte[] cullConstants;
 	readonly List<(int Bucket, BufferHandle Page, IndexFormat Format, int First, int Count)> cullRuns = new();
+
+	static class CullAttribute
+	{
+		public static readonly int Frame = AttributeIds.Of( "BorealisCullFrame" );
+		public static readonly int Stats = AttributeIds.Of( "BorealisCullStats" );
+		public static readonly int Levels = AttributeIds.Of( "BorealisCullLevels" );
+		public static readonly int LodFade = AttributeIds.Of( LodFadeAttribute );
+		public static readonly int Stamps = AttributeIds.Of( "BorealisCullStamps" );
+		public static readonly int Mask = AttributeIds.Of( "BorealisCullMask" );
+		public static readonly int Compacted = AttributeIds.Of( "BorealisCullCompacted" );
+		public static readonly int HiZVisible = AttributeIds.Of( "BorealisHiZVisible" );
+		public static readonly int MeshletStamps = AttributeIds.Of( "BorealisMeshletStamps" );
+		public static readonly int MeshletCompacted = AttributeIds.Of( "BorealisMeshletCompacted" );
+		public static readonly int MeshletCompacted16 = AttributeIds.Of( "BorealisMeshletCompacted16" );
+		public static readonly int CullConstants = AttributeIds.Of( "BorealisGpuDrivenCull_t" );
+		public static readonly int Ids = AttributeIds.Of( "BorealisIds" );
+		public static readonly int Msaa = AttributeIds.Of( "D_MSAA" );
+		public static readonly int MarkConstants = AttributeIds.Of( "BorealisGpuDrivenMark_t" );
+	}
 
 	const int CullViewBytes = CullViewRecord.Size;
 	const int CullBatchBytes = BatchRecord.Size;
@@ -1205,58 +1230,61 @@ internal sealed partial class BackendContext
 		// the setup culled for that draws no ids, lists or meshlets stays in the scope
 		if ( dispatch || ids || lists || meshletPass ) CloseScope( flushClears: false );
 
-		// Cull and write the commands, then draw them
-		cullDrawer ??= new ShaderDrawer( device );
-		cullAttributes ??= new ShaderAttributes();
-		cullConstants ??= new byte[Marshal.SizeOf<GpuDrivenCullConstants>()];
-		var lods = device.LodStore;
-		var lodTable = lods?.Table ?? (-1, 0u);
+		// A resident raster-only call already has commands. Only the cull and list compaction read these attributes.
+		if ( dispatch || lists )
+		{
+			cullDrawer ??= new ShaderDrawer( device );
+			cullAttributes ??= new ShaderAttributes();
+			cullConstants ??= new byte[Marshal.SizeOf<GpuDrivenCullConstants>()];
+			var lods = device.LodStore;
+			var lodTable = lods?.Table ?? (-1, 0u);
 
-		// Forward's compaction sets the visible bits of the view's next prepass (two-phase Hi-Z occlusion)
-		var hizBits = lists && device.HiZOcclusion && visibility is not null && visibility.HiZVisible[visibility.HiZCurrent].IsValid;
-		if ( hizBits ) visibility.HiZWrote = true;
-		var fades = device.LodFades();
-		MemoryMarshal.Write( cullConstants, new GpuDrivenCullConstants
-		{
-			Input = (uint)frameOffset,
-			Batches = (uint)batchCount,
-			Instances = (uint)(frameOffset + instanceOffset),
-			Commands = (uint)(frameOffset + commandOffset),
-			FirstInstance = firstInstance,
-			Fragments = (uint)tables.FragmentSlot,
-			Draws = (uint)slots.Draws,
-			Runs = compact ? (uint)(frameOffset + runsOffset) : 0,
-			Frame = device.GpuDrivenFrame,
-			Capacity = visibility is { CompactedCapacity: > 0 } ? (uint)visibility.CompactedCapacity : BackendDevice.VisibilityCompactedIndices,
-			Visibility = hizBits ? 1u : 0u,
-			FragmentWords = (uint)(frameOffset + fragmentOffset) - firstInstance * 4,
-			Listed = lists || meshletPass ? (uint)(frameOffset + listedOffset) : 0,
-			MeshletRuns = meshletPass || lists && MeshletStampsReady( visibility ) ? (uint)device.MeshletStore.RunSlotCovering( tables.DrawRecords ) : uint.MaxValue,
-			LodTable = lodTable.Slot >= 0 ? (uint)lodTable.Slot : uint.MaxValue,
-			LodCount = lodTable.Records,
-			LodFadeNow = device.LodFadeNow,
-			LodFadeTicks = fades.Ticks,
-		} );
-		cullAttributes.Clear();
-		cullAttributes.Set( "BorealisCullFrame", frameBuffer );
-		if ( CountsOnDevice( cull ) ) cullAttributes.Set( "BorealisCullStats", device.CullStats.Buffer );
-		if ( lods is not null ) cullAttributes.Set( "BorealisCullLevels", lods.State );
-		if ( fades.States.IsValid ) cullAttributes.Set( LodFadeAttribute, fades.States );
-		if ( visibility is not null )
-		{
-			cullAttributes.Set( "BorealisCullStamps", visibility.Stamps );
-			cullAttributes.Set( "BorealisCullMask", visibility.Mask );
-			cullAttributes.Set( "BorealisCullCompacted", lists ? compacted : visibility.Compacted );
-			cullAttributes.Set( "BorealisHiZVisible", hizBits ? visibility.HiZVisible[visibility.HiZCurrent] : visibility.Stamps );
-			if ( MeshletStampsReady( visibility ) )
+			// Forward's compaction sets the visible bits of the view's next prepass (two-phase Hi-Z occlusion)
+			var hizBits = lists && device.HiZOcclusion && visibility is not null && visibility.HiZVisible[visibility.HiZCurrent].IsValid;
+			if ( hizBits ) visibility.HiZWrote = true;
+			var fades = device.LodFades();
+			MemoryMarshal.Write( cullConstants, new GpuDrivenCullConstants
 			{
-				cullAttributes.Set( "BorealisMeshletStamps", visibility.MeshletStamps );
-				cullAttributes.Set( "BorealisMeshletCompacted", visibility.PrepassCompacted );
-				cullAttributes.Set( "BorealisMeshletCompacted16", visibility.PrepassCompacted16 );
+				Input = (uint)frameOffset,
+				Batches = (uint)batchCount,
+				Instances = (uint)(frameOffset + instanceOffset),
+				Commands = (uint)(frameOffset + commandOffset),
+				FirstInstance = firstInstance,
+				Fragments = (uint)tables.FragmentSlot,
+				Draws = (uint)slots.Draws,
+				Runs = compact ? (uint)(frameOffset + runsOffset) : 0,
+				Frame = device.GpuDrivenFrame,
+				Capacity = visibility is { CompactedCapacity: > 0 } ? (uint)visibility.CompactedCapacity : BackendDevice.VisibilityCompactedIndices,
+				Visibility = hizBits ? 1u : 0u,
+				FragmentWords = (uint)(frameOffset + fragmentOffset) - firstInstance * 4,
+				Listed = lists || meshletPass ? (uint)(frameOffset + listedOffset) : 0,
+				MeshletRuns = meshletPass || lists && MeshletStampsReady( visibility ) ? (uint)device.MeshletStore.RunSlotCovering( tables.DrawRecords ) : uint.MaxValue,
+				LodTable = lodTable.Slot >= 0 ? (uint)lodTable.Slot : uint.MaxValue,
+				LodCount = lodTable.Records,
+				LodFadeNow = device.LodFadeNow,
+				LodFadeTicks = fades.Ticks,
+			} );
+			cullAttributes.Clear();
+			cullAttributes.SetById( CullAttribute.Frame, frameBuffer );
+			if ( CountsOnDevice( cull ) ) cullAttributes.SetById( CullAttribute.Stats, device.CullStats.Buffer );
+			if ( lods is not null ) cullAttributes.SetById( CullAttribute.Levels, lods.State );
+			if ( fades.States.IsValid ) cullAttributes.SetById( CullAttribute.LodFade, fades.States );
+			if ( visibility is not null )
+			{
+				cullAttributes.SetById( CullAttribute.Stamps, visibility.Stamps );
+				cullAttributes.SetById( CullAttribute.Mask, visibility.Mask );
+				cullAttributes.SetById( CullAttribute.Compacted, lists ? compacted : visibility.Compacted );
+				cullAttributes.SetById( CullAttribute.HiZVisible, hizBits ? visibility.HiZVisible[visibility.HiZCurrent] : visibility.Stamps );
+				if ( MeshletStampsReady( visibility ) )
+				{
+					cullAttributes.SetById( CullAttribute.MeshletStamps, visibility.MeshletStamps );
+					cullAttributes.SetById( CullAttribute.MeshletCompacted, visibility.PrepassCompacted );
+					cullAttributes.SetById( CullAttribute.MeshletCompacted16, visibility.PrepassCompacted16 );
+				}
 			}
-		}
 
-		cullAttributes.SetData( "BorealisGpuDrivenCull_t", cullConstants );
+			cullAttributes.SetDataById( CullAttribute.CullConstants, cullConstants );
+		}
 
 		// View buffers append disjoint ranges until the next clear. Shared shadow buffers can be overwritten.
 		if ( cull.Shadow && meshletPass ) r.List.Barrier( PipelineStage.VertexInput, MemoryAccess.IndexRead, PipelineStage.ComputeShader, MemoryAccess.ShaderWrite );
@@ -1510,11 +1538,11 @@ internal sealed partial class BackendContext
 	internal static int MeshletChunksOf( uint indexCount ) => (int)Math.Clamp( (Math.Min( indexCount / 3, MeshletChunks * ChunkMeshlets ) + ChunkMeshlets - 1) / ChunkMeshlets, 1u, MeshletChunks );
 
 	/// <summary>Count a batch's fragments' meshlet chunks (<see cref="MeshletChunksOf"/>) into its bucket, by its index size.</summary>
-	void CountMeshletChunks( GpuDrivenBucket bucket, in GpuDrivenBatch batch, int fragments )
+	void CountMeshletChunks( GpuDrivenBucket bucket, in GpuDrivenBatch batch, int fragments, IndexFormat format )
 	{
 		var indexCount = !batch.Instances && batch.Owner is AggregateObject aggregate ? aggregate.MaxIndexCount : (uint)Math.Max( batch.Draw.IndexCount, 0 );
 		var chunks = fragments * MeshletChunksOf( indexCount );
-		if ( GeometryOf( batch ).Pooled.Value.IndexFormat == IndexFormat.UInt32 ) bucket.MeshletChunks32 += chunks;
+		if ( format == IndexFormat.UInt32 ) bucket.MeshletChunks32 += chunks;
 		else bucket.MeshletChunks16 += chunks;
 	}
 
@@ -1755,11 +1783,22 @@ internal sealed partial class BackendContext
 	/// </summary>
 	bool PlanCurrent( GpuDrivenPlan plan, StringToken shaderMode )
 	{
-		// A ringing material's records are copies its frame slot rewrites (GpuDrivenTables.Rings): made again each frame
 		var tables = device.GpuDrivenTables;
 		foreach ( var (material, version) in plan.Materials )
 		{
-			if ( MaterialVersion( material ) != version || tables.Rings( material ) ) return false;
+			if ( material.Version != version ) return false;
+		}
+		foreach ( var (material, version) in plan.SurfaceMaterials )
+		{
+			if ( material.Version != version ) return false;
+		}
+
+		// A ringing material's records are copies its frame slot rewrites. Most calls need no individual ring lookups.
+		if ( tables.HasRingingMaterials )
+		{
+			foreach ( var (material, _) in plan.Materials ) if ( tables.Rings( material ) ) return false;
+			foreach ( var (material, _) in plan.SurfaceMaterials ) if ( tables.Rings( material ) ) return false;
+			foreach ( var material in plan.OtherMaterials ) if ( tables.Rings( material ) ) return false;
 		}
 
 		foreach ( var (attributes, version) in plan.Attributes )
@@ -1769,6 +1808,10 @@ internal sealed partial class BackendContext
 
 		// Its records name its models' pages: a model freed since (its pages given back) makes it again without it, and the
 		// rest are noted as drawn this frame
+		foreach ( var model in plan.Models )
+		{
+			if ( !model.Use() ) return false;
+		}
 		foreach ( var geometry in plan.Geometries )
 		{
 			if ( !geometry.Use() ) return false;
@@ -1778,7 +1821,7 @@ internal sealed partial class BackendContext
 
 		// The rest is the buckets', which read nothing else that changes but the pass's attributes and surfaces' programs:
 		// with those the same as before a check that passed in full, they check the same
-		var reads = plan.Reads;
+		var reads = System.Threading.Volatile.Read( ref plan.Reads );
 		if ( reads is not null && PlanReadsCurrent( reads ) )
 		{
 			// Left as a full check leaves them
@@ -1835,14 +1878,7 @@ internal sealed partial class BackendContext
 
 		// What it read is kept from the second check on: a plan that doesn't pass its first isn't worked out for it
 		if ( reads is null ) System.Threading.Interlocked.CompareExchange( ref plan.Reads, MakePlanReads( plan ), null );
-		else
-		{
-			lock ( reads )
-			{
-				planReadValues.AsSpan( 0, reads.Values.Length ).CopyTo( reads.Values );
-				reads.Passed = true;
-			}
-		}
+		else reads.Keep( planReadValues.AsSpan( 0, reads.ValueCount ) );
 
 		return true;
 	}
@@ -1858,7 +1894,8 @@ internal sealed partial class BackendContext
 	bool PlanReadsCurrent( GpuDrivenPlanReads reads )
 	{
 		var (combos, integers, hashed) = (reads.Combos, reads.Integers, reads.Hashed);
-		if ( planReadValues.Length < reads.Values.Length ) planReadValues = new long[Math.Max( reads.Values.Length, planReadValues.Length * 2 )];
+		var count = reads.ValueCount;
+		if ( planReadValues.Length < count ) planReadValues = new long[Math.Max( count, planReadValues.Length * 2 )];
 
 		// As LookupCombo and Lookup fall back to them, and as AttributeHash hashes them; the object attributes the checks read
 		// first are the plan's, whose versions are compared already
@@ -1868,10 +1905,7 @@ internal sealed partial class BackendContext
 		for ( int i = 0; i < integers.Length; i++ ) values[at++] = Read( Integer( attributes.Get( integers[i] ) ) );
 		for ( int i = 0; i < hashed.Length; i++ ) values[at++] = (uint)(attributes.Get( hashed[i] )?.GetHashCode() ?? 0);
 
-		lock ( reads )
-		{
-			if ( !reads.Passed || !values.AsSpan( 0, at ).SequenceEqual( reads.Values ) ) return false;
-		}
+		if ( !reads.Matches( values.AsSpan( 0, at ) ) ) return false;
 
 		// Where SurfaceShaders.For answers with the material's program without looking further
 		foreach ( var (surface, program) in reads.Surfaces )
@@ -1893,7 +1927,7 @@ internal sealed partial class BackendContext
 	{
 		var seen = new HashSet<long>();
 		List<StringToken> combos = new(), integers = new(), hashed = new();
-		List<(SurfaceMaterial, SurfaceProgram)> surfaces = new();
+		HashSet<(SurfaceMaterial, SurfaceProgram)> surfaces = new();
 		for ( int b = 0; b < plan.Checks.Length; b++ )
 		{
 			var first = plan.Checks[b].Material;
@@ -1905,13 +1939,9 @@ internal sealed partial class BackendContext
 				continue;
 			}
 
-			if ( first is not BackendMaterial { Shader: { } shader } material ) continue;
-			foreach ( var type in (ReadOnlySpan<ShaderProgramType>)[ShaderProgramType.Vertex, ShaderProgramType.Pixel] )
-			{
-				foreach ( var combo in shader[type]?.DynamicCombos ?? [] ) Add( combos, 0, Token( combo.Name ) );
-			}
-
-			foreach ( var name in material.SpecializationAttributes ) Add( integers, 1, Token( name ) );
+			if ( first is not BackendMaterial { Inputs: { } inputs } ) continue;
+			foreach ( var (_, token) in inputs.Combos ) Add( combos, 0, token );
+			foreach ( var (_, token) in inputs.Specialization ) Add( integers, 1, token );
 
 			var pixelRecord = !bucket.DepthOnly || bucket.Ids && !bucket.IdsShader;
 			if ( bucket.Variant.Vertex is { } vertexStage )
@@ -1930,8 +1960,7 @@ internal sealed partial class BackendContext
 			Combos = combos.ToArray(),
 			Integers = integers.ToArray(),
 			Hashed = hashed.ToArray(),
-			Surfaces = surfaces.ToArray(),
-			Values = new long[combos.Count + integers.Count + hashed.Count],
+			Surfaces = [.. surfaces],
 		};
 
 		void Add( List<StringToken> list, int kind, StringToken name )
@@ -1966,17 +1995,32 @@ internal sealed partial class BackendContext
 		for ( int i = 0; i < runs; i++ ) compacted[i] = compactedBuffer.IsValid && cullRuns[i].Count != TaskTail && (cullRuns[i].Page == compactedBuffer || cullRuns[i].First >= totalFragments);
 
 		var scratch = planScratch ??= new();
-		var (materials, attributes, geometries, seen) = (scratch.Materials, scratch.Attributes, scratch.Geometries, scratch.Seen);
-		(GpuMaterial, int)[] keptMaterials;
+		var (materials, surfaces, others, attributes, models, geometries, seen) = (scratch.Materials, scratch.Surfaces, scratch.Others, scratch.Attributes, scratch.Models, scratch.Geometries, scratch.Seen);
+		(BackendMaterial, int)[] keptMaterials;
+		(SurfaceMaterial, int)[] keptSurfaces;
+		GpuMaterial[] keptOthers;
 		(BackendParameters, int)[] keptAttributes;
+		BackendModel[] keptModels;
 		IBackendGeometry[] keptGeometries;
 		try
 		{
 			foreach ( ref readonly var batch in batches )
 			{
-				if ( batch.Material is not null && seen.Add( batch.Material ) ) materials.Add( (batch.Material, MaterialVersion( batch.Material )) );
-				// A freed one's batches drew nothing, so its records aren't in the plan
-				if ( batch.Mesh?.Geometry is IBackendGeometry geometry && seen.Add( geometry ) && geometry.Use() ) geometries.Add( geometry );
+				if ( batch.Material is { } material && seen.Add( material ) )
+				{
+					if ( material is BackendMaterial native ) materials.Add( (native, native.Version) );
+					else if ( material is SurfaceMaterial surface ) surfaces.Add( (surface, surface.Version) );
+					else others.Add( material );
+				}
+				// A freed one's batches drew nothing. BackendMesh's default Use has no liveness or lifetime work.
+				if ( batch.Mesh?.Geometry is IBackendGeometry geometry && geometry is not BackendMesh && seen.Add( geometry ) )
+				{
+					if ( geometry is BackendModel model )
+					{
+						if ( model.Use() ) models.Add( model );
+					}
+					else if ( geometry.Use() ) geometries.Add( geometry );
+				}
 				if ( batch.ObjectAttributes is BackendParameters parameters && seen.Add( parameters ) ) attributes.Add( (parameters, parameters.Version) );
 				if ( batch.MeshLighting is null ) continue;
 				foreach ( var meshLighting in batch.MeshLighting )
@@ -1985,7 +2029,8 @@ internal sealed partial class BackendContext
 				}
 			}
 
-			(keptMaterials, keptAttributes, keptGeometries) = (materials.ToArray(), attributes.ToArray(), geometries.ToArray());
+			(keptMaterials, keptSurfaces, keptOthers) = (materials.ToArray(), surfaces.ToArray(), others.ToArray());
+			(keptAttributes, keptModels, keptGeometries) = (attributes.ToArray(), models.ToArray(), geometries.ToArray());
 		}
 		finally
 		{
@@ -1993,7 +2038,10 @@ internal sealed partial class BackendContext
 			var big = seen.Count > PlanScratch.KeepUpTo;
 			seen.Clear();
 			materials.Clear();
+			surfaces.Clear();
+			others.Clear();
 			attributes.Clear();
+			models.Clear();
 			geometries.Clear();
 			if ( big ) planScratch = null;
 		}
@@ -2013,7 +2061,10 @@ internal sealed partial class BackendContext
 			Buckets = buckets,
 			Checks = checks,
 			Materials = keptMaterials,
+			SurfaceMaterials = keptSurfaces,
+			OtherMaterials = keptOthers,
 			Attributes = keptAttributes,
+			Models = keptModels,
 			Geometries = keptGeometries,
 			BatchRecords = records,
 			Moved = movedWords,
@@ -2032,8 +2083,11 @@ internal sealed partial class BackendContext
 		public const int KeepUpTo = 1 << 16;
 
 		public readonly HashSet<object> Seen = new( ReferenceEqualityComparer.Instance );
-		public readonly List<(GpuMaterial, int)> Materials = new();
+		public readonly List<(BackendMaterial, int)> Materials = new();
+		public readonly List<(SurfaceMaterial, int)> Surfaces = new();
+		public readonly List<GpuMaterial> Others = new();
 		public readonly List<(BackendParameters, int)> Attributes = new();
+		public readonly List<BackendModel> Models = new();
 		public readonly List<IBackendGeometry> Geometries = new();
 	}
 
@@ -2521,11 +2575,13 @@ internal sealed partial class BackendContext
 			CallFirst = call.First,
 			CallInstances = call.Instances,
 		} );
+		cullDrawer ??= new ShaderDrawer( device );
+		cullAttributes ??= new ShaderAttributes();
 		cullAttributes.Clear();
-		cullAttributes.Set( "BorealisIds", visibility.Ids );
-		cullAttributes.Set( "BorealisCullMask", visibility.Mask );
-		cullAttributes.SetCombo( "D_MSAA", visibility.Samples > 1 ? 1 : 0 );
-		cullAttributes.SetData( "BorealisGpuDrivenMark_t", markConstants );
+		cullAttributes.SetById( CullAttribute.Ids, visibility.Ids );
+		cullAttributes.SetById( CullAttribute.Mask, visibility.Mask );
+		cullAttributes.SetComboById( CullAttribute.Msaa, visibility.Samples > 1 ? 1 : 0 );
+		cullAttributes.SetDataById( CullAttribute.MarkConstants, markConstants );
 		var markScope = timer?.Begin( r.List, "GPU-driven mark", PassTimer.ScopeKind.Own, count: false ) ?? -1;
 		r.List.Marker( "GPU-driven mark" );
 		cullDrawer.Dispatch( r.List, shader, cullAttributes, visibility.Width, visibility.Height, 1 );

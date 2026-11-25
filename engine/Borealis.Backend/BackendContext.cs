@@ -1210,16 +1210,7 @@ internal sealed partial class BackendContext : GpuContext
 		// The key DrawWithMaterialObject uses, made once per values; the lookups made once per context
 		comboLookup ??= name => LookupCombo( Token( name ) );
 		specializationLookup ??= name => Integer( Lookup( Token( name ) ) );
-		return material.Variant( device.Shaders, mode, ComboKeyByValue( material, mode ), comboLookup, specializationLookup );
-	}
-
-	/// <summary>The values of the material's specialization attributes that are set, for its variant key.</summary>
-	void AppendSpecialization( System.Text.StringBuilder key, BackendMaterial material )
-	{
-		foreach ( var name in material.SpecializationAttributes )
-		{
-			if ( Integer( Lookup( Token( name ) ) ) is int value && value != 0 ) key.Append( ";#" ).Append( name ).Append( '=' ).Append( value );
-		}
+		return material.Variant( device.Shaders, mode, ComboKeyByValue( material.Inputs, mode ), comboLookup, specializationLookup );
 	}
 
 	static int? Integer( object value ) => value switch

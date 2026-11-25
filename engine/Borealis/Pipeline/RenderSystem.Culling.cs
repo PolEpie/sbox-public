@@ -48,10 +48,11 @@ public sealed partial class RenderSystem
 		stats.ObjectsSizeCulled += rejected;
 		if ( reasons ) stats.ObjectsFrustumCulled += world.Count - candidates.Count;
 
+		var typeFeatures = PrepareCullFeatures( world );
 		if ( ParallelRecording && candidates.Count >= MinParallelCullCandidates && JobDispatcher.MaxDegreeOfParallelism > 1 )
-			CullInChunks( world, mainPass, candidates, inTree, inFrustum, ref stats );
+			CullInChunks( world, mainPass, candidates, inTree, inFrustum, typeFeatures, ref stats );
 		else
-			Cull( world, mainPass, candidates, inTree, inFrustum, ref stats );
+			Cull( world, mainPass, candidates, inTree, inFrustum, typeFeatures, ref stats );
 	}
 
 	/// <summary>
@@ -78,17 +79,14 @@ public sealed partial class RenderSystem
 	// Each chunk's visible objects by feature, and its counts, merged in candidate order after
 	List<int>[][] chunkVisible = [];
 	RenderStats[] chunkStats = [];
-	(RenderWorld World, ViewPass Pass, List<int> Candidates, int InTree, bool InFrustum) chunkCull;
+	(RenderWorld World, ViewPass Pass, List<int> Candidates, int InTree, bool InFrustum, int[] TypeFeatures) chunkCull;
 
 	/// <summary>
 	/// <see cref="Cull"/> split into chunks of candidates across the job dispatcher's threads, each into its own lists,
 	/// then joined in candidate order - the same visible lists and counts as culling them in one go.
 	/// </summary>
-	void CullInChunks( RenderWorld world, ViewPass pass, List<int> candidates, int inTree, bool inFrustum, ref RenderStats stats )
+	void CullInChunks( RenderWorld world, ViewPass pass, List<int> candidates, int inTree, bool inFrustum, int[] typeFeatures, ref RenderStats stats )
 	{
-		// Feature lookups that miss write the shared cache
-		WarmFeatureTypes( world );
-
 		var chunks = (candidates.Count + CullChunkCandidates - 1) / CullChunkCandidates;
 		if ( chunkVisible.Length < chunks )
 		{
@@ -111,13 +109,13 @@ public sealed partial class RenderSystem
 			chunkStats[c] = default;
 		}
 
-		chunkCull = (world, pass, candidates, inTree, inFrustum);
+		chunkCull = (world, pass, candidates, inTree, inFrustum, typeFeatures);
 		JobDispatcher.For( chunks, this, static ( system, c ) =>
 		{
-			var (world, pass, candidates, inTree, inFrustum) = system.chunkCull;
+			var (world, pass, candidates, inTree, inFrustum, typeFeatures) = system.chunkCull;
 			var start = c * CullChunkCandidates;
 			var end = Math.Min( start + CullChunkCandidates, candidates.Count );
-			system.CullRange( world, pass, candidates, start, end, inTree, inFrustum, system.chunkVisible[c], ref system.chunkStats[c] );
+			system.CullRange( world, pass, candidates, start, end, inTree, inFrustum, typeFeatures, system.chunkVisible[c], ref system.chunkStats[c] );
 		}, itemsPerBatch: 1 );
 		chunkCull = default;
 
@@ -184,14 +182,14 @@ public sealed partial class RenderSystem
 	/// Shadow views also apply caster and static filters. With <see cref="ViewPass.CullReasons"/>, meshes culled for their
 	/// size or tags are kept with their reason, and not counted visible.
 	/// </summary>
-	internal void Cull( RenderWorld world, ViewPass pass, List<int> candidates, int inTree, bool inFrustum, ref RenderStats stats )
-		=> CullRange( world, pass, candidates, 0, candidates.Count, inTree, inFrustum, pass.VisibleByFeature, ref stats );
+	internal void Cull( RenderWorld world, ViewPass pass, List<int> candidates, int inTree, bool inFrustum, int[] typeFeatures, ref RenderStats stats )
+		=> CullRange( world, pass, candidates, 0, candidates.Count, inTree, inFrustum, typeFeatures, pass.VisibleByFeature, ref stats );
 
 	/// <summary>
 	/// <see cref="Cull"/> candidates [<paramref name="start"/>, <paramref name="end"/>) into <paramref name="visible"/>, by
 	/// feature index.
 	/// </summary>
-	void CullRange( RenderWorld world, ViewPass pass, List<int> candidates, int start, int end, int inTree, bool inFrustum, List<int>[] visible, ref RenderStats stats )
+	void CullRange( RenderWorld world, ViewPass pass, List<int> candidates, int start, int end, int inTree, bool inFrustum, ReadOnlySpan<int> typeFeatures, List<int>[] visible, ref RenderStats stats )
 	{
 		var frustum = pass.View.Frustum;
 		var root = pass.Root;
@@ -207,10 +205,7 @@ public sealed partial class RenderSystem
 		var holds = pass.ResidentHolds;
 		var boxes = System.Runtime.InteropServices.CollectionsMarshal.AsSpan( world.CullingBoxes );
 
-		// Neighbours are mostly of one type: look its feature up again only when the type changes
-		Type lastType = null;
-		var lastFeature = -1;
-
+		var types = world.ObjectTypeIndices;
 		var entries = System.Runtime.InteropServices.CollectionsMarshal.AsSpan( candidates );
 		for ( int k = start; k < end; k++ )
 		{
@@ -255,14 +250,7 @@ public sealed partial class RenderSystem
 				continue;
 			}
 
-			var type = obj.GetType();
-			if ( type != lastType )
-			{
-				lastType = type;
-				lastFeature = FeatureFor( type );
-			}
-
-			var feature = lastFeature;
+			var feature = typeFeatures[types[i]];
 			if ( feature < 0 ) continue;
 			var f = features[feature];
 
@@ -325,27 +313,34 @@ public sealed partial class RenderSystem
 		return true;
 	}
 
-	/// <summary>
-	/// Warm type lookups before parallel culling; cache misses write shared state.
-	/// </summary>
-	internal void WarmFeatureTypes( RenderWorld world )
+	sealed class CullFeatures
 	{
-		foreach ( var type in world.ObjectTypes )
-			FeatureFor( type );
+		public int FeatureCount = -1;
+		public int TypeCount;
+		public int[] ByType = [];
 	}
 
-	int FeatureFor( Type type )
-	{
-		return featureByType.TryGetValue( type, out var index ) ? index : FindFeature( type );
-	}
+	readonly System.Runtime.CompilerServices.ConditionalWeakTable<RenderWorld, CullFeatures> cullFeatures = new();
 
-	/// <summary>
-	/// Keep the capturing lambda off the cache-hit path; closures allocate on method entry.
-	/// </summary>
-	int FindFeature( Type type )
+	/// <summary>Resolve world type indices against this renderer's feature order before giving the map to cull jobs.</summary>
+	internal int[] PrepareCullFeatures( RenderWorld world )
 	{
-		var index = features.FindIndex( f => f.Accepts( type ) );
-		featureByType[type] = index;
-		return index;
+		var map = cullFeatures.GetValue( world, static _ => new CullFeatures() );
+		var types = world.ObjectTypes;
+		if ( map.FeatureCount != features.Count )
+		{
+			map.FeatureCount = features.Count;
+			map.TypeCount = 0;
+		}
+
+		if ( map.ByType.Length < types.Length ) Array.Resize( ref map.ByType, Math.Max( types.Length, map.ByType.Length * 2 ) );
+		for ( int t = map.TypeCount; t < types.Length; t++ )
+		{
+			var feature = 0;
+			while ( feature < features.Count && !features[feature].Accepts( types[t] ) ) feature++;
+			map.ByType[t] = feature < features.Count ? feature : -1;
+		}
+		map.TypeCount = types.Length;
+		return map.ByType;
 	}
 }

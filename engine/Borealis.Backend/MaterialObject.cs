@@ -29,10 +29,7 @@ internal abstract class PassBindings
 	/// The binding the pass makes for <paramref name="resource"/>; a dynamic constant buffer's offset goes in
 	/// <paramref name="dynamicOffset"/>.
 	/// </summary>
-	public abstract Binding Resolve( in ShaderResource resource, ShaderStage stage, bool dynamic, out uint dynamicOffset );
-
-	/// <summary>As <see cref="Resolve(in ShaderResource, ShaderStage, bool, out uint)"/> for a pass slot, taking the layout's placeholder instead of making one (<see cref="MaterialLayout.Placeholder"/>).</summary>
-	public virtual Binding Resolve( MaterialLayout layout, int set, int slot, in ShaderResource resource, ShaderStage stage, bool dynamic, out uint dynamicOffset ) => Resolve( resource, stage, dynamic, out dynamicOffset );
+	public abstract Binding Resolve( MaterialLayout layout, int set, int slot, in ShaderResource resource, ShaderStage stage, bool dynamic, out uint dynamicOffset );
 
 	/// <summary>An attribute as floats, for the material constants read from attributes; null when it isn't set.</summary>
 	public abstract float[] Floats( string attribute );
@@ -50,7 +47,7 @@ internal abstract class PassBindings
 	/// The binding the object's attributes make for <paramref name="resource"/>, if they set it; false leaves the pass's.
 	/// A dynamic constant buffer's offset goes in <paramref name="dynamicOffset"/>.
 	/// </summary>
-	public virtual bool ResolveLayer( in ShaderResource resource, ShaderStage stage, bool dynamic, out Binding binding, out uint dynamicOffset )
+	public virtual bool ResolveLayer( in ShaderResource resource, ShaderStage stage, in MaterialLayout.PassInput input, bool dynamic, out Binding binding, out uint dynamicOffset )
 	{
 		binding = default;
 		dynamicOffset = 0;
@@ -92,10 +89,8 @@ internal sealed class MaterialLayout
 	/// <summary>Per set, the bindings the pass fills (constant buffers, buffers and textures named by attributes).</summary>
 	public readonly int[][] PassSlots = new int[ShaderAbi.BindlessSet][];
 
-	/// <summary>Per set, the <see cref="PassSlots"/> an immediate draw binds from its material.</summary>
-	public readonly bool[][] MaterialSlots = new bool[ShaderAbi.BindlessSet][];
-
-	public readonly int[][] MaterialIndices = new int[ShaderAbi.BindlessSet][];
+	readonly (int Slot, int Resource, int Dynamic)[][] attributeSlots = new (int, int, int)[ShaderAbi.BindlessSet][];
+	readonly (int Slot, int Resource, int Dynamic)[][] materialSlots = new (int, int, int)[ShaderAbi.BindlessSet][];
 
 	/// <summary>Bytes of dynamic constants a draw of an immediate layout writes, at most.</summary>
 	public readonly int ImmediateBytes;
@@ -139,8 +134,11 @@ internal sealed class MaterialLayout
 
 	readonly MaterialObjectCache cache;
 
-	/// <summary>Per set, the name (token value) of each pass slot's attribute, to match what objects set.</summary>
-	readonly uint[][] passNames = new uint[ShaderAbi.BindlessSet][];
+	/// <summary>Each pass slot's precomputed attribute token and minimum size, when it reads a constant buffer.</summary>
+	internal readonly record struct PassInput( StringToken Token, int BufferSize );
+	readonly PassInput[][] passInputs = new PassInput[ShaderAbi.BindlessSet][];
+
+	internal ref readonly PassInput Input( int set, int slot ) => ref passInputs[set][slot];
 
 	/// <summary>
 	/// The pass slots (set, index into <see cref="PassSlots"/>) and attribute constants objects' attributes can set, as
@@ -161,10 +159,10 @@ internal sealed class MaterialLayout
 		var slots = new List<(int, int)>();
 		for ( int set = 0; set < Sets.Length; set++ )
 		{
-			if ( passNames[set] is not { } names ) continue;
-			for ( int k = 0; k < names.Length; k++ )
+			if ( passInputs[set] is not { } inputs ) continue;
+			for ( int k = 0; k < inputs.Length; k++ )
 			{
-				if ( cache.IsLayerName( names[k] ) ) slots.Add( (set, k) );
+				if ( cache.IsLayerName( inputs[k].Token.Value ) ) slots.Add( (set, k) );
 			}
 		}
 
@@ -214,7 +212,7 @@ internal sealed class MaterialLayout
 		{
 			var i = PassSlots[set][k];
 			var dynamic = DynamicIndex[set][i];
-			if ( !resolver.ResolveLayer( Resources[set][i], StageOf( set ), dynamic >= 0, out var binding, out var dynamicOffset ) ) continue;
+			if ( !resolver.ResolveLayer( Resources[set][i], StageOf( set ), Input( set, k ), dynamic >= 0, out var binding, out var dynamicOffset ) ) continue;
 
 			if ( (changed & (1 << set)) == 0 )
 			{
@@ -271,18 +269,13 @@ internal sealed class MaterialLayout
 			var bindings = pass.Bindings[set] ??= new Binding[slots.Length];
 			var offsets = pass.Offsets[set] ??= new uint[DynamicCount[set]];
 			var stage = StageOf( set );
-			var dynamicIndex = DynamicIndex[set];
 			var resources = Resources[set];
 			var identity = 14695981039346656037UL;
 			if ( partial ) identity = pass.AttributeIdentity[set];
 			else
 			{
-				var material = MaterialSlots[set];
-				for ( int k = 0; k < slots.Length; k++ )
+				foreach ( var (k, i, dynamic) in attributeSlots[set] )
 				{
-					if ( material[k] ) continue;
-					var i = slots[k];
-					var dynamic = dynamicIndex[i];
 					bindings[k] = resolver.Resolve( this, set, k, resources[i], stage, dynamic >= 0, out var dynamicOffset );
 					if ( dynamic >= 0 ) offsets[dynamic] = dynamicOffset;
 					identity = MaterialObject.Mix( identity, bindings[k] );
@@ -291,10 +284,8 @@ internal sealed class MaterialLayout
 				pass.AttributeIdentity[set] = identity;
 			}
 
-			foreach ( var k in MaterialIndices[set] )
+			foreach ( var (k, i, dynamic) in materialSlots[set] )
 			{
-				var i = slots[k];
-				var dynamic = dynamicIndex[i];
 				bindings[k] = resolver.Resolve( this, set, k, resources[i], stage, dynamic >= 0, out var dynamicOffset );
 				if ( dynamic >= 0 ) offsets[dynamic] = dynamicOffset;
 				identity = MaterialObject.Mix( identity, bindings[k] );
@@ -419,22 +410,30 @@ internal sealed class MaterialLayout
 			Resources[set] = [.. resources];
 			DynamicIndex[set] = [.. dynamicIndex];
 			PassSlots[set] = [.. Enumerable.Range( 0, resources.Count ).Where( i => IsPassBinding( resources[i], immediate ) )];
-			MaterialSlots[set] = [.. PassSlots[set].Select( i => FromMaterial( resources[i] ) )];
-			MaterialIndices[set] = [.. Enumerable.Range( 0, PassSlots[set].Length ).Where( k => MaterialSlots[set][k] )];
+			var inputs = passInputs[set] = new PassInput[PassSlots[set].Length];
+			var attributes = new List<(int, int, int)>();
+			var material = new List<(int, int, int)>();
+			var stage = StageOf( set );
 
 			// Non-dynamic constants (past the device limit) are kept by content, so values change their set
 			var dynamicSlots = new List<(int, int, int, bool)>();
 			for ( int k = 0; k < PassSlots[set].Length; k++ )
 			{
 				var i = PassSlots[set][k];
-				if ( DynamicIndex[set][i] >= 0 ) dynamicSlots.Add( (k, i, DynamicIndex[set][i], MaterialSlots[set][k]) );
-				else if ( resources[i].Kind is ShaderResourceKind.MaterialConstants or ShaderResourceKind.ConstantBuffer ) refreshable = false;
+				var resource = resources[i];
+				var isMaterial = FromMaterial( resource );
+				var dynamic = DynamicIndex[set][i];
+				(isMaterial ? material : attributes).Add( (k, i, dynamic) );
+				inputs[k] = new PassInput( resource.Name is { } name ? BackendContext.Token( name ) : default, DeclaredBufferSize( stage, resource ) );
+				if ( dynamic >= 0 ) dynamicSlots.Add( (k, i, dynamic, isMaterial) );
+				else if ( resource.Kind is ShaderResourceKind.MaterialConstants or ShaderResourceKind.ConstantBuffer ) refreshable = false;
 			}
 
 			DynamicSlots[set] = [.. dynamicSlots];
-			passNames[set] = [.. PassSlots[set].Select( i => resources[i].Name is { } name ? BackendContext.Token( name ).Value : 0u )];
+			attributeSlots[set] = attributes.ToArray();
+			materialSlots[set] = material.ToArray();
 			Sets[set] = cache.Layout( slots );
-			if ( immediate && StageOf( set ) is { } stage ) immediateBytes += stage.MaterialBuffer.Size + 256;
+			if ( immediate && stage is not null ) immediateBytes += stage.MaterialBuffer.Size + 256;
 		}
 
 		ImmediateBytes = immediateBytes;
@@ -468,17 +467,12 @@ internal sealed class MaterialLayout
 		{
 			if ( PassSlots[set] is not { } slots ) continue;
 			key.Append( set ).Append( ':' ).Append( Sets[set].Index ).Append( ';' );
-			foreach ( var i in slots )
+			for ( int k = 0; k < slots.Length; k++ )
 			{
+				var i = slots[k];
 				var r = Resources[set][i];
 				key.Append( r.Name ).Append( '/' ).Append( (int)r.Kind ).Append( '/' ).Append( (int)r.Dimension ).Append( '/' ).Append( r.Variable?.RenderStateId ?? 0 ).Append( '/' ).Append( DynamicIndex[set][i] ).Append( '/' ).Append( r.Binding ).Append( ';' );
-				if ( r.Kind == ShaderResourceKind.ConstantBuffer )
-				{
-					foreach ( var layout in StageOf( set ).Program.ConstantBuffers )
-					{
-						if ( layout.Name == r.Name ) key.Append( layout.Size ).Append( ';' );
-					}
-				}
+				if ( r.Kind == ShaderResourceKind.ConstantBuffer ) key.Append( Input( set, k ).BufferSize ).Append( ';' );
 			}
 		}
 
@@ -488,6 +482,19 @@ internal sealed class MaterialLayout
 		}
 
 		signature = cache.Signature( key.ToString() );
+	}
+
+	static int DeclaredBufferSize( ShaderStage stage, in ShaderResource resource )
+	{
+		var size = 0;
+		if ( resource.Kind == ShaderResourceKind.ConstantBuffer && stage is not null )
+		{
+			foreach ( var layout in stage.Program.ConstantBuffers )
+			{
+				if ( layout.Name == resource.Name ) size = Math.Max( size, layout.Size );
+			}
+		}
+		return size;
 	}
 
 	static bool IsPassBinding( in ShaderResource resource, bool immediate ) => resource.Kind switch

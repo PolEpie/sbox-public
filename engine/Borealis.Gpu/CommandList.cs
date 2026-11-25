@@ -526,6 +526,28 @@ public sealed unsafe class CommandList
 		device.WriteMarker( Handle, MarkerSlot, name );
 	}
 
+	// A bounded per-thread cache: frame and pass labels normally reuse the same strings.
+	const int LabelCacheSlots = 32;
+	[ThreadStatic] static LabelCache labelCache;
+
+	[InlineArray( LabelCacheSlots )]
+	struct LabelCache
+	{
+		LabelText first;
+	}
+
+	struct LabelText
+	{
+		public string Name;
+		public LabelBytes Utf8;
+	}
+
+	[InlineArray( 256 )]
+	struct LabelBytes
+	{
+		byte first;
+	}
+
 	/// <summary>Start a named region, which RenderDoc and validation messages show.</summary>
 	public void BeginLabel( string name )
 	{
@@ -537,9 +559,15 @@ public sealed unsafe class CommandList
 
 		if ( device.Instance.vkCmdBeginDebugUtilsLabelEXT == null ) return;
 
-		Span<byte> utf8 = stackalloc byte[256];
-		var length = Encoding.UTF8.GetBytes( name.AsSpan( 0, Math.Min( name.Length, 80 ) ), utf8 );
-		utf8[length] = 0;
+		var chars = name.Length;
+		ref var cached = ref labelCache[RuntimeHelpers.GetHashCode( name ) & (LabelCacheSlots - 1)];
+		Span<byte> utf8 = cached.Utf8;
+		if ( !ReferenceEquals( cached.Name, name ) )
+		{
+			var length = Encoding.UTF8.GetBytes( name.AsSpan( 0, Math.Min( chars, 80 ) ), utf8 );
+			utf8[length] = 0;
+			cached.Name = chars <= 80 ? name : null;
+		}
 
 		fixed ( byte* p = utf8 )
 		{

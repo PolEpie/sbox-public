@@ -26,6 +26,7 @@ internal readonly struct TextureSizes
 	readonly float tanHalfFov;
 	readonly float orthoWidth;
 	readonly bool orthographic;
+	readonly bool enabled;
 
 	public TextureSizes( RenderView view, RenderView root )
 	{
@@ -37,13 +38,17 @@ internal readonly struct TextureSizes
 		tanHalfFov = MathF.Tan( root.FieldOfView.DegreeToRadian() * 0.5f );
 		orthoWidth = root.OrthoSize.x;
 		orthographic = root.Orthographic;
+		enabled = true;
 	}
 
 	/// <summary>
 	/// An object's sizes from its world bounds: <see cref="ForDraw"/>'s scale and fallback for its draws.
+	/// The default sizing state leaves the size unknown when the device doesn't stream textures.
 	/// </summary>
 	public (float Scale, float Fallback) ForObject( Vector3 center, Vector3 extents )
 	{
+		if ( !enabled ) return (-1, ushort.MaxValue);
+
 		// CalcSqrDistanceToAABB
 		var outside = Vector3.Max( (center - camera).Abs() - extents, Vector3.Zero );
 		var distance = MathF.Sqrt( outside.LengthSquared );
