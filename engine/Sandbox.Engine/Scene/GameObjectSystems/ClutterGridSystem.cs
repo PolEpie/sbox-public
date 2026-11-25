@@ -80,9 +80,6 @@ public sealed partial class ClutterGridSystem : GameObjectSystem
 		if ( camera is not null )
 		{
 			_lastCameraPosition = camera.WorldPosition;
-
-			PublishLodParameters( camera );
-
 			SubscribeToTerrains();
 			UpdateInfiniteLayers( _lastCameraPosition );
 			ProcessJobs();
@@ -107,25 +104,6 @@ public sealed partial class ClutterGridSystem : GameObjectSystem
 	{
 		RebuildPaintedLayer();
 		_dirty = false;
-	}
-
-	/// <summary>
-	/// Pushes the active camera's LOD parameters to the clutter scene objects for GPU LOD selection.
-	/// </summary>
-	private static void PublishLodParameters( CameraComponent camera )
-	{
-		var sceneCamera = camera.SceneCamera;
-
-		ClutterBatchSceneObject.Lod = new ClutterBatchSceneObject.LodParams
-		{
-			CameraPos = camera.WorldPosition,
-			TanHalfFov = MathF.Tan( camera.FieldOfView.DegreeToRadian() * 0.5f ),
-			ViewportWidth = sceneCamera is not null ? sceneCamera.Size.x : 1920f,
-			// Before SceneCamera is created, use its initial square aspect rather than perspective coverage.
-			OrthoWidth = camera.Orthographic
-				? camera.OrthographicHeight * (sceneCamera is not null ? sceneCamera.Size.x / MathF.Max( sceneCamera.Size.y, 1f ) : 1f)
-				: 0f,
-		};
 	}
 
 	private void SubscribeToTerrains()

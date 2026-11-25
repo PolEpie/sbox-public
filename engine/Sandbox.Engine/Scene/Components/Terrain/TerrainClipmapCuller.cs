@@ -90,6 +90,7 @@ internal sealed class TerrainClipmapCuller
 
 	/// <summary>
 	/// Write the frustum's planes in the terrain's local space, so meshlet bounds can be tested without transforming each one.
+	/// Pass four entries for the side planes alone, or six to include the near and far planes.
 	/// The normals aren't renormalized; only which side of a plane a point lies on is used.
 	/// </summary>
 	public static void ToLocalPlanes( in Frustum frustum, in Transform transform, Span<Plane> planes )
@@ -102,6 +103,7 @@ internal sealed class TerrainClipmapCuller
 		planes[1] = ToLocal( frustum.RightPlane, inverse, scale, position );
 		planes[2] = ToLocal( frustum.TopPlane, inverse, scale, position );
 		planes[3] = ToLocal( frustum.BottomPlane, inverse, scale, position );
+		if ( planes.Length == 4 ) return;
 		planes[4] = ToLocal( frustum.NearPlane, inverse, scale, position );
 		planes[5] = ToLocal( frustum.FarPlane, inverse, scale, position );
 
@@ -120,6 +122,7 @@ internal sealed class TerrainClipmapCuller
 	public int Cull( ReadOnlySpan<Plane> planes, Vector2 cameraLocal, float unitsPerTexel, float heightScale, Span<Meshlet> visible )
 	{
 		int count = 0;
+		var heightRange = new Vector2( MathF.Min( 0, heightScale ), MathF.Max( 0, heightScale ) );
 
 		for ( int r = 0; r < _rings.Length; r++ )
 		{
@@ -129,7 +132,7 @@ internal sealed class TerrainClipmapCuller
 			float increment = vertexStep * 2.0f;
 			var center = cameraLocal.SnapToGrid( increment );
 
-			var containment = Test( planes, ring, center, vertexStep, increment, heightScale );
+			var containment = Test( planes, ring, center, vertexStep, increment, heightRange );
 			if ( containment == Containment.Outside ) continue;
 
 			if ( containment == Containment.Inside )
@@ -143,7 +146,7 @@ internal sealed class TerrainClipmapCuller
 			{
 				ref readonly var group = ref _groups[g];
 
-				containment = Test( planes, group, center, vertexStep, increment, heightScale );
+				containment = Test( planes, group, center, vertexStep, increment, heightRange );
 				if ( containment == Containment.Outside ) continue;
 
 				var meshlets = Meshlets.AsSpan( group.Start, group.Count );
@@ -159,7 +162,7 @@ internal sealed class TerrainClipmapCuller
 				{
 					var block = new Range { CellMin = m.BlockOffset, CellMax = m.BlockOffset + new Vector2( _blockSize, _blockSize ) };
 
-					if ( Test( planes, block, center, vertexStep, increment, heightScale ) != Containment.Outside )
+					if ( Test( planes, block, center, vertexStep, increment, heightRange ) != Containment.Outside )
 						visible[count++] = m;
 				}
 			}
@@ -168,18 +171,18 @@ internal sealed class TerrainClipmapCuller
 		return count;
 	}
 
-	private static Containment Test( ReadOnlySpan<Plane> planes, in Range range, Vector2 center, float vertexStep, float increment, float heightScale )
+	private static Containment Test( ReadOnlySpan<Plane> planes, in Range range, Vector2 center, float vertexStep, float increment, Vector2 heightRange )
 	{
 		// Grow by one snap increment so sub-cell rounding and vertex displacement never cull an on-screen block
 		var mins = new Vector3(
 			center.x + range.CellMin.x * vertexStep - increment,
 			center.y + range.CellMin.y * vertexStep - increment,
-			-increment );
+			heightRange.x - increment );
 
 		var maxs = new Vector3(
 			center.x + range.CellMax.x * vertexStep + increment,
 			center.y + range.CellMax.y * vertexStep + increment,
-			heightScale + increment );
+			heightRange.y + increment );
 
 		var containment = Containment.Inside;
 
@@ -189,7 +192,7 @@ internal sealed class TerrainClipmapCuller
 
 			// The corner furthest along the normal: behind the plane means the whole box is
 			float far = (n.x < 0 ? mins.x : maxs.x) * n.x + (n.y < 0 ? mins.y : maxs.y) * n.y + (n.z < 0 ? mins.z : maxs.z) * n.z;
-			if ( far - p.Distance <= 0.0f ) return Containment.Outside;
+			if ( far - p.Distance < 0.0f ) return Containment.Outside;
 
 			// The nearest corner: behind the plane means the box straddles it
 			float near = (n.x < 0 ? maxs.x : mins.x) * n.x + (n.y < 0 ? maxs.y : mins.y) * n.y + (n.z < 0 ? maxs.z : mins.z) * n.z;
