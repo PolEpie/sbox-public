@@ -26,6 +26,18 @@ internal class EventSystem : IDisposable
 		public List<EventAction> Events = new();
 		public List<object> Targets = new();
 
+		/// <summary>
+		/// The type gained its first target or lost its last: the event lists its handlers are in look again at which of their
+		/// actions have anything to run.
+		/// </summary>
+		internal void TargetsChanged()
+		{
+			foreach ( var e in Events )
+			{
+				e.Group.ActionsChanged();
+			}
+		}
+
 		public void Destroy()
 		{
 			Assembly = null;
@@ -61,6 +73,7 @@ internal class EventSystem : IDisposable
 		{
 			Class.Events.Remove( this );
 			Group.Remove( this );
+			Group.ActionsChanged();
 		}
 
 		/// <summary>
@@ -113,16 +126,47 @@ internal class EventSystem : IDisposable
 	/// </summary>
 	public class EventList : List<EventAction>
 	{
+		EventAction[] runnable = [];
+		bool runnableChanged = true;
+
 		/// <summary>
-		/// Run this event list, aggregating any exceptions.
+		/// An action was added or removed, or a type gained its first target or lost its last.
+		/// </summary>
+		internal void ActionsChanged() => runnableChanged = true;
+
+		/// <summary>
+		/// The actions with anything to run, in the list's order: static ones, and instance ones whose type has targets. Most of
+		/// the editor's per-frame handlers are on types with no instance alive (editors and widgets not open), so a frame doesn't
+		/// visit them. Made again when the list or a type's targets change; a new array each time, so a run already going
+		/// through the old one isn't changed under it.
+		/// </summary>
+		EventAction[] Runnable()
+		{
+			if ( !runnableChanged ) return runnable;
+			runnableChanged = false;
+
+			var list = new List<EventAction>( Count );
+			foreach ( var action in this )
+			{
+				if ( action.IsStatic || action.Class.Targets.Count > 0 ) list.Add( action );
+			}
+
+			runnable = list.ToArray();
+			return runnable;
+		}
+
+		/// <summary>
+		/// Run this event list, aggregating any exceptions. A type that gets its first target while the list runs is first
+		/// called the next time it runs, as a target added to a type that already has some is.
 		/// </summary>
 		internal void Run( string name, object[] args = null )
 		{
 			List<Exception> innerExceptions = null;
+			var actions = Runnable();
 
-			for ( int i = Count - 1; i >= 0; i-- )
+			for ( int i = actions.Length - 1; i >= 0; i-- )
 			{
-				var action = this[i];
+				var action = actions[i];
 
 				try
 				{
@@ -199,6 +243,7 @@ internal class EventSystem : IDisposable
 				eventAction.Group.Add( eventAction );
 
 				group.Sort();
+				group.ActionsChanged();
 			}
 		}
 
@@ -208,9 +253,25 @@ internal class EventSystem : IDisposable
 
 	EventDelegate BuildDelegate( MethodInfo info )
 	{
-		// TODO - handle arguments
-
 		var parameters = info.GetParameters();
+
+		// Events without arguments run every frame, so call them directly rather than through reflection
+		if ( parameters.Length == 0 && info.ReturnType == typeof( void ) && !info.ContainsGenericParameters && info.DeclaringType is { IsValueType: false, ContainsGenericParameters: false } )
+		{
+			try
+			{
+				if ( info.IsStatic )
+					return Direct( info.CreateDelegate<Action>() );
+
+				return (EventDelegate)DirectInstanceMethod.MakeGenericMethod( info.DeclaringType ).Invoke( null, [info] );
+			}
+			catch ( Exception e ) when ( e is ArgumentException or TargetInvocationException { InnerException: ArgumentException } )
+			{
+				// Can't bind it, reflection still works
+			}
+		}
+
+		// TODO - handle arguments
 		object[] args = default;
 		if ( parameters.Length > 0 )
 		{
@@ -243,6 +304,33 @@ internal class EventSystem : IDisposable
 
 		return d;
 	}
+
+	static readonly MethodInfo DirectInstanceMethod = typeof( EventSystem ).GetMethod( nameof( DirectInstance ), BindingFlags.Static | BindingFlags.NonPublic );
+
+	static EventDelegate DirectInstance<T>( MethodInfo info ) where T : class
+	{
+		var call = info.CreateDelegate<Action<T>>();
+		return Direct( call, info.Name );
+	}
+
+	static EventDelegate Direct<T>( Action<T> call, string name ) where T : class => ( o, p ) =>
+	{
+		if ( p != null && p.Length != 0 )
+			throw new ArgumentException( $"Event passed {p.Length} arguments but {name} expects none" );
+
+		// Wrapped like MethodInfo.Invoke wraps it, as the callers unwrap it
+		try { call( (T)o ); }
+		catch ( Exception e ) { throw new TargetInvocationException( e ); }
+	};
+
+	static EventDelegate Direct( Action call ) => ( o, p ) =>
+	{
+		if ( p != null && p.Length != 0 )
+			throw new ArgumentException( $"Event passed {p.Length} arguments but {call.Method.Name} expects none" );
+
+		try { call(); }
+		catch ( Exception e ) { throw new TargetInvocationException( e ); }
+	};
 
 	internal EventList GetGroup( string name, bool create )
 	{
@@ -368,9 +456,10 @@ internal class EventSystem : IDisposable
 
 	internal void RunInterface<T>( Action<T> t )
 	{
-		foreach ( var e in AllTargets.OfType<T>().ToArray() )
+		// A snapshot: registering or unregistering makes a new array rather than changing this one
+		foreach ( var e in AllTargets.GetLiveItems() )
 		{
-			t.Invoke( e );
+			if ( e is T target ) t.Invoke( target );
 		}
 	}
 
@@ -382,6 +471,7 @@ internal class EventSystem : IDisposable
 			return;
 
 		type.Targets.Add( obj );
+		if ( type.Targets.Count == 1 ) type.TargetsChanged();
 	}
 
 	internal void Unregister( object obj )
@@ -394,7 +484,7 @@ internal class EventSystem : IDisposable
 		if ( !Classes.TryGetValue( TypeKey( obj.GetType() ), out var type ) )
 			return;
 
-		type.Targets.Remove( obj );
+		if ( type.Targets.Remove( obj ) && type.Targets.Count == 0 ) type.TargetsChanged();
 	}
 
 	public void Dispose()

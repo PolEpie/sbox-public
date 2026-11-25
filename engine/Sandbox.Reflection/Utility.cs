@@ -31,6 +31,44 @@ internal static class ReflectionUtility
 	}
 
 	/// <summary>
+	/// Empty the runtime's static cache of generic method instantiations made through reflection
+	/// (<c>RuntimeTypeCache.s_methodInstantiations</c>) when it holds one tied to a collectible assembly. An instantiation
+	/// whose own types are all non-collectible is cached there for good, keyed by a method info that holds the type it was
+	/// reflected through: one reflected through a game's type (<c>Component.__sync_GetValue&lt;bool&gt;</c> looked up on a game
+	/// component) keeps that game's assembly context, its statics and its last scene alive after it closes. The cache starts
+	/// empty and fills again as it's used, and generic method infos compare by method, not identity. True if it was emptied.
+	/// </summary>
+	public static bool ForgetCollectibleMethodInstantiations()
+	{
+		var cache = typeof( Type ).Assembly.GetType( "System.RuntimeType+RuntimeTypeCache" );
+		var field = cache?.GetField( "s_methodInstantiations", BindingFlags.NonPublic | BindingFlags.Static );
+		if ( field is null || field.IsInitOnly || !field.FieldType.IsValueType ) return false;
+
+		if ( !MethodInstantiations( field ).Any( TiedToCollectible ) ) return false;
+
+		field.SetValue( null, Activator.CreateInstance( field.FieldType ) );
+		return true;
+	}
+
+	/// <summary>The methods in the runtime's static instantiation cache, for <see cref="ForgetCollectibleMethodInstantiations"/> and tests.</summary>
+	internal static IEnumerable<MethodInfo> MethodInstantiations( FieldInfo field = null )
+	{
+		field ??= typeof( Type ).Assembly.GetType( "System.RuntimeType+RuntimeTypeCache" )?.GetField( "s_methodInstantiations", BindingFlags.NonPublic | BindingFlags.Static );
+		var table = field?.GetValue( null );
+		var inner = table?.GetType().GetField( "m_Table", BindingFlags.NonPublic | BindingFlags.Instance )?.GetValue( table );
+		var keysField = inner?.GetType().GetFields( BindingFlags.NonPublic | BindingFlags.Instance ).FirstOrDefault( f => f.FieldType.IsArray && f.Name.Contains( "key", StringComparison.OrdinalIgnoreCase ) );
+		if ( keysField?.GetValue( inner ) is not Array keys ) return [];
+		return keys.OfType<MethodInfo>().ToArray();
+	}
+
+	/// <summary>Whether a method was reflected through, declared on or instantiated over a type from a collectible assembly.</summary>
+	internal static bool TiedToCollectible( MethodInfo method )
+	{
+		static bool Collectible( Type type ) => type is not null && type.Assembly.IsCollectible;
+		return Collectible( method.ReflectedType ) || Collectible( method.DeclaringType ) || method.GetGenericArguments().Any( Collectible );
+	}
+
+	/// <summary>
 	/// Finds all static fields assignable to <paramref name="targetType"/> across all types
 	/// in the given assembly and sets them to null. Useful for releasing references during teardown.
 	/// </summary>
@@ -81,6 +119,12 @@ internal static class ReflectionUtility
 
 					if ( !TryClearCollectionOfType( field.GetValue( null ), targetType ) ) continue;
 				}
+				catch ( Exception e ) when ( e is TypeInitializationException || e.InnerException is TypeInitializationException )
+				{
+					// Its static constructor ran only now, at teardown, and failed (a game type a dedicated server never
+					// used, its script host already gone): it holds nothing, and every other field would fail the same way
+					break;
+				}
 				catch ( Exception e )
 				{
 					logger.Warning( e, $"Failed to clean {type.Name}.{field.Name}" );
@@ -115,13 +159,17 @@ internal static class ReflectionUtility
 				return true;
 			}
 
-			// IList — remove matching items in reverse to avoid index shifting
+			// IList — remove matching items in reverse to avoid index shifting; arrays can't shrink, so theirs are nulled
 			if ( value is System.Collections.IList list )
 			{
+				if ( list.IsReadOnly ) return false;
+
 				for ( var i = list.Count - 1; i >= 0; i-- )
 				{
-					if ( list[i] is not null && targetType.IsInstanceOfType( list[i] ) )
-						list.RemoveAt( i );
+					if ( list[i] is null || !targetType.IsInstanceOfType( list[i] ) ) continue;
+
+					if ( list.IsFixedSize ) list[i] = null;
+					else list.RemoveAt( i );
 				}
 
 				return true;
@@ -137,8 +185,12 @@ internal static class ReflectionUtility
 			}
 		}
 
+		// Multi-dimensional arrays can't be indexed through IList, and arrays of value types hold no references
+		if ( value is Array array && (array.Rank != 1 || valueType.GetElementType().IsValueType) )
+			return false;
+
 		// Non-generic IList fallback (e.g. ArrayList) — remove matching items
-		if ( value is System.Collections.IList nonGenericList )
+		if ( value is System.Collections.IList nonGenericList && !nonGenericList.IsReadOnly )
 		{
 			var removed = false;
 
@@ -146,7 +198,8 @@ internal static class ReflectionUtility
 			{
 				if ( nonGenericList[i] is not null && targetType.IsInstanceOfType( nonGenericList[i] ) )
 				{
-					nonGenericList.RemoveAt( i );
+					if ( nonGenericList.IsFixedSize ) nonGenericList[i] = null;
+					else nonGenericList.RemoveAt( i );
 					removed = true;
 				}
 			}
@@ -240,7 +293,12 @@ internal static class ReflectionUtility
 
 		if ( alc is not null && alc != System.Runtime.Loader.AssemblyLoadContext.Default )
 		{
-			unloadHandler = _ => cts.Cancel();
+			// The unload can run this as the task finishes and disposes cts: the handler list was taken before it was removed
+			unloadHandler = _ =>
+			{
+				try { cts.Cancel(); }
+				catch ( ObjectDisposedException ) { }
+			};
 			alc.Unloading += unloadHandler;
 		}
 

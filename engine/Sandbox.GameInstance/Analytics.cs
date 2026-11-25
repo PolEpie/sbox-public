@@ -33,16 +33,17 @@ internal static class Analytics
 		var nextGame = ready ? Application.GameIdent : null;
 		var gameChanged = gameIdent != nextGame;
 		gameIdent = nextGame;
-		gameVersion = Application.GamePackage?.Revision?.VersionId.ToString() ?? "";
+		gameVersion = VersionText( Application.GamePackage?.Revision?.VersionId );
 		mapIdent = Application.MapPackage?.FullIdent ?? "";
 
-		// get a list of installed packages
-		contentIdent = PackageManager.ActivePackages
-								.Where( x => x.Package is RemotePackage )
-								.Select( x => x.Package.FullIdent )
-								.ToArray();
-
-		net = SampleNetwork();
+		// get a list of installed packages, made again only when it changes (this runs every few seconds)
+		if ( !InstalledUnchanged() )
+		{
+			contentIdent = PackageManager.ActivePackages
+									.Where( x => x.Package is RemotePackage )
+									.Select( x => x.Package.FullIdent )
+									.ToArray();
+		}
 
 		// Steam counts the workshop items' playtime from what the backend's told - games and maps alike
 		if ( ready && !Application.IsEditor && !Application.IsDedicatedServer )
@@ -53,6 +54,37 @@ internal static class Analytics
 		CheckHash();
 		if ( gameChanged ) timeUntilNextUpdate = 0;
 		TryUpdateActivity();
+	}
+
+	static long? lastVersionId;
+	static string lastVersionText = "";
+
+	// The game's version as text, made again only when it changes
+	static string VersionText( long? versionId )
+	{
+		if ( versionId != lastVersionId )
+		{
+			lastVersionId = versionId;
+			lastVersionText = versionId?.ToString() ?? "";
+		}
+
+		return lastVersionText;
+	}
+
+	// Whether the installed packages are those in contentIdent, in the same order
+	static bool InstalledUnchanged()
+	{
+		if ( contentIdent is null ) return false;
+
+		int i = 0;
+		foreach ( var active in PackageManager.ActivePackages )
+		{
+			if ( active.Package is not RemotePackage ) continue;
+			if ( i >= contentIdent.Length || !string.Equals( contentIdent[i], active.Package.FullIdent, StringComparison.Ordinal ) ) return false;
+			i++;
+		}
+
+		return i == contentIdent.Length;
 	}
 
 	static void CheckHash()
@@ -78,6 +110,7 @@ internal static class Analytics
 			return;
 
 		timeUntilNextUpdate = 60.0f * 1.0f;
+		net = SampleNetwork();
 
 		Api.Activity.QueueUpdate( gameIdent, gameVersion, mapIdent, contentIdent, net );
 	}
