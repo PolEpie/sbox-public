@@ -55,6 +55,11 @@ internal static unsafe class SdlNative
 	public static delegate* unmanaged< nint, uint > SDL_GetWindowProperties;
 	public static delegate* unmanaged< uint, byte*, nint, nint > SDL_GetPointerProperty;
 	public static delegate* unmanaged< uint, byte*, long, long > SDL_GetNumberProperty;
+	public static delegate* unmanaged< uint > SDL_CreateProperties;
+	public static delegate* unmanaged< uint, void > SDL_DestroyProperties;
+	public static delegate* unmanaged< uint, byte*, nint, byte > SDL_SetPointerProperty;
+	public static delegate* unmanaged< uint, byte*, byte, byte > SDL_SetBooleanProperty;
+	public static delegate* unmanaged< uint, nint > SDL_CreateWindowWithProperties;
 
 	public static delegate* unmanaged< SdlRawEvent*, byte > SDL_PollEvent;
 	public static delegate* unmanaged< SdlRawEvent*, int, byte > SDL_WaitEventTimeout;
@@ -189,6 +194,11 @@ internal static unsafe class SdlNative
 		SDL_GetWindowProperties = (delegate* unmanaged< nint, uint >)Need( "SDL_GetWindowProperties" );
 		SDL_GetPointerProperty = (delegate* unmanaged< uint, byte*, nint, nint >)Need( "SDL_GetPointerProperty" );
 		SDL_GetNumberProperty = (delegate* unmanaged< uint, byte*, long, long >)Need( "SDL_GetNumberProperty" );
+		SDL_CreateProperties = (delegate* unmanaged< uint >)Need( "SDL_CreateProperties" );
+		SDL_DestroyProperties = (delegate* unmanaged< uint, void >)Need( "SDL_DestroyProperties" );
+		SDL_SetPointerProperty = (delegate* unmanaged< uint, byte*, nint, byte >)Need( "SDL_SetPointerProperty" );
+		SDL_SetBooleanProperty = (delegate* unmanaged< uint, byte*, byte, byte >)Need( "SDL_SetBooleanProperty" );
+		SDL_CreateWindowWithProperties = (delegate* unmanaged< uint, nint >)Need( "SDL_CreateWindowWithProperties" );
 
 		SDL_PollEvent = (delegate* unmanaged< SdlRawEvent*, byte >)Need( "SDL_PollEvent" );
 		SDL_WaitEventTimeout = (delegate* unmanaged< SdlRawEvent*, int, byte >)Need( "SDL_WaitEventTimeout" );

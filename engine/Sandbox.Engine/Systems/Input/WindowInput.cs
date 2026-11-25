@@ -30,7 +30,6 @@ internal static class WindowInput
 			SdlWindow.WarnIfFailed( Sdl.DisableScreenSaver() );
 			SdlCursors.Initialize();
 		}
-		InputSystem.SetGameFocus( focused );
 	}
 
 	internal static bool HasMouseFocus() => focused;
@@ -38,16 +37,14 @@ internal static class WindowInput
 	internal static bool GetRelativeMouseMode() => relative;
 	internal static IntPtr GetEditorMainWindow() => editorWindow;
 
-	internal static void SetEditorMainWindow( IntPtr hwnd )
-	{
-		InputSystem.SetEditorMainWindow( hwnd );
-		editorWindow = GameWindowNative.FromNativeHandle( hwnd );
-	}
+	/// <summary>The editor's main window, as the <c>SDL_Window*</c> <see cref="QtSdlBridge.Register"/> returned.</summary>
+	internal static void SetEditorMainWindow( IntPtr window ) => editorWindow = window;
 
-	internal static void OnEditorGameFocusChange( IntPtr hwnd, bool value )
+	/// <summary>The play widget's <c>SDL_Window*</c> gained or lost focus.</summary>
+	internal static void OnEditorGameFocusChange( IntPtr window, bool value )
 	{
 		if ( !initialized || Application.IsUnitTest ) return;
-		focusWindow = value ? GameWindowNative.FromNativeHandle( hwnd ) : IntPtr.Zero;
+		focusWindow = value ? window : IntPtr.Zero;
 		UpdateApplicationState( forceFocusUpdate: true );
 	}
 
@@ -73,7 +70,6 @@ internal static class WindowInput
 	static void SetFocus( bool value )
 	{
 		focused = value;
-		InputSystem.SetGameFocus( focused );
 		InputRouter.OnWindowActive( focused );
 		if ( focused ) SdlCursors.Restore();
 		else
@@ -164,7 +160,6 @@ internal static class WindowInput
 		if ( !initialized ) return;
 		SetRelativeMouseMode( false );
 		initialized = active = focused = relative = false;
-		InputSystem.SetGameFocus( focused );
 		editorWindow = focusWindow = IntPtr.Zero;
 		SdlCursors.Shutdown();
 		if ( !Application.IsHeadless ) SdlWindow.WarnIfFailed( Sdl.EnableScreenSaver() );
