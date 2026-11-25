@@ -45,17 +45,17 @@ internal struct ShadowLight
 	public bool Baked;
 
 	/// <summary>
-	/// Where the light's world has changed static casters, which its static cache must redraw for.
+	/// Where the light's world has changed static casters, which its cache must redraw for.
 	/// </summary>
 	public StaticCasterChanges StaticChanges;
 
 	/// <summary>
-	/// Directional: where the light's world has changed settled casters, which its cached far cascade must redraw for.
+	/// Where the light's world has changed settled casters, which its cache, or a sun's cached far cascade, must redraw for.
 	/// </summary>
 	public StaticCasterChanges SettledChanges;
 
 	/// <summary>
-	/// A light that doesn't move keeps its static casters in a cache, and only re-renders dynamic ones.
+	/// A light that doesn't move keeps its static and settled casters in a cache, and only re-renders the others.
 	/// </summary>
 	public bool Static;
 
@@ -179,8 +179,8 @@ internal struct ShadowViewDesc
 	public int Slice;
 
 	/// <summary>
-	/// Which casters it draws: only static ones for a static cache, or no static ones when they come from lightmaps or a
-	/// cache.
+	/// Which casters it draws: a cache's static and settled ones, what moves on top of one, or none of the static ones when
+	/// they come from lightmaps.
 	/// </summary>
 	public StaticFilter StaticFilter;
 
@@ -191,8 +191,8 @@ internal struct ShadowViewDesc
 	public float SlopeScaledDepthBias;
 
 	/// <summary>
-	/// Static casters already rendered into this map: it's copied in instead of clearing, and only
-	/// dynamic casters are rendered on top.
+	/// A cache of the static and settled casters already rendered for this map: it's copied in instead of clearing, and only
+	/// the casters that move are rendered on top.
 	/// </summary>
 	public ShadowMap CachedStatic;
 
@@ -236,11 +236,6 @@ internal struct ShadowViewDesc
 	/// <see cref="CachedStatic"/> is held wrapped around: the target's texel (x, y) is its texel ((x + offset.x) mod size, ...).
 	/// </summary>
 	public Vector2Int CacheOffset;
-
-	/// <summary>
-	/// A cleared depth tile copied over <see cref="Viewport"/> before drawing, instead of clearing all of the target.
-	/// </summary>
-	public ShadowMap Blank;
 }
 
 /// <summary>
@@ -298,6 +293,7 @@ internal sealed class ShadowMap : IDisposable
 	}
 
 	public bool HasTexture => texture is not null;
+	public bool IsDisposed { get; private set; }
 
 	/// <summary>
 	/// Moves on each time a shadow view draws into it, so a copy of it can tell whether it changed.
@@ -311,5 +307,6 @@ internal sealed class ShadowMap : IDisposable
 	{
 		texture?.Dispose();
 		texture = null;
+		IsDisposed = true;
 	}
 }
