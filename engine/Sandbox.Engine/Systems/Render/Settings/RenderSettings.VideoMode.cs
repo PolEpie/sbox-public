@@ -45,7 +45,7 @@ public partial class RenderSettings
 			var defaultValue = RenderMultisampleType.RENDER_MULTISAMPLE_NONE;
 			var value = VideoSettings.Get( "aaquality", defaultValue );
 
-			if ( !Enum.IsDefined( typeof( RenderMultisampleType ), value ) )
+			if ( !Enum.IsDefined( value ) )
 				value = defaultValue;
 
 			return value.FromEngine();
@@ -65,7 +65,8 @@ public partial class RenderSettings
 	{
 		get
 		{
-			var defaultMode = UpscalerMode == UpscalerMode.Off ? AntiAliasMode.Cmaa2 : AntiAliasMode.None;
+			// Settings saved before CMAA2 existed chose MSAA alone, so CMAA2 is only the default without MSAA
+			var defaultMode = UpscalerMode == UpscalerMode.Off && AntiAliasQuality == MultisampleAmount.MultisampleNone ? AntiAliasMode.Cmaa2 : AntiAliasMode.None;
 			var value = VideoSettings.Get<int>( "aa.mode", (int)defaultMode );
 			return Enum.IsDefined( (AntiAliasMode)value ) ? (AntiAliasMode)value : defaultMode;
 		}
@@ -81,7 +82,7 @@ public partial class RenderSettings
 
 	/// <summary>Returns the requested MSAA amount when supported, or the best available amount.</summary>
 	public static MultisampleAmount GetSupportedAntiAliasQuality( MultisampleAmount amount ) =>
-		NativeEngine.RenderDeviceManager.GetBestMultisampleType( amount.ToEngine() ).FromEngine();
+		Graphics.BestMultisampleType( amount.ToEngine() ).FromEngine();
 
 	internal struct VideoModeSnapshot
 	{
