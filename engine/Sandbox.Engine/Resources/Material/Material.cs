@@ -38,6 +38,10 @@ public sealed partial class Material : Resource
 
 		CRenderAttributes attributes = this.native.GetRenderAttributes();
 		Attributes = new RenderAttributes( attributes );
+
+		// Borealis.Gpu lowers attributes itself: it draws with a managed copy (a post process blits with its material's
+		// attributes: Unicycle Frenzy's speed lines)
+		Attributes.KeepManagedCopy();
 	}
 
 	internal override void Destroy()
@@ -71,9 +75,60 @@ public sealed partial class Material : Resource
 		if ( copy is not null )
 		{
 			copy.anonymousShader = anonymousShader;
-			// The native copy merges raw buffer pointers, so the copy needs its own bindings
-			Attributes?.MergeUsedBuffersTo( copy.Attributes );
+			copy.IsCopy = true;
+			copy.FilePath = FilePath;
+			copy.MadeFromShader = MadeFromShader;
+			copy.ShaderSetInCode = ShaderSetInCode;
+			copy.SetInCode = SetInCode;
+			copy.FeaturesSetInCode = FeaturesSetInCode;
+			copy.SetInCodeVersion = SetInCodeVersion;
 		}
+
 		return copy;
+	}
+
+	/// <summary>
+	/// Made by <see cref="CreateCopy"/>: nothing shares it unless handed on, so what made it can free it (<see cref="ReleaseCopy"/>).
+	/// </summary>
+	internal bool IsCopy { get; private set; }
+
+	/// <summary>The compiled file this material reads, a copy's being its original's.</summary>
+	internal string FilePath
+	{
+		get => filePath ?? ResourcePath;
+		private set => filePath = value;
+	}
+
+	string filePath;
+
+	/// <summary>
+	/// The shader a material made in code has (<see cref="Create(string, string, bool)"/>), with no file of its own; null for one
+	/// read from a file.
+	/// </summary>
+	internal string MadeFromShader { get; private set; }
+
+	bool releaseQueued;
+
+	/// <summary>
+	/// Free a copy made by <see cref="CreateCopy"/> now, rather than when the garbage collector finalizes it. It goes at the
+	/// end of this frame, after everything has rendered, so draws this frame may still use it; nothing should draw with it
+	/// after that (delete its scene object, or give it another material). Does nothing for a material that isn't a copy, such
+	/// as one from <see cref="Load(string)"/>, which others share.
+	/// </summary>
+	public void ReleaseCopy()
+	{
+		if ( !IsCopy || releaseQueued || native.IsNull ) return;
+
+		releaseQueued = true;
+
+		// Frame end disposes it
+#pragma warning disable CA2000 // Dispose objects before losing scope
+		EngineLoop.DisposeAtFrameEnd( new CopyRelease( this ) );
+#pragma warning restore CA2000
+	}
+
+	sealed class CopyRelease( Material material ) : IDisposable
+	{
+		public void Dispose() => material.Destroy();
 	}
 }
