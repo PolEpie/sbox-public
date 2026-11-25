@@ -3,14 +3,22 @@
 /// <summary>
 /// Gives back the memory a game left free once it has closed to the menu. A map's load raises the managed heap to a few
 /// GB live (Construct's models, materials and scene); once the game has gone that's free, but the collector keeps it:
-/// free space between what's still live, and regions it hands back only so fast after each collection. Ordinary
-/// collections, background or blocking, don't give it back with the menu's few collections. One aggressive collection
-/// (compacting, then giving back every free region) does, once what the game left has become garbage (background
-/// collections a few seconds apart from 10 seconds after the close, until what's live stops shrinking) while the menu is
-/// up and nothing loads. It stops every thread while it compacts what's left live: most of a second after Construct.
+/// free space between what's still live, and regions it hands back only so fast after each collection. Background
+/// collections a few seconds apart from 10 seconds after the close, until what's live stops shrinking, turn what the game
+/// left into free regions the collector gives back over the next seconds, without stopping the threads for more than a
+/// few milliseconds. The free space between what stays live goes back only with an aggressive collection (compacting,
+/// then giving back every free region), which stops every thread while it moves what the menu keeps live: 0.6-1.7 s after
+/// Construct, a frozen frame in the menu. That one is off unless <see cref="Compact"/> is on.
 /// </summary>
-internal static class ClosedGameMemory
+internal static partial class ClosedGameMemory
 {
+	/// <summary>
+	/// Also give back the free space between what stays live, with one aggressive collection once the background ones are
+	/// done: the menu freezes while it runs (0.6-1.7 s after Construct).
+	/// </summary>
+	[ConVar( "closed_game_compact", Help = "After a game closes to the menu, also compact the managed heap to give its free space back (the menu freezes for about a second)" )]
+	public static bool Compact { get; set; }
+
 	/// <summary>
 	/// Seconds from the close to the first background collection: the engine keeps resources the close touched for up to 10
 	/// seconds (<see cref="NativeResourceCache"/>).
@@ -58,8 +66,14 @@ internal static class ClosedGameMemory
 		}
 
 		if ( close != closes || !Game.IsMainMenuVisible || LoadingScreen.IsVisible ) return;
-		Return();
+		Finish();
 	}
+
+	/// <summary>
+	/// The end of a close's background collections: the aggressive collection when <see cref="Compact"/> is on, else
+	/// nothing. The bytes it gave back.
+	/// </summary>
+	internal static long Finish( long threshold = Threshold ) => Compact ? Return( threshold ) : 0;
 
 	/// <summary>Committed bytes not live, as of the last collection: free regions and the free space between objects.</summary>
 	internal static long Unused( GCMemoryInfo info ) => info.TotalCommittedBytes - (info.HeapSizeBytes - info.FragmentedBytes);
