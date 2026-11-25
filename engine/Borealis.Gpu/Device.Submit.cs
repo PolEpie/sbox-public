@@ -720,8 +720,32 @@ public sealed unsafe partial class Device
 				signals[signalCount++] = new VkSemaphoreSubmitInfo { sType = VkStructureType.SemaphoreSubmitInfo, semaphore = swapChain.PresentSemaphore, stageMask = Vulkan.Vk.Stage2AllCommands };
 			}
 
-			// Lists waiting to go with this one go first, in one submission, unless this one waits: its waits are its own
-			if ( waitCount > 0 || swapChain is not null ) FlushLocked( queue );
+			// Lists waiting to go with this one go first, in one submission, unless this one waits: its waits are its own. Then they
+			// go as a submission of their own in the same call, signalling the value the last of them took (as FlushLocked would)
+			var heldCount = 0;
+			var heldValue = 0ul;
+			VkCommandBufferSubmitInfo* held = null;
+			if ( waitCount > 0 || swapChain is not null )
+			{
+				if ( queue.Pending.Count > 0 && !IsLost )
+				{
+					// A scope the last held list left suspended ends with them
+					if ( queue.Suspended is { } open )
+					{
+						queue.Pending.Add( ScopeList( queue, open.SuspendedTargets, Vulkan.Vk.RenderingResuming ).Handle );
+						queue.Suspended = null;
+					}
+
+					VkCommandBufferSubmitInfo* heldBuffers = stackalloc VkCommandBufferSubmitInfo[queue.Pending.Count];
+					held = heldBuffers;
+					heldCount = queue.Pending.Count;
+					for ( int i = 0; i < heldCount; i++ ) held[i] = new VkCommandBufferSubmitInfo { sType = VkStructureType.CommandBufferSubmitInfo, commandBuffer = queue.Pending[i] };
+					heldValue = queue.Submitted;
+					queue.Pending.Clear();
+				}
+				else FlushLocked( queue );
+			}
+
 			PairScopes( queue, list );
 
 			var value = queue.Next();
@@ -748,7 +772,23 @@ public sealed unsafe partial class Device
 				pSignalSemaphoreInfos = signals,
 			};
 
-			using ( Enter( "vkQueueSubmit2" ) ) Check( Vk.vkQueueSubmit2( queue.Handle, 1, &submit, 0 ), "vkQueueSubmit2" );
+			var submits = stackalloc VkSubmitInfo2[2];
+			var submitCount = 0u;
+			var heldSignal = new VkSemaphoreSubmitInfo { sType = VkStructureType.SemaphoreSubmitInfo, semaphore = queue.Timeline, value = heldValue, stageMask = Vulkan.Vk.Stage2AllCommands };
+			if ( heldCount > 0 )
+			{
+				submits[submitCount++] = new VkSubmitInfo2
+				{
+					sType = VkStructureType.SubmitInfo2,
+					commandBufferInfoCount = (uint)heldCount,
+					pCommandBufferInfos = held,
+					signalSemaphoreInfoCount = 1,
+					pSignalSemaphoreInfos = &heldSignal,
+				};
+			}
+
+			submits[submitCount++] = submit;
+			using ( Enter( "vkQueueSubmit2" ) ) Check( Vk.vkQueueSubmit2( queue.Handle, submitCount, submits, 0 ), "vkQueueSubmit2" );
 			Interlocked.Increment( ref submissions );
 			queue.Pending.Clear();
 			Volatile.Write( ref queue.Flushed, value );

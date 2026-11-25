@@ -846,7 +846,11 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 			{
 				var finished = list;
 				list = null;
-				SubmittedReadbacks( blockReadbacks, lent ? default : gpu.Submit( finished, default, presentTo ) );
+
+				// Held for the next submission (the frame's present, or what waits for it), as Borealis's lists are, rather than a
+				// vkQueueSubmit2 of its own: three of those cost ~0.04 ms a frame for a camera in a window
+				var submitted = lent ? default : presentTo is null && services.BatchSubmits ? gpu.SubmitLater( finished ) : gpu.Submit( finished, default, presentTo );
+				SubmittedReadbacks( blockReadbacks, submitted );
 			}
 		}
 		finally
