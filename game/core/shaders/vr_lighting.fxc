@@ -655,6 +655,11 @@ void ComputeDirectLighting( inout LightingTerms_t o, const FinalCombinerInput_t 
 		o.vDiffuse.rgb += debugColor;
 	}
 
+	// A view without dynamic lights needs no cluster lookup or per-wave light test.
+	[branch]
+	if ( NumDynamicLights == 0 )
+		return;
+
 	// Dynamic lights from cluster culling
 	ClusterRange lightRange = Cluster::Query( ClusterItemType_Light, nClusterIndex );
 

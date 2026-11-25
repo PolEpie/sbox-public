@@ -85,6 +85,7 @@ public sealed partial class RenderSystem
 			Shadows = false,
 			DepthPrepass = true,
 		};
+		skybox.aggregates.Skybox = true;
 		skybox.ParallelRecording = ParallelRecording;
 		skybox.DrawSky = DrawSky;
 
@@ -124,6 +125,7 @@ public sealed partial class RenderSystem
 		into.ZNear = main.ZNear;
 		into.ZFar = main.ZFar;
 		into.Viewport = main.Viewport;
+		into.Jitter = main.Jitter;
 		into.ClearColor = main.ClearColor;
 		into.ToneMapScalar = main.ToneMapScalar;
 		into.Fog = sky.Fog ?? main.Fog;

@@ -23,6 +23,13 @@ Mode( Default );
     #define GROUP_SIZE_Y 4
     #define GROUP_SIZE_Z 4
     #define GROUP_SIZE ( GROUP_SIZE_X * GROUP_SIZE_Y * GROUP_SIZE_Z ) // two mask words, see PublishCandidates
+    #define RAYS_PER_ROW ( GROUP_SIZE_X + 1 )
+    #define RAYS_PER_GROUP ( RAYS_PER_ROW * ( GROUP_SIZE_Y + 1 ) )
+
+    // A block has five ray corners along each screen axis and five depth boundaries. Every cluster reuses four rays
+    // and two depths from this grid; the whole block's coarse box takes its outer corners.
+    groupshared float3 SharedRays[RAYS_PER_GROUP];
+    groupshared float SharedDepths[GROUP_SIZE_Z + 1];
 
     groupshared float4 SharedSphere[GROUP_SIZE]; // bounding sphere in cluster space, w = radius
     groupshared float4 SharedApex[GROUP_SIZE];   // spot apex in cluster space, w = range
@@ -70,13 +77,15 @@ Mode( Default );
             return Ortho ? rayPoint.xy : rayPoint.xy * ( depth / rayPoint.z );
         }
 
-        // The box around viewport uvs [uvMin, uvMax] between two depths
-        void Bounds( float2 uvMin, float2 uvMax, float depthNear, float depthFar, out float3 boxMin, out float3 boxMax )
+        // The box between two corners in the block's ray/depth grid.
+        void Bounds( uint3 begin, uint3 end, out float3 boxMin, out float3 boxMax )
         {
-            float3 r0 = RayPoint( uvMin );
-            float3 r1 = RayPoint( float2( uvMax.x, uvMin.y ) );
-            float3 r2 = RayPoint( float2( uvMin.x, uvMax.y ) );
-            float3 r3 = RayPoint( uvMax );
+            const float3 r0 = SharedRays[begin.x + begin.y * RAYS_PER_ROW];
+            const float3 r1 = SharedRays[end.x + begin.y * RAYS_PER_ROW];
+            const float3 r2 = SharedRays[begin.x + end.y * RAYS_PER_ROW];
+            const float3 r3 = SharedRays[end.x + end.y * RAYS_PER_ROW];
+            const float depthNear = SharedDepths[begin.z];
+            const float depthFar = SharedDepths[end.z];
 
             float2 a = AtDepth( r0, depthNear ), b = AtDepth( r1, depthNear ), c = AtDepth( r2, depthNear ), d = AtDepth( r3, depthNear );
             float2 e = AtDepth( r0, depthFar ), f = AtDepth( r1, depthFar ), g = AtDepth( r2, depthFar ), h = AtDepth( r3, depthFar );
@@ -94,12 +103,10 @@ Mode( Default );
         float3 Max;
         float4 Sphere;
 
-        static ClusterBox From( ClusterSpace space, uint3 first, uint3 last )
+        static ClusterBox From( ClusterSpace space, uint3 begin, uint3 end )
         {
             ClusterBox box;
-            float2 uvMin = float2( first.xy ) * ClusterInvCounts.xy;
-            float2 uvMax = float2( last.xy + 1 ) * ClusterInvCounts.xy;
-            space.Bounds( uvMin, uvMax, Cluster::SliceToDepth( first.z ), Cluster::SliceToDepth( last.z + 1 ), box.Min, box.Max );
+            space.Bounds( begin, end, box.Min, box.Max );
             box.Sphere = float4( ( box.Min + box.Max ) * 0.5f, length( box.Max - box.Min ) * 0.5f );
             return box;
         }
@@ -133,16 +140,16 @@ Mode( Default );
 
         // An envmap's box, in its own space. The cluster's sphere moves into that space with the largest stretch
         // the matrix can give it (bounded by its Frobenius norm), so a scaled envmap is never missed.
-        bool TouchesEnvMap( ClusterSpace space, uint index )
+        static bool TouchesEnvMap( float4 worldSphere, uint index )
         {
             float4x3 worldToLocal = EnvMapWorldToLocal( index );
             float feather = max( EnvMapFeathering( index ), 0.0f );
             float3 boxMin = EnvMapBoxMins( index ) - feather;
             float3 boxMax = EnvMapBoxMaxs( index ) + feather;
 
-            float3 center = mul( float4( space.PointToWorld( Sphere.xyz ), 1.0f ), worldToLocal ).xyz;
+            float3 center = mul( float4( worldSphere.xyz, 1.0f ), worldToLocal ).xyz;
             float stretch = sqrt( dot( worldToLocal[0], worldToLocal[0] ) + dot( worldToLocal[1], worldToLocal[1] ) + dot( worldToLocal[2], worldToLocal[2] ) );
-            float radius = Sphere.w * stretch;
+            float radius = worldSphere.w * stretch;
 
             float3 outside = max( 0.0f, max( boxMin - center, center - boxMax ) );
             return dot( outside, outside ) <= radius * radius;
@@ -241,15 +248,24 @@ Mode( Default );
         ClusterSpace space = ClusterSpace::Create();
 
         const uint3 groupFirst = vGroupId * uint3( GROUP_SIZE_X, GROUP_SIZE_Y, GROUP_SIZE_Z );
-        const uint3 groupLast = min( groupFirst + uint3( GROUP_SIZE_X - 1, GROUP_SIZE_Y - 1, GROUP_SIZE_Z - 1 ), counts - 1 );
-        ClusterBox groupBox = ClusterBox::From( space, groupFirst, groupLast );
-
-        const uint3 clusterCoord = min( vThreadId, counts - 1 );
-        ClusterBox clusterBox = ClusterBox::From( space, clusterCoord, clusterCoord );
+        // Clamp the grid at the view's edge for a partial workgroup.
+        if ( nGroupIndex < RAYS_PER_GROUP )
+        {
+            const uint2 corner = uint2( nGroupIndex % RAYS_PER_ROW, nGroupIndex / RAYS_PER_ROW );
+            const uint2 coord = min( groupFirst.xy + corner, counts.xy );
+            SharedRays[nGroupIndex] = space.RayPoint( float2( coord ) * ClusterInvCounts.xy );
+        }
+        if ( nGroupIndex <= GROUP_SIZE_Z )
+            SharedDepths[nGroupIndex] = Cluster::SliceToDepth( min( groupFirst.z + nGroupIndex, counts.z ) );
 
         if ( nGroupIndex < 2 )
             SharedMask[0][nGroupIndex] = 0;
         GroupMemoryBarrierWithGroupSync();
+
+        const uint3 blockSize = min( uint3( GROUP_SIZE_X, GROUP_SIZE_Y, GROUP_SIZE_Z ), counts - groupFirst );
+        ClusterBox groupBox = ClusterBox::From( space, uint3( 0 ), blockSize );
+        const uint3 clusterCoord = min( vThreadId, counts - 1 ) - groupFirst;
+        ClusterBox clusterBox = ClusterBox::From( space, clusterCoord, clusterCoord + 1 );
 
         uint batch = 0;
 
@@ -342,25 +358,43 @@ Mode( Default );
         }
 
         //
-        // Envmaps: few, and too big to stage. The index is the same in every thread, so the reads are scalar.
-        //
-        if ( active )
+        // Envmaps are large, so share only the candidate mask. Each lane tests one probe against the group's box;
+        // probe data is read again only for the survivors, uniformly across the wave and in the original blend order.
         {
             const uint itemCount = NumEnvironmentMaps;
             const uint capacity = Cluster::Capacity( ClusterItemType_EnvMap );
             const uint baseOffset = Cluster::IndexBase( ClusterItemType_EnvMap, flatIndex );
             uint count = 0;
 
-            for ( uint i = 0; i < itemCount && count < capacity; i++ )
+            const float4 groupSphere = float4( space.PointToWorld( groupBox.Sphere.xyz ), groupBox.Sphere.w );
+            const float4 clusterSphere = float4( space.PointToWorld( clusterBox.Sphere.xyz ), clusterBox.Sphere.w );
+
+            for ( uint first = 0; first < itemCount; first += GROUP_SIZE, batch++ )
             {
-                if ( groupBox.TouchesEnvMap( space, i ) && clusterBox.TouchesEnvMap( space, i ) )
+                const uint item = first + nGroupIndex;
+                bool candidate = false;
+                if ( item < itemCount )
+                    candidate = ClusterBox::TouchesEnvMap( groupSphere, item );
+
+                uint2 mask = PublishCandidates( batch, nGroupIndex, candidate );
+
+                [loop]
+                while ( any( mask != 0 ) )
                 {
-                    ClusterItemIndices[baseOffset + count] = i;
-                    count++;
+                    const uint slot = PopLowest( mask );
+                    const uint index = first + slot;
+                    if ( active && count < capacity && ClusterBox::TouchesEnvMap( clusterSphere, index ) )
+                    {
+                        ClusterItemIndices[baseOffset + count] = index;
+                        count++;
+                    }
                 }
+
+                EndBatch();
             }
 
-            ClusterItemCounts[Cluster::CountSlot( ClusterItemType_EnvMap, flatIndex )] = count;
+            if ( active )
+                ClusterItemCounts[Cluster::CountSlot( ClusterItemType_EnvMap, flatIndex )] = count;
         }
     }
 

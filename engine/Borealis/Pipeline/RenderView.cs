@@ -340,13 +340,19 @@ public sealed class RenderView
 			SquareViewToProjection = ViewToProjection;
 		}
 
-		var translation = Matrix.CreateTranslation( -Position );
+		var worldToView = Matrix.CreateTranslation( -Position ) * WorldToViewRotation;
 		var previousUnjittered = UnjitteredWorldToProjection;
 		UnjitteredViewToProjection = ViewToProjection;
-		UnjitteredWorldToProjection = translation * WorldToViewRotation * ViewToProjection;
-		if ( Jitter != Vector2.Zero ) ViewToProjection *= ClipSpaceOffset( Jitter );
-
-		WorldToProjection = translation * WorldToViewRotation * ViewToProjection;
+		UnjitteredWorldToProjection = worldToView * ViewToProjection;
+		if ( Jitter != Vector2.Zero )
+		{
+			ViewToProjection *= ClipSpaceOffset( Jitter );
+			WorldToProjection = worldToView * ViewToProjection;
+		}
+		else
+		{
+			WorldToProjection = UnjitteredWorldToProjection;
+		}
 		Frustum = ViewFrustum.FromReverseZ( WorldToProjection );
 
 		PreviousWorldToProjection = _updated ? previous : WorldToProjection;
