@@ -207,6 +207,12 @@ internal struct ShadowViewDesc
 	public bool TexelLods;
 
 	/// <summary>
+	/// With <see cref="TexelLods"/> in the far cascade's cache and the view over it: a static caster that animates only some of
+	/// its LODs is cached at the others (<see cref="ViewPass.SplitsLods"/>).
+	/// </summary>
+	public bool SplitsLods;
+
+	/// <summary>
 	/// The <see cref="SettledCasters"/> stamp a <see cref="StaticFilter.Settled"/> or <see cref="StaticFilter.Unsettled"/> view
 	/// splits casters at.
 	/// </summary>

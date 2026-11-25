@@ -38,7 +38,8 @@ internal sealed class AggregateObject : RenderObject
 	/// </summary>
 	public RenderMesh Mesh { get; }
 
-	internal override bool? MaterialAnimates => Mesh.AnimatesVertices;
+	// Its fragments are one draw at one LOD: it animates whole or not at all
+	internal override RenderMesh.LodAnimation MaterialAnimation => Mesh.Animation.Whole();
 
 	FragmentDraw[] fragments;
 	Vector3[] centers;

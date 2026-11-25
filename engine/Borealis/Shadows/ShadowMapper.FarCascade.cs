@@ -307,6 +307,9 @@ internal partial class ShadowMapper
 		view.TexelSized = true;
 		view.TexelLods = true;
 
+		// A baked sun's cache holds no static caster, whose lightmaps do: a static caster that animates is drawn whole over it
+		view.SplitsLods = !baked;
+
 		var resolution = far.Cache.Resolution;
 		var cellTexels = resolution / FarCacheCells;
 		Vector3 right = far.Rotation.Right, up = far.Rotation.Up, forward = far.Rotation.Forward;

@@ -83,8 +83,9 @@ public abstract class GpuMaterial : IDisposable
 
 	/// <summary>
 	/// Whether its vertex stage moves vertices over time (wind in foliage), as the shader declares with
-	/// <c>BoolAttribute( AnimatesVertices, true )</c>: a static object drawn with it isn't a static caster, as a light's
-	/// static shadow cache can't hold its motion, so lights draw it live. Null while that isn't known yet (a surface still compiling).
+	/// <c>BoolAttribute( AnimatesVertices, true )</c>: a static object drawn with it at any LOD isn't a static caster, as a light's
+	/// static shadow cache can't hold its motion, so lights draw it live. The sun's far cascade cache, which picks LODs by their
+	/// own texels, holds the LODs of it that don't animate. Null while that isn't known yet (a surface still compiling).
 	/// </summary>
 	public virtual bool? AnimatesVertices => false;
 

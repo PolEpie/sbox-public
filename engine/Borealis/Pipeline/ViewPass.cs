@@ -96,6 +96,21 @@ internal sealed class ViewPass
 	public float LodTexelsPerUnit { get; set; }
 
 	/// <summary>
+	/// A view of the sun's cached far cascade, the cache's parts (<see cref="StaticFilter.Settled"/>) and what's drawn over it
+	/// (<see cref="StaticFilter.Unsettled"/>), which pick LODs by their own texels (<see cref="LodTexelsPerUnit"/>): the camera
+	/// doesn't change which LOD each takes, so they agree on it. A static caster that animates vertices at some of its LODs is
+	/// then held by the cache at the others, and drawn live only at the ones that animate (<see cref="DrawsLod"/>). A view that
+	/// picks LODs from the main camera doesn't split them: its cache can't tell which LOD it will draw.
+	/// </summary>
+	public bool SplitsLods { get; set; }
+
+	/// <summary>
+	/// Whether this view draws a LOD of a caster. Only a view that <see cref="SplitsLods"/> leaves one out, of a caster that
+	/// animates some LODs: the cache takes the ones that don't, what's drawn over it those that do.
+	/// </summary>
+	public bool DrawsLod( RenderObject obj, int lod ) => !SplitsLods || !obj.AnimatesVertices || obj.Animation.Animates( lod ) == (StaticFilter == StaticFilter.Unsettled);
+
+	/// <summary>
 	/// The <see cref="Shadows.SettledCasters"/> stamp a <see cref="StaticFilter.Settled"/> or <see cref="StaticFilter.Unsettled"/>
 	/// view splits casters at.
 	/// </summary>
@@ -207,6 +222,7 @@ internal sealed class ViewPass
 		StaticFilter = StaticFilter.Any;
 		TexelSized = false;
 		LodTexelsPerUnit = 0;
+		SplitsLods = false;
 		SettledStamp = 0;
 		RestlessStamp = 0;
 		NewlySettled = null;

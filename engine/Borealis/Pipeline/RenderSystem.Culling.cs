@@ -280,7 +280,7 @@ public sealed partial class RenderSystem
 				if ( !f.DrawsShadows || !f.CastsShadow( obj ) ) continue;
 				// A static caster that animates vertices is drawn live: never in a cache, the sun's settled far cascade included
 				if ( filter == StaticFilter.NoStatic && obj.CachesAsStatic ) continue;
-				if ( filter >= StaticFilter.Settled && !(DrawnLive( pass, obj ) ? filter == StaticFilter.Unsettled : TakesSettled( pass, filter, obj.IsStatic, world.MovedStamps[i] )) ) continue;
+				if ( filter >= StaticFilter.Settled && !TakesCaster( pass, filter, obj, world.MovedStamps[i] ) ) continue;
 			}
 
 			visible[feature].Add( i );
@@ -289,9 +289,22 @@ public sealed partial class RenderSystem
 	}
 
 	/// <summary>
+	/// Whether a cache (<see cref="StaticFilter.Settled"/>, <see cref="StaticFilter.SettledNoStatic"/>) or what's drawn on top
+	/// of it (<see cref="StaticFilter.Unsettled"/>) takes a caster, which <see cref="DrawnLive"/> or <see cref="TakesSettled"/>
+	/// decides, but for one that animates only some of its LODs in a view that <see cref="ViewPass.SplitsLods"/>: both take it,
+	/// for the LODs each draws (<see cref="ViewPass.DrawsLod"/>).
+	/// </summary>
+	static bool TakesCaster( ViewPass pass, StaticFilter filter, RenderObject obj, ulong moved )
+	{
+		if ( !DrawnLive( pass, obj ) ) return TakesSettled( pass, filter, obj.IsStatic, moved );
+		return filter == StaticFilter.Unsettled || (pass.SplitsLods && obj.AnimatesVertices && !obj.AnimatesAllLods);
+	}
+
+	/// <summary>
 	/// A caster no cache holds, drawn live on top of one: a static caster that animates vertices, and in a light's cache, a
 	/// custom object that isn't static, whose draws change without anything moving. The sun's far cascade, far from the
-	/// camera, keeps custom objects once they've settled.
+	/// camera, keeps custom objects once they've settled. Its cache keeps the LODs of a static caster that don't animate
+	/// (<see cref="ViewPass.SplitsLods"/>).
 	/// </summary>
 	static bool DrawnLive( ViewPass pass, RenderObject obj ) => obj.AnimatesVertices || (pass.LightSphere is not null && !obj.IsStatic && obj is CustomObject);
 

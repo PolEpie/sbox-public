@@ -827,6 +827,13 @@ internal sealed partial class MeshRenderFeature : RenderFeature
 				keep.Class = ClassOf( (MeshObject)objects[index], lod, shadow );
 			}
 
+			// The cache and what's drawn over it each take their LODs of a caster that animates some (ViewPass.SplitsLods)
+			if ( pass.SplitsLods && !pass.DrawsLod( objects[index], lod ) )
+			{
+				c = default;
+				continue;
+			}
+
 			c = keep.Class;
 			if ( (c.Runs & DistanceSortedLists) != 0 ) c.Distance = TranslucentSortDistance( centers[index], extents[index], sortCamera );
 			(c.TextureScale, c.TextureFallback) = textureSizes.ForObject( centers[index], extents[index] );

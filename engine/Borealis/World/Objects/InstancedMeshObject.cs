@@ -29,7 +29,7 @@ public sealed class InstancedMeshObject : RenderObject
 		}
 	}
 
-	internal override bool? MaterialAnimates => mesh is null ? false : mesh.AnimatesVertices;
+	internal override RenderMesh.LodAnimation MaterialAnimation => mesh is null ? default : mesh.Animation;
 
 	/// <summary>
 	/// Placements in this object's space (its <see cref="RenderObject.Transform"/> applies on top).

@@ -427,6 +427,7 @@ internal sealed class ShadowSystem : IShadowRenderer, IDisposable
 		pass.StaticFilter = desc.StaticFilter;
 		pass.TexelSized = desc.Orthographic && desc.TexelSized;
 		pass.LodTexelsPerUnit = desc.Orthographic && desc.TexelLods ? viewport.Width / MathF.Max( desc.Width, 1 ) : 0;
+		pass.SplitsLods = desc.SplitsLods && pass.LodTexelsPerUnit > 0;
 		pass.SettledStamp = desc.SettledStamp;
 		pass.RestlessStamp = desc.RestlessStamp;
 		pass.NewlySettled = desc.NewlySettled;
@@ -566,7 +567,7 @@ internal sealed class ShadowSystem : IShadowRenderer, IDisposable
 				if ( scratch.Length < stamps.Length ) scratch = new byte[Math.Max( stamps.Length, scratch.Length * 2 )];
 
 				// What the cache holds, by world index: the same test the view's filter rejects them by, which keeps casters whose
-				// vertices animate (CullRange draws them in this view however settled they are)
+				// vertices animate at any LOD (CullRange draws them in this view however settled they are, at the LODs that animate)
 				var objects = world.Objects;
 				var now = scratch.AsSpan( 0, stamps.Length );
 				ulong plain = ulong.MaxValue, restless = ulong.MaxValue;

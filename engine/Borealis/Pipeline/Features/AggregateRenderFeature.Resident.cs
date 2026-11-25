@@ -239,6 +239,13 @@ internal sealed partial class AggregateRenderFeature
 		public ShaderParameters Lightmap, Probe;
 		public GpuContext.ResidentMeshes Owner;
 		public RenderObject[] Members;
+
+		/// <summary>
+		/// The LODs (<see cref="RenderMesh.LodAnimation.Bit"/>) a list that splits them (<see cref="ResidentCasters.SettledLods"/>,
+		/// <see cref="ResidentCasters.StaticLods"/>) leaves out because they animate vertices, as its meshes did when it was made:
+		/// the view over the cache draws those. Zero in any other list.
+		/// </summary>
+		public ulong LiveLods;
 	}
 
 	/// <summary>
@@ -407,10 +414,28 @@ internal sealed partial class AggregateRenderFeature
 
 		/// <summary>A baked sun's far cascade cache: casters that aren't static, while they keep still.</summary>
 		SettledNotStatic,
+
+		/// <summary>
+		/// <see cref="Settled"/> for the far cascade's cache, which picks LODs by its own texels (<see cref="ViewPass.SplitsLods"/>):
+		/// it also holds the static casters that animate vertices at some LODs, at the LODs that don't.
+		/// </summary>
+		SettledLods,
+
+		/// <summary><see cref="Static"/> for the far cascade's cache, as <see cref="SettledLods"/>.</summary>
+		StaticLods,
 	}
 
 	/// <summary>Whether a list's casters are taken by when each last moved, on the GPU.</summary>
-	static bool Settles( ResidentCasters casters ) => casters is ResidentCasters.Settled or ResidentCasters.SettledNotStatic;
+	static bool Settles( ResidentCasters casters ) => casters is ResidentCasters.Settled or ResidentCasters.SettledNotStatic or ResidentCasters.SettledLods;
+
+	/// <summary>Whether a list holds the LODs of a static caster that don't animate vertices, of one that animates others.</summary>
+	static bool SplitsLods( ResidentCasters casters ) => casters is ResidentCasters.SettledLods or ResidentCasters.StaticLods;
+
+	/// <summary>
+	/// Whether a shadow list of these casters leaves out an object that animates vertices: its cache can't hold it, as the
+	/// collect doesn't, and the view over the cache draws it. A list that splits LODs keeps one that doesn't animate at all of them.
+	/// </summary>
+	static bool LeavesOutAnimating( ResidentCasters casters, RenderObject obj ) => obj.AnimatesVertices && (SplitsLods( casters ) ? obj.AnimatesAllLods : Settles( casters ));
 
 	/// <summary>Lists made since the feature was made, for the tests.</summary>
 	internal int ResidentListsMade { get; private set; }
@@ -1298,6 +1323,7 @@ internal sealed partial class AggregateRenderFeature
 			// A cache's settled casters depend on when each settled: the GPU decides, or the cache takes its static casters from
 			// a list and the rest go the view's own way. What's drawn over it every frame goes its own way: the collect visits
 			// every caster anyway, and keeps only the few that haven't settled
+			StaticFilter.Settled when pass.SplitsLods => settled ? ResidentCasters.SettledLods : ResidentCasters.StaticLods,
 			StaticFilter.Settled => settled ? ResidentCasters.Settled : ResidentCasters.Static,
 			StaticFilter.SettledNoStatic when settled => ResidentCasters.SettledNotStatic,
 			_ => (ResidentCasters)(-1),
@@ -1382,10 +1408,10 @@ internal sealed partial class AggregateRenderFeature
 			ref readonly var member = ref meshMembers[m];
 			var obj = member.Mesh;
 			if ( member.Slot < 0 || member.Overlay || (mask & 1u << member.Class) == 0 ) continue;
-			if ( shadow ? !(obj.CastShadows && TakesCaster( casters, obj.CachesAsStatic )) : !obj.GameLayers ) continue;
+			if ( shadow ? !(obj.CastShadows && TakesCaster( casters, SplitsLods( casters ) ? obj.IsStatic : obj.CachesAsStatic )) : !obj.GameLayers ) continue;
 
 			// One that animates vertices never settles: the far cascade's cache leaves it to what's drawn over it, as the collect does
-			if ( shadow && obj.AnimatesVertices && Settles( casters ) ) continue;
+			if ( LeavesOutAnimating( casters, obj ) ) continue;
 			list.ReadsFrameBuffer |= !shadow && obj.WantsFrameBufferCopy;
 
 			var lightmap = shadow || obj.LightmapAttributes is null ? (long?)null : device?.LightingFreeKey( obj.LightmapAttributes ) ?? 0;
@@ -1454,8 +1480,9 @@ internal sealed partial class AggregateRenderFeature
 			var overrideBlends = key.Override is not null && (first.OverrideTranslucent || first.OverrideAlphaTest);
 			var lightmap = key.Lightmap.HasValue ? first.LightmapAttributes : null;
 			var probe = key.Probe.HasValue ? firstMember.Probe : null;
+			var live = SplitsLods( casters ) ? first.Animation.Animating : 0;
 			if ( kept.Group is not { } group || !ReferenceEquals( group.Members, kept.Members ) || group.Mesh != key.Mesh || group.Override != key.Override || group.OverrideBlends != overrideBlends
-				|| group.Lightmap != lightmap || group.Probe != probe || group.Owner != owner )
+				|| group.Lightmap != lightmap || group.Probe != probe || group.Owner != owner || group.LiveLods != live )
 			{
 				kept.Group = group = new MeshGroup
 				{
@@ -1466,6 +1493,7 @@ internal sealed partial class AggregateRenderFeature
 					Lightmap = lightmap,
 					Probe = probe,
 					Owner = owner,
+					LiveLods = live,
 				};
 			}
 
@@ -1569,10 +1597,10 @@ internal sealed partial class AggregateRenderFeature
 			ref readonly var member = ref instancedMembers[m];
 			var obj = member.Object;
 			if ( member.Slot < 0 || (mask & 1u << member.Class) == 0 ) continue;
-			if ( shadow ? !(obj.CastShadows && TakesCaster( casters, obj.CachesAsStatic )) : !obj.GameLayers ) continue;
+			if ( shadow ? !(obj.CastShadows && TakesCaster( casters, SplitsLods( casters ) ? obj.IsStatic : obj.CachesAsStatic )) : !obj.GameLayers ) continue;
 
 			// As for meshes and aggregates: the far cascade's cache leaves out what animates, and what moved until it keeps still
-			if ( settles && (obj.AnimatesVertices || (!obj.IsStatic && restlessAggregates.ContainsKey( obj ))) ) continue;
+			if ( LeavesOutAnimating( casters, obj ) || (settles && !obj.IsStatic && restlessAggregates.ContainsKey( obj )) ) continue;
 
 			var model = obj.Mesh;
 			var placement = obj.Placed;
@@ -1601,7 +1629,8 @@ internal sealed partial class AggregateRenderFeature
 			}
 
 			kept.Version = residentVersion;
-			kept.Group ??= new MeshGroup { Members = [obj], Mesh = model, Owner = kept.Owner };
+			var live = SplitsLods( casters ) ? obj.Animation.Animating : 0;
+			if ( kept.Group is null || kept.Group.LiveLods != live ) kept.Group = new MeshGroup { Members = [obj], Mesh = model, Owner = kept.Owner, LiveLods = live };
 			list.MeshGroups.Add( kept.Group );
 			list.Holds[member.Index] = true;
 
@@ -1780,7 +1809,7 @@ internal sealed partial class AggregateRenderFeature
 	/// Mesh groups as the device takes them for a depth kind: a batch per group, LOD and draw. False while a depth draw's
 	/// material may still change which material draws it (<see cref="GpuMaterial.DepthOnlyPending"/>), to make them again.
 	/// </summary>
-	bool MeshDeviceBatches( List<MeshGroup> groups, bool depth, bool forceDepthOnly, Span<GpuContext.GpuDrivenBatch> made )
+	internal bool MeshDeviceBatches( List<MeshGroup> groups, bool depth, bool forceDepthOnly, Span<GpuContext.GpuDrivenBatch> made )
 	{
 		var at = 0;
 		var settled = true;
@@ -1791,6 +1820,15 @@ internal sealed partial class AggregateRenderFeature
 			for ( int lod = 0; lod < mesh.LodCount; lod++ )
 			{
 				var draws = mesh.DrawsForLod( lod );
+
+				// What a list that splits LODs leaves to the view over the cache: no batch for a LOD whose draws animate vertices
+				if ( (group.LiveLods & RenderMesh.LodAnimation.Bit( lod )) != 0 )
+				{
+					made.Slice( at, draws.Length ).Clear();
+					at += draws.Length;
+					continue;
+				}
+
 				for ( int d = 0; d < draws.Length; d++ )
 				{
 					ref readonly var draw = ref draws[d];
@@ -1820,7 +1858,7 @@ internal sealed partial class AggregateRenderFeature
 	/// <summary>Whether a shadow view's list of these casters holds a static or moving caster.</summary>
 	static bool TakesCaster( ResidentCasters casters, bool isStatic ) => casters switch
 	{
-		ResidentCasters.Static => isStatic,
+		ResidentCasters.Static or ResidentCasters.StaticLods => isStatic,
 		ResidentCasters.NotStatic or ResidentCasters.SettledNotStatic => !isStatic,
 		_ => true,
 	};

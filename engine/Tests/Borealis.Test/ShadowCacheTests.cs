@@ -175,6 +175,43 @@ public class ShadowCacheTests
 	}
 
 	/// <summary>
+	/// A static mesh that animates vertices at only some of its LODs isn't cached by a light either, whole: a light picks LODs
+	/// from the main camera, so its cache can't know which one it will need. Only the sun's far cascade, which picks them by its
+	/// own texels, keeps the LODs that don't animate (<see cref="CascadeCacheTests"/>).
+	/// </summary>
+	[TestMethod]
+	public void AStaticMeshThatAnimatesSomeLodsIsDrawnLiveWholeInACachedLight()
+	{
+		var world = new RenderWorld();
+		world.Lighting.SunColor = Color.Black;
+		using var sways = new AnimatingMaterial { Animates = true };
+		using var still = new AnimatingMaterial { Animates = false };
+		RenderMesh.Draw Draw( GpuMaterial material ) => new( 0, 0, 0, 36, 24, 0, material );
+		var tree = new RenderMesh( new HeadlessMesh( "tree" ), UnitBox, [[Draw( sways )], [Draw( still )]], [0, 1] );
+		var mesh = new MeshObject( tree, new Transform( new Vector3( 100, 0, -20 ) ) ) { IsStatic = true };
+		var instanced = new InstancedMeshObject { Mesh = tree, IsStatic = true };
+		instanced.SetInstances( [new Transform( new Vector3( 100, 20, -20 ) )], default );
+		world.Add( mesh );
+		world.Add( instanced );
+		world.Add( new LightObject( LightObject.LightKind.Point, new Transform( new Vector3( 100, 0, 0 ) ) ) { Radius = 50 } );
+
+		var view = LookingDownX();
+		using var system = new RenderSystem();
+		var feature = system.GetFeature<MeshRenderFeature>();
+		bool Live( RenderObject obj ) => system.ShadowMaps.Passes.ToArray().Any( p => p.StaticFilter == StaticFilter.Unsettled && p.Visible( feature ).Contains( obj.Index ) );
+		bool Cached( RenderObject obj ) => system.ShadowMaps.Passes.ToArray().Any( p => IsCache( p ) && p.Visible( feature ).Contains( obj.Index ) );
+
+		Borealis.Shadows.SettledCasters.Reset();
+		CollectAndPrepare( system, world, view );
+		CollectAndPrepare( system, world, view );
+		Borealis.Shadows.SettledCasters.Reset( settled: true );
+		CollectAndPrepare( system, world, view );
+		Assert.AreEqual( 6, StaticCacheViews( system ), "the light caches" );
+		Assert.IsTrue( Live( mesh ) && !Cached( mesh ), "a mesh with one LOD that animates is drawn live, at every LOD" );
+		Assert.IsTrue( Live( instanced ) && !Cached( instanced ), "and so are instances of it" );
+	}
+
+	/// <summary>
 	/// A cached light's cache holds casters that aren't static once they've settled, so its updates draw nothing on top of the
 	/// copy and its map is kept as it is. A settled caster moving within its reach draws the cache again without it, drawn on
 	/// top each update in the faces it's in; the first face copies the cache into all six, and the others draw nothing. Once it
@@ -290,7 +327,7 @@ public class ShadowCacheTests
 		internal override void Render( GpuContext context, ViewPass view, MeshLayer layer ) { }
 	}
 
-	sealed class AnimatingMaterial : GpuMaterial
+	internal sealed class AnimatingMaterial : GpuMaterial
 	{
 		public bool? Animates { get; set; }
 		public override string Name => "Animating";

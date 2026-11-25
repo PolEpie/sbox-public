@@ -49,6 +49,7 @@ internal sealed partial class MeshRenderFeature
 		var size = pass.KeepsSmallCasters ? default : SizeCull.ForPass( pass );
 		var sphere = pass.LightSphere;
 		var texels = pass.LodTexelsPerUnit;
+		var splits = pass.SplitsLods;
 		if ( instanceStates.Length < objects.Length ) Array.Resize( ref instanceStates, Math.Max( objects.Length, instanceStates.Length * 2 ) );
 
 		foreach ( var index in CollectionsMarshal.AsSpan( indices ) )
@@ -109,6 +110,13 @@ internal sealed partial class MeshRenderFeature
 					if ( lods is null ) lod = model.LodForScreenSize( texels, scales[i] );
 					else if ( lods[i] != LodUnknown ) lod = lods[i];
 					else lods[i] = (byte)(lod = LodOf( model, center, scales[i], camera, tanHalfFov, screenWidth ));
+				}
+
+				// The cache and what's drawn over it each take their LODs of an object that animates some (ViewPass.SplitsLods)
+				if ( splits && !pass.DrawsLod( obj, lod ) )
+				{
+					instanceDrawn[i] = NotDrawn;
+					continue;
 				}
 
 				instanceDrawn[i] = (byte)lod;
