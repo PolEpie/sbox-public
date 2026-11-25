@@ -285,6 +285,7 @@ public abstract class RenderObject
 			if ( field == value ) return;
 			field = value;
 			World?.SetSubWorld( this, value );
+			ShadowChanged();
 			DrawChanged();
 		}
 	}

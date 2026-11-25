@@ -66,17 +66,25 @@ public sealed class RenderWorld
 	internal ReadOnlySpan<ulong> MovedStamps => _movedStamps.AsSpan( 0, Count );
 
 	/// <summary>
+	/// Counts up whenever a moved stamp is written or an object's <see cref="RenderObject.AnimatesVertices"/> may have changed
+	/// (adding and removing objects counts <see cref="Structure"/>): what keeps a list made from those finds out it's stale.
+	/// </summary>
+	internal long MovedVersion { get; private set; }
+
+	/// <summary>
 	/// Where settled casters that aren't static moved or changed, so the sun's cached far cascade, which holds them, is redrawn
 	/// when a change reaches it.
 	/// </summary>
 	internal StaticCasterChanges SettledChanges { get; } = new();
 
 	/// <summary>
-	/// Objects that are never size culled - lights - by index. Few, so views just test them all.
+	/// Objects outside the spatial trees, encoded for the candidate lists.
 	/// </summary>
-	readonly List<int> _unculledObjectIndices = [];
+	readonly List<int> _unculledCandidates = [];
+	readonly List<int> _unculledShadowCandidates = [];
 
-	internal ReadOnlySpan<int> Unculled => System.Runtime.InteropServices.CollectionsMarshal.AsSpan( _unculledObjectIndices );
+	/// <summary>Shadow views need only the unculled objects that could cast; keep the main view's order in both lists.</summary>
+	internal ReadOnlySpan<int> UnculledCandidates( bool shadow ) => System.Runtime.InteropServices.CollectionsMarshal.AsSpan( shadow ? _unculledShadowCandidates : _unculledCandidates );
 
 	readonly List<Type> _objectTypes = [];
 
@@ -138,18 +146,23 @@ public sealed class RenderWorld
 		if ( included == 0 )
 		{
 			drawnVolumes = null;
-			if ( standIns.Count > 0 ) standIns.Clear();
+			standIns.Clear();
+			drawnSources.Clear();
 			return;
 		}
 
-		// The same volumes in the same order keep the list; each stand-in is copied again only when its volume changed
+		// The same volumes in the same order and sub-worlds keep the list; each stand-in is copied again only when its volume changed
 		var same = drawnSources.Count == LightProbeVolumes.Count + included;
 		var n = 0;
 		foreach ( var own in LightProbeVolumes ) same &= n < drawnSources.Count && ReferenceEquals( drawnSources[n++], own );
 		for ( int i = 0; i < this.included.Length; i++ )
 		{
 			if ( this.included[i] is not { } other ) continue;
-			foreach ( var volume in other.LightProbeVolumes ) same &= n < drawnSources.Count && ReferenceEquals( drawnSources[n++], volume );
+			foreach ( var volume in other.LightProbeVolumes )
+			{
+				same &= n < drawnSources.Count && ReferenceEquals( drawnSources[n], volume ) && drawnVolumes[n].SubWorld == i + 1;
+				n++;
+			}
 		}
 
 		if ( !same )
@@ -165,7 +178,7 @@ public sealed class RenderWorld
 				foreach ( var volume in other.LightProbeVolumes )
 				{
 					if ( !standIns.TryGetValue( volume, out var standIn ) ) standIns[volume] = standIn = (new LightProbeVolume(), int.MinValue);
-					standIn.StandIn.SubWorld = i + 1;
+					if ( standIn.StandIn.SubWorld != i + 1 ) standIn.StandIn.SubWorld = i + 1;
 					standIns[volume] = standIn;
 					drawnSources.Add( volume );
 					drawnVolumes.Add( standIn.StandIn );
@@ -317,6 +330,11 @@ public sealed class RenderWorld
 	internal int AttributeSources { get; set; }
 
 	/// <summary>
+	/// <see cref="InstancedMeshObject"/>s held: a world without any skips looking for them as the mesh feature prepares a view.
+	/// </summary>
+	internal int InstancedObjects { get; private set; }
+
+	/// <summary>
 	/// Counts up whenever an object is added or removed (so indices may have moved): what keeps a list of some of the
 	/// world's objects by index finds out it must look again.
 	/// </summary>
@@ -368,6 +386,7 @@ public sealed class RenderWorld
 
 		Structure++;
 		if ( obj is MeshObject { AttributesFrom: not null } ) AttributeSources++;
+		if ( obj is InstancedMeshObject ) InstancedObjects++;
 		_objects[index] = obj;
 		_subWorlds[index] = (byte)subWorld;
 		_treeLeaves[index] = NotAdded;
@@ -408,7 +427,11 @@ public sealed class RenderWorld
 		else if ( IsSettledCaster( obj, index ) ) SettledChanges.Add( _boundsCenters[index], _boundsExtents[index] );
 
 		if ( _treeLeaves[index] >= 0 ) Tree.Remove( _treeLeaves[index] );
-		else _unculledObjectIndices.Remove( index );
+		else
+		{
+			_unculledCandidates.Remove( index << 1 );
+			if ( CastsShadows( obj ) ) _unculledShadowCandidates.Remove( index << 1 );
+		}
 		if ( _dynamicTreeLeaves[index] >= 0 ) DynamicTree.Remove( _dynamicTreeLeaves[index] );
 		PendingAnimation.Remove( obj );
 
@@ -430,12 +453,17 @@ public sealed class RenderWorld
 			moved.SetIndexIn( this, index );
 
 			if ( _treeLeaves[index] >= 0 ) Tree.SetItem( _treeLeaves[index], index );
-			else _unculledObjectIndices[_unculledObjectIndices.IndexOf( last )] = index;
+			else
+			{
+				_unculledCandidates[_unculledCandidates.IndexOf( last << 1 )] = index << 1;
+				if ( CastsShadows( moved ) ) _unculledShadowCandidates[_unculledShadowCandidates.IndexOf( last << 1 )] = index << 1;
+			}
 			if ( _dynamicTreeLeaves[index] >= 0 ) DynamicTree.SetItem( _dynamicTreeLeaves[index], index );
 		}
 
 		_objects[last] = null;
 		if ( obj is MeshObject { AttributesFrom: not null } ) AttributeSources--;
+		if ( obj is InstancedMeshObject ) InstancedObjects--;
 		if ( !ReferenceEquals( obj.World, this ) ) obj.RemoveHost( this );
 	}
 
@@ -562,7 +590,8 @@ public sealed class RenderWorld
 		else if ( leaf == NotAdded )
 		{
 			_treeLeaves[index] = NotInTree;
-			_unculledObjectIndices.Add( index );
+			_unculledCandidates.Add( index << 1 );
+			if ( CastsShadows( obj ) ) _unculledShadowCandidates.Add( index << 1 );
 		}
 
 		SyncDynamic( obj );
@@ -573,6 +602,7 @@ public sealed class RenderWorld
 	/// </summary>
 	internal void SyncDynamic( RenderObject obj )
 	{
+		MovedVersion++;
 		var index = obj.IndexIn( this );
 		if ( index < 0 ) return;
 		var leaf = _dynamicTreeLeaves[index];
@@ -634,6 +664,7 @@ public sealed class RenderWorld
 	/// </summary>
 	void Moved( int index, bool wasSettled )
 	{
+		MovedVersion++;
 		if ( wasSettled && (_movedStamps[index] & Shadows.SettledCasters.Restless) != 0 ) _settleMoves[index] = 0;
 		if ( wasSettled && _settleMoves[index] < byte.MaxValue ) _settleMoves[index]++;
 		var restless = _settleMoves[index] >= Shadows.SettledCasters.MaxSettles ? Shadows.SettledCasters.Restless : 0;

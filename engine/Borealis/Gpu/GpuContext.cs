@@ -235,6 +235,9 @@ internal abstract class GpuContext : IDisposable
 	/// <summary>Clear the bound targets.</summary>
 	public abstract void Clear( Color color, bool clearColor = true, bool clearDepth = true );
 
+	/// <summary>Clear a rectangle of the bound depth attachment to reverse-Z far depth, preserving the rest.</summary>
+	public abstract void ClearDepthRegion( int x, int y, int width, int height );
+
 	/// <summary>
 	/// Fill a texture with a colour at this point in the work, not bound as a target. By default the device fills it now
 	/// (<see cref="GpuDevice.Clear"/>).
@@ -374,6 +377,12 @@ internal abstract class GpuContext : IDisposable
 		/// </summary>
 		public readonly uint[] Moved;
 
+		/// <summary>
+		/// Whether its LODs cross-fade, dithered, in the view that owns the fades (a main view's instanced object): those of
+		/// its draws whose material dithers it do (<see cref="GpuMaterial.DithersLodFade"/>), the rest switch at once.
+		/// </summary>
+		public bool FadesLods;
+
 		public int Count => Slots.Length;
 
 		public ResidentMeshes( RenderMesh mesh, Vector3[] centers, Vector3[] extents, int[] slots, float[] lodScales, ShaderParameters[] lightmaps = null, ShaderParameters[] probes = null, uint[] moved = null )
@@ -489,6 +498,12 @@ internal abstract class GpuContext : IDisposable
 		public bool GeneratedLods;
 
 		/// <summary>
+		/// A main view picking LODs by distance (its root camera's): what may own the frame's LOD fades, where resident meshes
+		/// that fade draw both LODs while they cross-fade; null for every other view, whose meshes switch at once.
+		/// </summary>
+		public object FadeView;
+
+		/// <summary>
 		/// Which of its resident list's casters it keeps by when each last moved, against the stamps the far cascade's cache was
 		/// drawn at (<see cref="StampWord"/>, as <see cref="Shadows.SettledCasters.SettledBy"/> compares them). The view's own
 		/// batches are kept.
@@ -557,6 +572,15 @@ internal abstract class GpuContext : IDisposable
 
 	/// <summary>Copy data into a buffer from <paramref name="offsetBytes"/> in, ordered before later draws.</summary>
 	public abstract void UploadBuffer<T>( GpuBuffer buffer, ReadOnlySpan<T> data, int offsetBytes ) where T : unmanaged;
+
+	/// <summary>
+	/// Record consecutive uploads to distinct buffers without synchronizing them with one another.
+	/// Only uploads to those buffers may be recorded between this and <see cref="EndBufferUploadBatch"/>.
+	/// </summary>
+	internal virtual void BeginBufferUploadBatch() { }
+
+	/// <summary>Make the batch's uploads visible to their consumers.</summary>
+	internal virtual void EndBufferUploadBatch() { }
 
 	/// <summary>Bind instance ids at <paramref name="firstInstance"/>.</summary>
 	public abstract void BindInstances( int stream, int firstInstance );

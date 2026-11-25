@@ -120,7 +120,8 @@ public abstract class GpuDevice
 
 	/// <summary>
 	/// Raised each time a program the device was compiling in the background becomes ready: what <see cref="TakesResident"/>
-	/// and <see cref="TakesOverlay"/> said of its materials meanwhile is looked at again.
+	/// and <see cref="TakesOverlay"/> said of its materials meanwhile is looked at again, and resident meshes whose draws it left
+	/// while compiling are taken back.
 	/// </summary>
 	internal virtual int ProgramsVersion => 0;
 

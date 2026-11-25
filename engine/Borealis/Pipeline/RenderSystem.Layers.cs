@@ -14,6 +14,7 @@ public sealed partial class RenderSystem
 
 	ContactShadowLayer contactShadows;
 	ScreenSpaceReflectionsLayer reflections;
+	OverlayDepthPrepassLayer overlayPrepass;
 
 	RenderLayer[] StandardLayers()
 	{
@@ -21,7 +22,7 @@ public sealed partial class RenderSystem
 		contactShadows = new ContactShadowLayer();
 		var opaque = new OpaqueLayer();
 		reflections = new ScreenSpaceReflectionsLayer( opaque );
-		var overlayPrepass = new OverlayDepthPrepassLayer();
+		overlayPrepass = new OverlayDepthPrepassLayer();
 		return
 		[
 			new OcclusionCullLayer( early: true ),

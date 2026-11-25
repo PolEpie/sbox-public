@@ -82,6 +82,10 @@ internal sealed class AggregateSizes : ITextureSizeSource, System.Threading.IThr
 	MeshObject[] meshes = [];
 	Vector3[] meshCenters = [], meshExtents = [];
 	int meshCount;
+	RenderMesh[] instancedModels = [];
+	InstancedMeshObject.Placement[] instancedPlacements = [];
+	int instancedCount;
+	float[] lodScale = [], lodFallback = [];
 
 	// From these on, aggregates and meshes of a resident list the collect left out: the worker culls them as it would have
 	int firstHeld, firstHeldMesh;
@@ -199,6 +203,15 @@ internal sealed class AggregateSizes : ITextureSizeSource, System.Threading.IThr
 			}
 		}
 
+		instancedCount = 0;
+		if ( meshesVisible is not null && holds is not null )
+		{
+			foreach ( var index in meshesVisible )
+			{
+				if ( index < holds.Length && holds[index] && objects[index] is InstancedMeshObject instance ) AddInstanced( instance );
+			}
+		}
+
 		firstHeldMesh = meshCount;
 		if ( held is not null )
 		{
@@ -236,15 +249,36 @@ internal sealed class AggregateSizes : ITextureSizeSource, System.Threading.IThr
 
 	void AddHeld( RenderWorld world, AggregateRenderFeature.MeshGroup group, ReadOnlySpan<RenderObject> objects, ReadOnlySpan<Vector3> objectCenters, ReadOnlySpan<Vector3> objectExtents )
 	{
-		foreach ( var mesh in group.Members )
+		foreach ( var member in group.Members )
 		{
-			var index = mesh.IndexIn( world );
+			var index = member.IndexIn( world );
 			if ( index < 0 || index >= objects.Length ) continue;
+			if ( member is InstancedMeshObject instance )
+			{
+				AddInstanced( instance );
+				continue;
+			}
+
+			var mesh = (MeshObject)member;
 			meshes[meshCount] = mesh;
 			meshCenters[meshCount] = objectCenters[index];
 			meshExtents[meshCount] = objectExtents[index];
 			meshCount++;
 		}
+	}
+
+	void AddInstanced( InstancedMeshObject instance )
+	{
+		if ( instance.Mesh is not { } model ) return;
+		if ( instancedCount == instancedModels.Length )
+		{
+			Array.Resize( ref instancedModels, Math.Max( 8, instancedCount * 2 ) );
+			Array.Resize( ref instancedPlacements, instancedModels.Length );
+		}
+
+		// The placements' arrays are never changed once made, so the worker reads this snapshot
+		instancedModels[instancedCount] = model;
+		instancedPlacements[instancedCount++] = instance.Placed;
 	}
 
 	// On a worker: each aggregate's size as the CPU's cull works it out, the largest per material
@@ -291,6 +325,49 @@ internal sealed class AggregateSizes : ITextureSizeSource, System.Threading.IThr
 				var material = mesh.MaterialOverride ?? draw.Material;
 				var size = TextureSizes.ForDraw( draw.UvDensity, scale, fallback );
 				if ( material is not null && size > 0 ) working.Add( (material, size) );
+			}
+		}
+
+		// Resident instanced objects: the LODs the CPU would pick for the placements in view, each draw sized by the nearest
+		// placement that takes its LOD, as the mesh feature sizes a run's draws
+		for ( int o = 0; o < instancedCount; o++ )
+		{
+			var model = instancedModels[o];
+			var placement = instancedPlacements[o];
+			instancedModels[o] = null;
+			instancedPlacements[o] = null;
+			var lods = model.LodCount;
+			if ( lodScale.Length < lods )
+			{
+				lodScale = new float[lods];
+				lodFallback = new float[lods];
+			}
+
+			Array.Fill( lodScale, -1.0f, 0, lods );
+			Array.Clear( lodFallback, 0, lods );
+			var seen = false;
+			for ( int i = 0; i < placement.Centers.Length; i++ )
+			{
+				var center = placement.Centers[i];
+				var extent = placement.Extents[i];
+				if ( !frustum.Intersects( center, extent ) || sizeCull.Culls( center, extent ) ) continue;
+
+				var lod = lods > 1 ? MeshRenderFeature.LodOf( model, center, placement.Scales[i], camera, tanHalfFov, screenWidth ) : 0;
+				var (scale, fallback) = textureSizes.ForObject( center, extent );
+				lodScale[lod] = MathF.Max( lodScale[lod], scale );
+				lodFallback[lod] = MathF.Max( lodFallback[lod], fallback );
+				seen = true;
+			}
+
+			if ( !seen ) continue;
+			for ( int lod = 0; lod < lods; lod++ )
+			{
+				if ( lodScale[lod] == -1.0f && lodFallback[lod] == 0 ) continue;
+				foreach ( ref readonly var draw in model.DrawsForLod( lod ) )
+				{
+					var size = TextureSizes.ForDraw( draw.UvDensity, lodScale[lod], lodFallback[lod] );
+					if ( draw.Material is not null && size > 0 ) working.Add( (draw.Material, size) );
+				}
 			}
 		}
 

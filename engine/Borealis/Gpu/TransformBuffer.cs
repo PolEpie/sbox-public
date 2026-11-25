@@ -243,12 +243,16 @@ internal sealed class TransformBuffer : IDisposable
 
 	/// <summary>
 	/// The runs asked for last frame, between frames, each in one piece with no entry written yet: one given back of the
-	/// same length, else from the slots kept for runs, which grow by half at least when they run out.
+	/// same length, else from the slots kept for runs, which grow by half at least when they run out. An object's run asked
+	/// for twice is made once.
 	/// </summary>
 	void MakeRuns()
 	{
 		foreach ( var (owner, index, count) in wantedRuns )
 		{
+			// Asked for twice in a frame (the resident refresh and a view that draws it itself): made once
+			if ( (uint)index < (uint)keptByIndex.Length && keptByIndex[index] is { Version: int.MinValue, Slot: var made } && (uint)made < (uint)keptCapacity && owners[made] == owner && runs[made] == count ) continue;
+
 			int start;
 			if ( freeRuns.TryGetValue( count, out var given ) && given.Count > 0 )
 			{

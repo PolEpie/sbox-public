@@ -150,12 +150,20 @@ dotnet run --project engine/Tools/SboxBuild/SboxBuild.csproj -- build --skip-nat
 
 # Run the renderer's unit tests after building.
 dotnet test -c Release --no-build engine/Tests/Borealis.Test
+
+# Run the offscreen Vulkan suite with validation when the Khronos layer is installed.
+dotnet test -c Release engine/Tests/Borealis.Gpu.Test
 ```
 
 The [tests](../Tests/Borealis.Test/) run on a headless device that records what frames submit, with
 nothing of the engine. They cover culling, object storage, transforms, GPU layouts, light packing,
 layer selection, allocation behavior, and the order and queues of a whole frame's work. Tests that prepare frames use
 `[DoNotParallelize]` because `ShadowMapper` and `Application.FrameCount` contain shared static state.
+
+The [Vulkan tests](../Tests/Borealis.Gpu.Test/) use a fresh device per test and check validation through device
+shutdown. Tests that exercise only the shader compiler don't need a device. Independent tests can run in
+parallel; tests that install a render host or prepare renderer frames use `RenderGpuTest` and run serially
+so they don't share frame or shadow state across tests.
 
 Visual changes require inspecting captured images. A passing comparison alone cannot show that a feature rendered
 correctly: both sides might have drawn nothing or used the same missing asset. Disable the feature once to confirm the

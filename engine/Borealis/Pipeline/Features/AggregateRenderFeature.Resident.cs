@@ -238,7 +238,43 @@ internal sealed partial class AggregateRenderFeature
 		public bool OverrideBlends;
 		public ShaderParameters Lightmap, Probe;
 		public GpuContext.ResidentMeshes Owner;
-		public MeshObject[] Members;
+		public RenderObject[] Members;
+	}
+
+	/// <summary>
+	/// What a resident instanced object was when its lists were made: any change to how it draws makes them again, a change to
+	/// its placements or transform (its entry version) only its owner.
+	/// </summary>
+	struct InstancedMember
+	{
+		public InstancedMeshObject Object;
+		public int Index;
+		public int DrawVersion;
+		public int EntryVersion;
+		public int Class;
+		public ulong Moved;
+		public bool CastShadows, GameLayers, IsStatic;
+
+		/// <summary>The first slot of its kept run, or -1 while it has none (its first frame): then it isn't resident.</summary>
+		public int Slot;
+	}
+
+	/// <summary>An instanced object's owner is found by the object and the list kind it's drawn in.</summary>
+	readonly record struct InstancedKey( RenderObject Object, ResidentCasters Casters, uint Mask );
+
+	/// <summary>
+	/// An instanced object's owner in one kind of list, kept while what it was made from is the same: identity and version
+	/// decide, never its arrays. <see cref="Version"/> is the list version that last drew it, as <see cref="MeshOwner"/>'s.
+	/// </summary>
+	sealed class InstancedOwner
+	{
+		public GpuContext.ResidentMeshes Owner;
+		public int Version;
+		public InstancedMeshObject.Placement Placement;
+		public RenderMesh Mesh;
+		public int Slot;
+		public uint Moved;
+		public MeshGroup Group;
 	}
 
 	/// <summary>
@@ -291,6 +327,12 @@ internal sealed partial class AggregateRenderFeature
 
 	MeshMember[] meshMembers = [];
 	int meshMemberCount;
+
+	InstancedMember[] instancedMembers = [];
+	int instancedMemberCount;
+	(InstancedMeshObject Object, int DrawVersion)[] instancedKnown = [];
+	readonly Dictionary<InstancedKey, InstancedOwner> instancedOwners = new();
+
 	bool residentMeshes;
 	long residentVolumesKey;
 	readonly Dictionary<MeshGroupKey, MeshOwner> meshOwners = new();
@@ -323,13 +365,13 @@ internal sealed partial class AggregateRenderFeature
 	/// Aggregates that aren't static whose moved stamp moved, by the frame it last did: lists whose casters' settling decides
 	/// hold them again once they've stayed still <see cref="SettleFrames"/> frames, as those lists hold each one's stamp.
 	/// </summary>
-	readonly Dictionary<AggregateObject, int> restlessAggregates = new( ReferenceEqualityComparer.Instance );
+	readonly Dictionary<RenderObject, int> restlessAggregates = new( ReferenceEqualityComparer.Instance );
 
 	/// <summary>Lists whose casters' settling decides made since the feature was made, for the tests.</summary>
 	internal int SettledListsMade { get; private set; }
 
 	/// <summary>Meshes a resident list held whose draws the device left: they stay with the views' own batches.</summary>
-	readonly HashSet<MeshObject> meshesLeft = new( ReferenceEqualityComparer.Instance );
+	readonly HashSet<RenderObject> meshesLeft = new( ReferenceEqualityComparer.Instance );
 	volatile bool meshesLeftChanged;
 
 	/// <summary>
@@ -501,8 +543,14 @@ internal sealed partial class AggregateRenderFeature
 		var settled = meshesWanted && Settle( world, transforms.Generation );
 		var volumesKey = meshesWanted && world.DrawnLightProbeVolumes.Count > 0 ? LightProbeVolume.Key( world.DrawnLightProbeVolumes, 0 ) : 0;
 
-		// A material's program compiled in the background since: meshes it kept from being resident may be now
+		// A material's program compiled in the background since: meshes it kept from being resident may be now, and meshes whose
+		// draws the device left while it compiled come back (a draw it still can't take leaves again, missing one frame)
 		var programs = meshesWanted ? RenderHost.Current?.Device?.ProgramsVersion ?? 0 : 0;
+		if ( programs != residentPrograms )
+		{
+			lock ( meshesLeft ) meshesLeft.Clear();
+		}
+
 		if ( !ReferenceEquals( world, residentWorld ) || world.Structure != residentStructure || meshesWanted != residentMeshes || overlaysWanted != residentOverlays || volumesKey != residentVolumesKey
 			|| meshesLeftChanged || overlaysStale || settled || programs != residentPrograms )
 		{
@@ -577,6 +625,40 @@ internal sealed partial class AggregateRenderFeature
 			}
 		}
 
+		// Instanced objects: a kept run of an entry per placement, rewritten when its entry version moves (which the placements'
+		// replacement does, with their bounds); the group's owner is made again then
+		var instancedEntryVersions = world.EntryVersions;
+		for ( int m = 0; m < instancedMemberCount; m++ )
+		{
+			ref var member = ref instancedMembers[m];
+			var obj = member.Object;
+			var index = member.Index;
+			if ( member.DrawVersion != drawVersions[index] || member.CastShadows != obj.CastShadows || member.GameLayers != obj.GameLayers || member.IsStatic != obj.IsStatic )
+			{
+				Rescan( world );
+				RefreshResident( world, transforms );
+				return;
+			}
+
+			// Moved: lists whose casters' settling decides leave it out until it keeps still
+			if ( !member.IsStatic && member.Moved != movedStamps[index] )
+			{
+				member.Moved = movedStamps[index];
+				restlessAggregates[obj] = transforms.Generation;
+				settling = true;
+			}
+
+			var slot = transforms.KeptRunFor( index, obj, obj.RunLength, instancedEntryVersions[index], out var write );
+			if ( write ) obj.WriteEntries( transforms, slot, true );
+			allKept &= slot >= 0;
+			if ( slot != member.Slot || member.EntryVersion != instancedEntryVersions[index] )
+			{
+				member.Slot = slot;
+				member.EntryVersion = instancedEntryVersions[index];
+				changed = true;
+			}
+		}
+
 		// Resident meshes: their kept transforms, rewritten when their entry version moves, which moves their bounds too
 		var matrices = world.LocalToWorld;
 		var moved = false;
@@ -630,7 +712,6 @@ internal sealed partial class AggregateRenderFeature
 	/// <summary>Whether a view with this filter takes a kept member's casting, as the culling's own tests would (settling aside).</summary>
 	internal static bool TakesMember( byte flags, StaticFilter filter ) => (flags & MemberCasts) != 0 && filter switch
 	{
-		StaticFilter.OnlyStatic => (flags & MemberStatic) != 0,
 		StaticFilter.NoStatic or StaticFilter.SettledNoStatic => (flags & MemberStatic) == 0,
 		_ => true,
 	};
@@ -653,6 +734,13 @@ internal sealed partial class AggregateRenderFeature
 			ref readonly var member = ref meshMembers[m];
 			if ( member.Slot < 0 ) continue;
 			memberFlags[member.Index] = (byte)(MemberKept | (Meshes.CastsShadow( member.Mesh ) ? MemberCasts : 0) | (member.Mesh.CachesAsStatic ? MemberStatic : 0));
+		}
+
+		for ( int m = 0; m < instancedMemberCount; m++ )
+		{
+			ref readonly var member = ref instancedMembers[m];
+			if ( member.Slot < 0 ) continue;
+			memberFlags[member.Index] = (byte)(MemberKept | (Meshes.CastsShadow( member.Object ) ? MemberCasts : 0) | (member.Object.CachesAsStatic ? MemberStatic : 0));
 		}
 	}
 
@@ -683,7 +771,7 @@ internal sealed partial class AggregateRenderFeature
 
 	/// <summary>
 	/// For the main view's collect, after <see cref="CollectHolds"/>: the world tree's node marks leaving out what its resident
-	/// list holds, or null when it holds none.
+	/// list holds, or null when its marks are not ready.
 	/// </summary>
 	internal bool[] CollectTreeKept( RenderWorld world, ViewPass pass )
 	{
@@ -691,13 +779,15 @@ internal sealed partial class AggregateRenderFeature
 		return TreeKept( world.Tree, MemoryMarshal.Cast<bool, byte>( list.Holds.AsSpan() ), list, list.Version );
 	}
 
-	/// <summary>A tree's node marks for leaving out a source's objects, at the tree's and the source's versions then.</summary>
+	/// <summary>A tree and source version seen together, with node marks once that pair spans two frames.</summary>
 	sealed class TreeMarks
 	{
 		public Culling.SpatialTree Tree;
 		public int TreeVersion;
 		public object Source;
 		public int SourceVersion;
+		public int SeenAt;
+		public bool Ready;
 		public bool[] Kept = [];
 	}
 
@@ -708,24 +798,35 @@ internal sealed partial class AggregateRenderFeature
 	int memberVersion;
 
 	/// <summary>
-	/// A tree's node marks for leaving out what <paramref name="leftOut"/> holds (<see cref="Culling.SpatialTree.Mark"/>), made again
-	/// only when the tree or the source has changed since: the members after a refresh that looked, a main list when it's
-	/// made again.
+	/// A tree's node marks for leaving out what <paramref name="leftOut"/> holds (<see cref="Culling.SpatialTree.Mark"/>).
+	/// A changed tree or source uses the cull's existing per-object filter for its first frame. Only build the marks
+	/// when they can be reused, rather than traverse the whole tree every frame while it changes.
 	/// </summary>
 	bool[] TreeKept( Culling.SpatialTree tree, ReadOnlySpan<byte> leftOut, object source, int sourceVersion )
 	{
 		foreach ( var marks in treeMarks )
 		{
-			if ( ReferenceEquals( marks.Tree, tree ) && marks.TreeVersion == tree.Version && ReferenceEquals( marks.Source, source ) && marks.SourceVersion == sourceVersion ) return marks.Kept;
+			if ( !ReferenceEquals( marks.Tree, tree ) || marks.TreeVersion != tree.Version || !ReferenceEquals( marks.Source, source ) || marks.SourceVersion != sourceVersion )
+				continue;
+
+			if ( !marks.Ready )
+			{
+				if ( marks.SeenAt == argGeneration ) return null;
+				tree.Mark( leftOut, ref marks.Kept );
+				marks.Ready = true;
+			}
+
+			return marks.Kept;
 		}
 
 		var made = treeMarks[nextMarks++ % treeMarks.Length];
-		tree.Mark( leftOut, ref made.Kept );
 		made.Tree = tree;
 		made.TreeVersion = tree.Version;
 		made.Source = source;
 		made.SourceVersion = sourceVersion;
-		return made.Kept;
+		made.SeenAt = argGeneration;
+		made.Ready = false;
+		return null;
 	}
 
 	/// <summary>
@@ -769,11 +870,15 @@ internal sealed partial class AggregateRenderFeature
 		ids.CopyTo( quietIds );
 		quietIdCount = ids.Length;
 
-		var count = memberCount + meshMemberCount;
+		var count = memberCount + meshMemberCount + instancedMemberCount;
 		if ( quietIndices.Length < count ) quietIndices = new int[count];
 		for ( int m = 0; m < memberCount; m++ ) quietIndices[m] = members[m].Index;
 		for ( int m = 0; m < meshMemberCount; m++ ) quietIndices[memberCount + m] = meshMembers[m].Index;
+		for ( int m = 0; m < instancedMemberCount; m++ ) quietIndices[memberCount + meshMemberCount + m] = instancedMembers[m].Index;
 	}
+
+	/// <summary>A member's first kept slot by its place among the aggregates, meshes and instanced objects.</summary>
+	int QuietSlot( int m ) => m < memberCount ? members[m].FirstSlot : m - memberCount < meshMemberCount ? meshMembers[m - memberCount].Slot : instancedMembers[m - memberCount - meshMemberCount].Slot;
 
 	/// <summary>
 	/// A frame like the last look, when no object the lists hold has changed since: its instance ids again, at the same place,
@@ -789,7 +894,7 @@ internal sealed partial class AggregateRenderFeature
 			return false;
 		}
 
-		var count = memberCount + meshMemberCount;
+		var count = memberCount + meshMemberCount + instancedMemberCount;
 		if ( world.Changes != quietChanges )
 		{
 			var changedAt = world.ChangedAt;
@@ -824,7 +929,7 @@ internal sealed partial class AggregateRenderFeature
 		{
 			if ( quietTouch >= count ) quietTouch = 0;
 			var m = quietTouch++;
-			transforms.KeepUsed( m < memberCount ? members[m].FirstSlot : meshMembers[m - memberCount].Slot );
+			transforms.KeepUsed( QuietSlot( m ) );
 		}
 
 		QuietFrames++;
@@ -839,7 +944,7 @@ internal sealed partial class AggregateRenderFeature
 	{
 		if ( restlessAggregates.Count == 0 ) return false;
 
-		List<AggregateObject> done = null;
+		List<RenderObject> done = null;
 		var settled = false;
 		foreach ( var (aggregate, moved) in restlessAggregates )
 		{
@@ -975,6 +1080,7 @@ internal sealed partial class AggregateRenderFeature
 		quietChanges = -1;
 		memberCount = 0;
 		meshMemberCount = 0;
+		instancedMemberCount = 0;
 		residentArgCount = 0;
 		residentArgsVersion++;
 		residentClasses.Clear();
@@ -1046,6 +1152,12 @@ internal sealed partial class AggregateRenderFeature
 			if ( candidates.Length < objects.Length ) Array.Resize( ref candidates, Math.Max( objects.Length, candidates.Length * 2 ) );
 			for ( int i = 0; i < objects.Length; i++ )
 			{
+				if ( objects[i] is InstancedMeshObject instanced )
+				{
+					ScanInstanced( world, i, instanced, device );
+					continue;
+				}
+
 				if ( objects[i] is not MeshObject mesh ) continue;
 
 				// A static overlay that isn't resident keeps its render order out of the lists
@@ -1123,6 +1235,7 @@ internal sealed partial class AggregateRenderFeature
 	}
 
 	readonly List<MeshGroupKey> staleOwnerKeys = new();
+	readonly List<InstancedKey> staleInstancedKeys = new();
 
 	/// <summary>
 	/// Drop every list, to be made again. Owners no list of the last version that made any drew are let go, so the device
@@ -1135,7 +1248,7 @@ internal sealed partial class AggregateRenderFeature
 		foreach ( var list in residentLists.Values ) ReleaseList( list );
 		residentLists.Clear();
 		staleOwnerKeys.Clear();
-		var before = meshMemberCount == 0 ? int.MaxValue : listedVersion;
+		var before = meshMemberCount + instancedMemberCount == 0 ? int.MaxValue : listedVersion;
 		foreach ( var (key, owner) in meshOwners )
 		{
 			if ( owner.Version < before ) staleOwnerKeys.Add( key );
@@ -1145,6 +1258,18 @@ internal sealed partial class AggregateRenderFeature
 		{
 			ReleaseOwner( meshOwners[key].Owner );
 			meshOwners.Remove( key );
+		}
+
+		staleInstancedKeys.Clear();
+		foreach ( var (key, owner) in instancedOwners )
+		{
+			if ( owner.Version < before ) staleInstancedKeys.Add( key );
+		}
+
+		foreach ( var key in staleInstancedKeys )
+		{
+			ReleaseOwner( instancedOwners[key].Owner );
+			instancedOwners.Remove( key );
 		}
 
 		residentVersion++;
@@ -1162,18 +1287,17 @@ internal sealed partial class AggregateRenderFeature
 	/// </summary>
 	ResidentList ResidentListFor( ViewPass pass, int textureSize )
 	{
-		if ( memberCount == 0 && meshMemberCount == 0 ) return null;
+		if ( memberCount == 0 && meshMemberCount == 0 && instancedMemberCount == 0 ) return null;
 
 		var shadow = pass.IsShadow;
 		var settled = RenderHost.Current?.Device is { DrawsSettledResident: true };
 		var casters = !shadow ? ResidentCasters.Main : pass.StaticFilter switch
 		{
 			StaticFilter.Any => ResidentCasters.All,
-			StaticFilter.OnlyStatic => ResidentCasters.Static,
 			StaticFilter.NoStatic => ResidentCasters.NotStatic,
-			// A far cascade cache's settled casters depend on when each settled: the GPU decides, or the cache takes its static
-			// casters from a list and the rest go the view's own way. What's drawn over it every frame goes its own way: the
-			// collect visits every caster anyway, and keeps only the few that haven't settled
+			// A cache's settled casters depend on when each settled: the GPU decides, or the cache takes its static casters from
+			// a list and the rest go the view's own way. What's drawn over it every frame goes its own way: the collect visits
+			// every caster anyway, and keeps only the few that haven't settled
 			StaticFilter.Settled => settled ? ResidentCasters.Settled : ResidentCasters.Static,
 			StaticFilter.SettledNoStatic when settled => ResidentCasters.SettledNotStatic,
 			_ => (ResidentCasters)(-1),
@@ -1238,6 +1362,7 @@ internal sealed partial class AggregateRenderFeature
 		}
 
 		if ( meshMemberCount > 0 ) AddMeshGroups( list, casters, mask, shadow );
+		if ( instancedMemberCount > 0 ) AddInstancedGroups( list, casters, mask, shadow );
 		if ( meshMemberCount > 0 && !shadow && residentOverlays ) AddOverlays( list, mask );
 		residentLists[(casters, mask)] = list;
 		ResidentListsMade++;
@@ -1387,6 +1512,117 @@ internal sealed partial class AggregateRenderFeature
 		}
 
 		return true;
+	}
+
+	/// <summary>
+	/// Note an instanced object of the world as a resident member if it may be: it has placements, the device takes its draws
+	/// (worked out once per draw version, as a mesh's candidate is), the device hasn't left it and its tag class is one of few.
+	/// </summary>
+	void ScanInstanced( RenderWorld world, int i, InstancedMeshObject obj, GpuDevice device )
+	{
+		if ( obj.Count == 0 || obj.Mesh is null ) return;
+
+		var drawVersions = world.DrawVersions;
+		if ( instancedKnown.Length < world.Count ) Array.Resize( ref instancedKnown, Math.Max( world.Count, instancedKnown.Length * 2 ) );
+		ref var known = ref instancedKnown[i];
+		if ( !ReferenceEquals( known.Object, obj ) || known.DrawVersion != drawVersions[i] )
+		{
+			known = default;
+			ResidentCandidatesChecked++;
+			if ( !Meshes.ResidentCandidate( obj, device ) ) return;
+			known = (obj, drawVersions[i]);
+		}
+
+		lock ( meshesLeft )
+		{
+			if ( meshesLeft.Count > 0 && meshesLeft.Contains( obj ) ) return;
+		}
+
+		var cls = ClassOf( new ClassKey( obj.Tags, obj.IsWorld, world.SubWorlds[i], obj.HiddenInCaptures, false ) );
+		if ( cls < 0 ) return;
+
+		if ( instancedMemberCount == instancedMembers.Length ) Array.Resize( ref instancedMembers, Math.Max( 8, instancedMembers.Length * 2 ) );
+		instancedMembers[instancedMemberCount++] = new InstancedMember
+		{
+			Object = obj,
+			Index = i,
+			DrawVersion = drawVersions[i],
+			EntryVersion = world.EntryVersions[i],
+			Class = cls,
+			Moved = world.MovedStamps[i],
+			CastShadows = obj.CastShadows,
+			GameLayers = obj.GameLayers,
+			IsStatic = obj.IsStatic,
+			Slot = -1,
+		};
+	}
+
+	/// <summary>
+	/// A list's resident instanced objects, a group each: its owner is made from the object's placements (their world bounds,
+	/// scales and its run's slots) and kept while the object, its placements and its run are the same - never by comparing arrays.
+	/// </summary>
+	void AddInstancedGroups( ResidentList list, ResidentCasters casters, uint mask, bool shadow )
+	{
+		var settles = Settles( casters );
+		for ( int m = 0; m < instancedMemberCount; m++ )
+		{
+			ref readonly var member = ref instancedMembers[m];
+			var obj = member.Object;
+			if ( member.Slot < 0 || (mask & 1u << member.Class) == 0 ) continue;
+			if ( shadow ? !(obj.CastShadows && TakesCaster( casters, obj.CachesAsStatic )) : !obj.GameLayers ) continue;
+
+			// As for meshes and aggregates: the far cascade's cache leaves out what animates, and what moved until it keeps still
+			if ( settles && (obj.AnimatesVertices || (!obj.IsStatic && restlessAggregates.ContainsKey( obj ))) ) continue;
+
+			var model = obj.Mesh;
+			var placement = obj.Placed;
+			var moved = settles ? GpuContext.MovedWord( member.Moved, obj.IsStatic ) : 0;
+			var key = new InstancedKey( obj, casters, mask );
+			instancedOwners.TryGetValue( key, out var kept );
+			if ( kept is null || !ReferenceEquals( kept.Placement, placement ) || !ReferenceEquals( kept.Mesh, model ) || kept.Slot != member.Slot || kept.Moved != moved )
+			{
+				if ( kept is not null ) ReleaseOwner( kept.Owner );
+
+				// The placements' arrays are never changed once made, so the owner shares them
+				var count = placement.Centers.Length;
+				var per = obj.EntriesPerInstance;
+				var slots = new int[count];
+				for ( int i = 0; i < count; i++ ) slots[i] = member.Slot + i * per;
+				uint[] movedWords = null;
+				if ( settles )
+				{
+					movedWords = new uint[count];
+					Array.Fill( movedWords, moved );
+				}
+
+				// Cross-faded LODs in main views, for draws whose material can dither them; shadows switch at once
+				var owner = new GpuContext.ResidentMeshes( model, placement.Centers, placement.Extents, slots, placement.Scales, null, null, movedWords ) { FadesLods = !shadow && model.LodCount > 1 && DithersLodFade( model ) };
+				instancedOwners[key] = kept = new InstancedOwner { Owner = owner, Placement = placement, Mesh = model, Slot = member.Slot, Moved = moved };
+			}
+
+			kept.Version = residentVersion;
+			kept.Group ??= new MeshGroup { Members = [obj], Mesh = model, Owner = kept.Owner };
+			list.MeshGroups.Add( kept.Group );
+			list.Holds[member.Index] = true;
+
+			for ( int lod = 0; lod < model.LodCount; lod++ ) list.DeviceCount += model.DrawsForLod( lod ).Length;
+			list.Triangles += (long)model.TrianglesForLod( 0 ) * placement.Centers.Length;
+			list.Fragments += placement.Centers.Length;
+		}
+	}
+
+	/// <summary>Whether a draw of <paramref name="model"/> has a material that dithers a LOD cross-fade.</summary>
+	static bool DithersLodFade( RenderMesh model )
+	{
+		for ( int lod = 0; lod < model.LodCount; lod++ )
+		{
+			foreach ( ref readonly var draw in model.DrawsForLod( lod ) )
+			{
+				if ( draw.Material is { DithersLodFade: true } ) return true;
+			}
+		}
+
+		return false;
 	}
 
 	/// <summary>
