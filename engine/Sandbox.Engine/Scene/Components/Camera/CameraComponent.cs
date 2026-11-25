@@ -421,9 +421,13 @@ public sealed partial class CameraComponent : Component, Component.ExecuteInEdit
 		camera.DebugWorlds.Clear();
 		camera.DebugWorlds.Add( Scene.DebugSceneWorld );
 
-		// Also render any active gizmos
-		if ( Gizmo.Active is not null )
-			camera.DebugWorlds.Add( Gizmo.Active.World );
+		// Also render any active gizmos. What the gizmo frame has drawn so far is written to its scene objects now: they're
+		// otherwise written when it ends, which in the editor is after the camera has drawn, so they show a frame late
+		if ( Gizmo.Active is { } gizmo )
+		{
+			gizmo._renderer?.Flush();
+			camera.DebugWorlds.Add( gizmo.World );
+		}
 
 		// A camera (such as the editor viewport) might not want to take render tags into account
 		// from an existing camera source

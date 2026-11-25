@@ -3675,7 +3675,7 @@ public class GpuDrivenTests : RenderGpuTest
 		return (BackendMesh.Create( backend, vertices.ToArray(), indices.ToArray(), material, "Boxes" ), fragments);
 	}
 
-	static void Box( List<MeshVertex> vertices, List<uint> indices, Vector3 centre, float half )
+	internal static void Box( List<MeshVertex> vertices, List<uint> indices, Vector3 centre, float half )
 	{
 		Vector3[] normals = [Vector3.Forward, Vector3.Backward, Vector3.Left, Vector3.Right, Vector3.Up, Vector3.Down];
 		foreach ( var n in normals )
