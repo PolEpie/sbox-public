@@ -42,6 +42,9 @@ public static class GameMode
 		PlayWindow = Sandbox.Engine.QtSdlBridge.Register( _playWindow );
 		NativeEngine.GameWindowNative.SetRenderTarget( PlayWindow, default );
 
+		// No SDL window wraps Qt's here: Qt owns the widget's input, and passes it on
+		if ( PlayWindow == IntPtr.Zero ) PlayWidgetInput.Attach( widget );
+
 		_inPlay = widget;
 
 		// Screen otherwise only refreshes in SimulateUI, after the first OnStart/OnUpdate have run
@@ -73,6 +76,7 @@ public static class GameMode
 
 		// Teardown also runs after Qt destroys the widget, when winId() is no longer safe.
 		Sandbox.Engine.WindowInput.OnEditorGameFocusChange( PlayWindow, false );
+		PlayWidgetInput.Detach();
 		NativeEngine.GameWindowNative.SetRenderTarget( IntPtr.Zero, default );
 		Sandbox.Engine.QtSdlBridge.Unregister( _playWindow );
 		_playWindow = default;
