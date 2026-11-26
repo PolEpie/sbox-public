@@ -12,6 +12,7 @@ public static class Program
 	[STAThread]
 	public static int Main()
 	{
+		LauncherEnvironment.RelaunchInAppBundle();
 		LauncherEnvironment.Init();
 		return Launch();
 	}

@@ -31,6 +31,35 @@ public static class LauncherEnvironment
 		}
 	}
 
+	/// <summary>
+	/// On macOS, become the copy of this executable in its app bundle (game/sbox-dev.app, which the build makes beside
+	/// game/sbox-dev) if there is one and this isn't it: Game Mode only engages for the executable of a bundle in the games
+	/// category. Same process, same arguments. Not under a debugger, which would lose the process.
+	/// </summary>
+	public static void RelaunchInAppBundle()
+	{
+		if ( !OperatingSystem.IsMacOS() || System.Diagnostics.Debugger.IsAttached ) return;
+
+		var executable = Environment.ProcessPath;
+		if ( executable is null || executable.Contains( ".app/Contents/MacOS/", StringComparison.Ordinal ) ) return;
+
+		var name = System.IO.Path.GetFileName( executable );
+		var bundled = System.IO.Path.Combine( System.IO.Path.GetDirectoryName( executable ), $"{name}.app", "Contents", "MacOS", name );
+		if ( !System.IO.File.Exists( bundled ) ) return;
+
+		// execv wants argv null terminated: the last element stays null
+		var args = Environment.GetCommandLineArgs();
+		var argv = new string[args.Length + 1];
+		argv[0] = bundled;
+		Array.Copy( args, 1, argv, 1, args.Length - 1 );
+		execv( bundled, argv );
+
+		// Only returns if it failed: carry on as this one
+	}
+
+	[DllImport( "libc", SetLastError = true )]
+	static extern int execv( string path, string[] argv );
+
 	public static void Init()
 	{
 		AppDomain.CurrentDomain.AssemblyResolve += CurrentDomain_AssemblyResolve;

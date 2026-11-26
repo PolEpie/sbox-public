@@ -136,6 +136,21 @@ internal class BuildManaged( bool clean = false )
 				}
 			}
 
+			if ( OperatingSystem.IsMacOS() )
+			{
+				Log.Info( "Step 6: Wrap the game and editor in macOS app bundles" );
+				BuildDisplay.Status( "Create app bundles" );
+				foreach ( var (name, displayName, identifier, icon) in new[]
+				{
+					("sbox", "s&box", "com.facepunch.sbox", "engine/Launcher/Sbox/sbox.ico"),
+					("sbox-dev", "s&box editor", "com.facepunch.sbox.dev", "engine/Launcher/SboxDev/sbox-dev.ico"),
+				} )
+				{
+					if ( !CreateMacAppBundle( Path.Combine( rootDir, "game" ), name, displayName, identifier, Path.Combine( rootDir, icon ) ) )
+						return ExitCode.Failure;
+				}
+			}
+
 			Log.Info( "Build completed successfully!" );
 			return ExitCode.Success;
 		}
@@ -145,6 +160,102 @@ internal class BuildManaged( bool clean = false )
 			return ExitCode.Failure;
 		}
 	} );
+
+	/// <summary>
+	/// Puts a copy of game/<paramref name="name"/> in game/<paramref name="name"/>.app, which launching the plain one re-runs
+	/// (LauncherEnvironment.RelaunchInAppBundle). macOS gives Game Mode only to a full-screen process whose executable is the
+	/// CFBundleExecutable of a bundle in the games category: the plain apphost is in no bundle, and an embedded
+	/// __info_plist doesn't count. The copy's apphost is pointed back up to the managed dll beside the plain one, so the
+	/// app's base directory stays game/.
+	/// </summary>
+	private static bool CreateMacAppBundle( string gameDir, string name, string displayName, string identifier, string iconPath )
+	{
+		var host = File.ReadAllBytes( Path.Combine( gameDir, name ) );
+
+		// The SDK writes the app's dll into the apphost's path placeholder, zero padded to 1024 bytes
+		var dll = System.Text.Encoding.UTF8.GetBytes( $"{name}.dll\0" );
+		var relative = System.Text.Encoding.UTF8.GetBytes( $"../../../{name}.dll\0" );
+		var at = host.AsSpan().IndexOf( dll );
+		if ( at < 0 || host.AsSpan( at + 1 ).IndexOf( dll ) >= 0 || host.AsSpan( at + dll.Length, relative.Length - dll.Length ).ContainsAnyExcept( (byte)0 ) )
+		{
+			Log.Error( $"Couldn't find where game/{name}'s apphost names {name}.dll" );
+			return false;
+		}
+		relative.CopyTo( host, at );
+
+		var bundle = Path.Combine( gameDir, $"{name}.app" );
+		var executable = Path.Combine( bundle, "Contents", "MacOS", name );
+		if ( Directory.Exists( bundle ) ) Directory.Delete( bundle, true );
+		Directory.CreateDirectory( Path.GetDirectoryName( executable ) );
+		File.WriteAllBytes( executable, host );
+		File.SetUnixFileMode( executable, File.GetUnixFileMode( Path.Combine( gameDir, name ) ) );
+
+		var icns = IcnsFromIco( iconPath );
+		if ( icns is null )
+		{
+			Log.Error( $"{iconPath} has no 256x256 PNG image to make {name}.app's icon from" );
+			return false;
+		}
+		Directory.CreateDirectory( Path.Combine( bundle, "Contents", "Resources" ) );
+		File.WriteAllBytes( Path.Combine( bundle, "Contents", "Resources", $"{name}.icns" ), icns );
+
+		File.WriteAllText( Path.Combine( bundle, "Contents", "Info.plist" ), $"""
+			<?xml version="1.0" encoding="UTF-8"?>
+			<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+			<plist version="1.0">
+			<dict>
+				<key>CFBundleExecutable</key>
+				<string>{name}</string>
+				<key>CFBundleIconFile</key>
+				<string>{name}</string>
+				<key>CFBundleIdentifier</key>
+				<string>{identifier}</string>
+				<key>CFBundleName</key>
+				<string>{System.Security.SecurityElement.Escape( displayName )}</string>
+				<key>CFBundlePackageType</key>
+				<string>APPL</string>
+				<key>LSApplicationCategoryType</key>
+				<string>public.app-category.games</string>
+				<key>LSSupportsGameMode</key>
+				<true/>
+				<key>NSHighResolutionCapable</key>
+				<true/>
+			</dict>
+			</plist>
+
+			""" );
+
+		// Patching the apphost broke the SDK's ad-hoc signature, and arm64 runs nothing unsigned
+		return Utility.RunProcess( "codesign", $"--force --sign - \"{bundle}\"" );
+	}
+
+	/// <summary>
+	/// An .icns holding the 256x256 PNG of an .ico, which the exe icons already carry, as its one image ('ic08').
+	/// </summary>
+	private static byte[] IcnsFromIco( string icoPath )
+	{
+		var ico = File.ReadAllBytes( icoPath );
+		var count = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian( ico.AsSpan( 4 ) );
+		for ( var i = 0; i < count; i++ )
+		{
+			var entry = ico.AsSpan( 6 + 16 * i, 16 );
+			if ( entry[0] != 0 ) continue; // a width of 0 is 256
+
+			var size = (int)System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian( entry[8..] );
+			var png = ico.AsSpan( (int)System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian( entry[12..] ), size );
+			if ( !png.StartsWith( new byte[] { 0x89, (byte)'P', (byte)'N', (byte)'G' } ) ) continue;
+
+			var icns = new byte[16 + size];
+			"icns"u8.CopyTo( icns );
+			System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian( icns.AsSpan( 4 ), (uint)icns.Length );
+			"ic08"u8.CopyTo( icns.AsSpan( 8 ) );
+			System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian( icns.AsSpan( 12 ), (uint)(8 + size) );
+			png.CopyTo( icns.AsSpan( 16 ) );
+			return icns;
+		}
+
+		return null;
+	}
 
 	/// <summary>
 	/// Lays the shared framework the Linux launchers resolve against into game/bin/dotnet.
