@@ -70,6 +70,13 @@ class ClutterLayer
 	/// </summary>
 	private readonly Dictionary<Vector2Int, List<PhysicsBody>> _bodiesByTile = [];
 
+	// Tiles within _collisionRadius tiles of _collisionCenter have bodies. -1 until the first UpdateCollision, so loading creates none.
+	private Vector2Int _collisionCenter;
+	private long _collisionRadius = -1;
+
+	// Radius used when nothing culls collision: every tile is in range, and +1 for hysteresis can't overflow.
+	private const long UnlimitedCollisionRadius = long.MaxValue - 1;
+
 	private int _lastSettingsHash;
 	private const float TileHeight = 50000f;
 	private bool _dirty = false;
@@ -204,7 +211,10 @@ class ClutterLayer
 		instances.Add( instance );
 		_renderDirtyTiles.Add( tileCoord );
 
-		TryCreateBody( tileCoord, instance );
+		if ( _bodiesByTile.TryGetValue( tileCoord, out var bodies ) )
+			TryCreateBody( bodies, instance );
+		else if ( InCollisionRange( tileCoord, _collisionRadius ) )
+			ActivateCollision( tileCoord );
 	}
 
 	public void ReserveModelInstances( Vector2Int tileCoord, int additionalCount )
@@ -229,13 +239,15 @@ class ClutterLayer
 		ModelInstancesByTile[tileCoord] = instances;
 		_renderDirtyTiles.Add( tileCoord );
 
-		foreach ( var instance in instances )
-			TryCreateBody( tileCoord, instance );
+		// Rebuilt from the adopted list, so stale bodies from a previous population can't linger.
+		RemoveBodies( tileCoord );
+		if ( InCollisionRange( tileCoord, _collisionRadius ) )
+			ActivateCollision( tileCoord );
 	}
 
 	/// <summary>
 	/// Populates this layer from a clutter storage, creating render batches and collision
-	/// bodies for every stored instance. Shared by the painted and volume rebuild paths.
+	/// bodies (for tiles in collision range) for every stored instance. Shared by the painted and volume rebuild paths.
 	/// </summary>
 	public void PopulateFromStorage( ClutterGridSystem.ClutterStorage storage )
 	{
@@ -249,12 +261,15 @@ class ClutterLayer
 			var model = Model.Load( modelPath );
 			if ( model == null ) continue;
 
+			// One entry per model and physics flag: instances only read it, so a copy each is wasted memory.
+			var withPhysics = new ClutterEntry { Model = model };
+			var withoutPhysics = new ClutterEntry { Model = model, EnablePhysics = false };
 			foreach ( var instance in storage.GetInstances( modelPath ) )
 			{
 				AddModelInstance( WorldToTile( instance.Position ), new ClutterInstance
 				{
 					Transform = new Transform( instance.Position, instance.Rotation, instance.Scale ),
-					Entry = new ClutterEntry { Model = model }
+					Entry = instance.EnablePhysics ? withPhysics : withoutPhysics
 				} );
 			}
 		}
@@ -263,9 +278,57 @@ class ClutterLayer
 	}
 
 	/// <summary>
-	/// Creates a static collision body for an instance (if its model has physics) and tracks it by tile.
+	/// Keeps collision bodies only for tiles near <paramref name="center"/>, the way rendering culls instances out of view.
+	/// A null center (no camera, e.g. a dedicated server) or a radius of 0 keeps collision on every tile.
 	/// </summary>
-	private void TryCreateBody( Vector2Int tileCoord, ClutterInstance instance )
+	public void UpdateCollision( Vector3? center, float radius )
+	{
+		var cull = center.HasValue && radius > 0f;
+		var centerTile = cull ? WorldToTile( center.Value ) : default;
+		var tileRadius = cull ? (long)MathF.Ceiling( radius / Settings.Clutter.TileSize ) : UnlimitedCollisionRadius;
+
+		if ( centerTile == _collisionCenter && tileRadius == _collisionRadius )
+			return;
+
+		_collisionCenter = centerTile;
+		_collisionRadius = tileRadius;
+
+		// Drop one tile later than we add, so moving along a tile edge doesn't rebuild bodies every frame.
+		_coordsToRemove.Clear();
+		foreach ( var coord in _bodiesByTile.Keys )
+			if ( !InCollisionRange( coord, tileRadius + 1 ) ) _coordsToRemove.Add( coord );
+
+		foreach ( var coord in _coordsToRemove )
+			RemoveBodies( coord );
+
+		foreach ( var coord in ModelInstancesByTile.Keys )
+			if ( !_bodiesByTile.ContainsKey( coord ) && InCollisionRange( coord, tileRadius ) )
+				ActivateCollision( coord );
+	}
+
+	private bool InCollisionRange( Vector2Int tileCoord, long tileRadius ) =>
+		Math.Abs( (long)tileCoord.x - _collisionCenter.x ) <= tileRadius &&
+		Math.Abs( (long)tileCoord.y - _collisionCenter.y ) <= tileRadius;
+
+	/// <summary>
+	/// Creates bodies for every instance in a tile and marks it as having collision, even if none of them have physics.
+	/// </summary>
+	private void ActivateCollision( Vector2Int tileCoord )
+	{
+		var bodies = new List<PhysicsBody>();
+		_bodiesByTile[tileCoord] = bodies;
+
+		if ( !ModelInstancesByTile.TryGetValue( tileCoord, out var instances ) )
+			return;
+
+		foreach ( var instance in instances )
+			TryCreateBody( bodies, instance );
+	}
+
+	/// <summary>
+	/// Creates a static collision body for an instance (if its model has physics) and adds it to the tile's bodies.
+	/// </summary>
+	private void TryCreateBody( List<PhysicsBody> bodies, ClutterInstance instance )
 	{
 		var model = instance.Entry?.Model;
 		if ( model?.Physics?.Parts.Count is not > 0 )
@@ -281,12 +344,6 @@ class ClutterLayer
 		var body = ClutterGenerationJob.CreateStaticBodyForVolume( model, instance.Transform, scene );
 		if ( body == null )
 			return;
-
-		if ( !_bodiesByTile.TryGetValue( tileCoord, out var bodies ) )
-		{
-			bodies = [];
-			_bodiesByTile[tileCoord] = bodies;
-		}
 
 		bodies.Add( body );
 	}

@@ -14,6 +14,13 @@ public sealed partial class ClutterGridSystem : GameObjectSystem
 	private const int MAX_JOBS_PER_FRAME = 8;
 	private const int MAX_PENDING_JOBS = 100;
 
+	/// <summary>
+	/// Clutter only has collision within this distance of the camera. 0 keeps collision everywhere.
+	/// Every clutter instance in range keeps its own physics body, so a larger radius (or 0) increases RAM usage.
+	/// </summary>
+	[Property]
+	public float PhysicsRadius { get; set; } = 4096f;
+
 	private readonly List<ClutterGenerationJob> _pendingJobs = [];
 	private readonly HashSet<ClutterTile> _pendingTiles = [];
 	private readonly HashSet<Terrain> _subscribedTerrains = [];
@@ -98,6 +105,12 @@ public sealed partial class ClutterGridSystem : GameObjectSystem
 			if ( component.IsValid() && !component.Infinite )
 				layer.RebuildIfDirty();
 		}
+
+		// Collision follows the camera. Without one (dedicated server) every tile keeps its bodies.
+		Vector3? collisionCenter = camera is null ? null : _lastCameraPosition;
+		_painted?.UpdateCollision( collisionCenter, PhysicsRadius );
+		foreach ( var layer in _componentToLayer.Values )
+			layer.UpdateCollision( collisionCenter, PhysicsRadius );
 	}
 
 	private void RestorePaintedLayer()
@@ -383,7 +396,7 @@ public sealed partial class ClutterGridSystem : GameObjectSystem
 		}
 		else if ( entry.Model != null )
 		{
-			Storage.AddInstance( entry.Model.ResourcePath, pos, rot, scale );
+			Storage.AddInstance( entry.Model.ResourcePath, pos, rot, scale, entry.EnablePhysics );
 			_dirty = true;
 		}
 	}
