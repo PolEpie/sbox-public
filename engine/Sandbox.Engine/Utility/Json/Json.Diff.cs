@@ -652,20 +652,33 @@ public static partial class Json
 	}
 
 	/// <summary>
-	/// Captures a source once for repeated comparisons without exposing the tracking graph.
-	/// Recreate the calculator when the source or object definitions change.
+	/// A source captured once for repeated comparisons without exposing the tracking graph.
+	/// Recreate it when the source or object definitions change.
 	/// </summary>
-	internal static Func<JsonObject, Patch> CreateDifferenceCalculator( JsonObject source, HashSet<TrackedObjectDefinition> definitions )
-		=> CreateBorrowingDifferenceCalculator( source?.DeepClone().AsObject(), definitions );
-
-	/// <summary>
-	/// Like <see cref="CreateDifferenceCalculator"/> but keeps references into <paramref name="source"/> instead of
-	/// cloning it. The calculator only reads those nodes, so the caller must never mutate <paramref name="source"/>.
-	/// </summary>
-	internal static Func<JsonObject, Patch> CreateBorrowingDifferenceCalculator( JsonObject source, HashSet<TrackedObjectDefinition> definitions )
+	/// <remarks>
+	/// With <paramref name="borrow"/> it keeps references into <paramref name="source"/> instead of
+	/// cloning it. It only reads those nodes, so the caller must never mutate <paramref name="source"/>.
+	/// </remarks>
+	internal sealed class DiffSource( JsonObject source, HashSet<TrackedObjectDefinition> definitions, bool borrow = false )
 	{
-		var oldObjects = FindTrackedObjectsInJson( source, definitions, forDiff: true );
-		return target => CalculateDifferences( oldObjects, FindTrackedObjectsInJson( target, definitions, forDiff: true ) );
+		private readonly TrackedObjects _source = FindTrackedObjectsInJson( borrow ? source : source?.DeepClone().AsObject(), definitions, forDiff: true );
+
+		public Patch CalculateDifferences( JsonObject target ) => Json.CalculateDifferences( _source, FindTrackedObjectsInJson( target, definitions, forDiff: true ) );
+
+		/// <summary>
+		/// Re-diffs the properties of one tracked leaf object (e.g. a component) and replaces its overrides in <paramref name="patch"/>.
+		/// Returns false if the object has no counterpart in the source; the whole tree must be diffed then.
+		/// </summary>
+		public bool TryUpdatePropertyOverrides( Patch patch, JsonObject target )
+		{
+			var targetObjects = FindTrackedObjectsInJson( target, definitions, forDiff: true );
+			if ( targetObjects.Root is not { HasChildren: false } targetObj ) return false;
+			if ( !_source.IdToTrackedObject.TryGetValue( targetObj.Id, out var sourceObj ) || sourceObj.HasChildren ) return false;
+
+			patch.PropertyOverrides.RemoveAll( x => x.Target == targetObj.Id );
+			AddPropertyOverrides( patch, _source, targetObjects, sourceObj, targetObj, sourceObj.PathHash );
+			return true;
+		}
 	}
 
 	private static Patch CalculateDifferences( TrackedObjects oldObjects, TrackedObjects newObjects )
@@ -706,56 +719,7 @@ public static partial class Json
 			}
 			else
 			{
-				var oldObjValue = oldTrackedObj.Data;
-
-				// Check for new or modified properties
-				foreach ( var property in newObj.Value.Data )
-				{
-					var propName = property.Key;
-					var newValue = property.Value;
-
-					var propPathHash = HashAppend( newObj.Value.PathHash, propName );
-					if ( oldObjects.TrackedPaths.Contains( propPathHash ) || newObjects.TrackedPaths.Contains( propPathHash ) )
-					{
-						// Skip tracked properties
-						continue;
-					}
-
-					if ( newObj.Value.Definition.Atomic )
-					{
-						// Skip property overrides self contained objects
-						continue;
-					}
-
-					if ( newObj.Value.Definition.IgnoredProperties.Contains( propName ) )
-					{
-						continue;
-					}
-
-					if ( oldObjValue.TryGetPropertyValue( propName, out var oldValue ) )
-					{
-						// Property exists in both - check for differences
-						if ( !JsonNode.DeepEquals( oldValue, newValue ) )
-						{
-							patch.PropertyOverrides.Add( new PropertyOverride
-							{
-								Target = newObj.Key,
-								Property = propName,
-								Value = newValue?.DeepClone()
-							} );
-						}
-					}
-					else if ( newValue != null || oldObjValue != null )
-					{
-						// Property is new and not null
-						patch.PropertyOverrides.Add( new PropertyOverride
-						{
-							Target = newObj.Key,
-							Property = propName,
-							Value = newValue?.DeepClone()
-						} );
-					}
-				}
+				AddPropertyOverrides( patch, oldObjects, newObjects, oldTrackedObj, newObj.Value, newObj.Value.PathHash );
 
 				// Check if object has moved (different parent or different position in array)
 				if ( newObj.Value.PreviousElement?.Id != oldTrackedObj.PreviousElement?.Id ||
@@ -774,6 +738,60 @@ public static partial class Json
 		}
 
 		return patch;
+	}
+
+	private static void AddPropertyOverrides( Patch patch, TrackedObjects oldObjects, TrackedObjects newObjects, TrackedObject oldObj, TrackedObject newObj, ulong pathHash )
+	{
+		if ( newObj.Definition.Atomic )
+		{
+			// Skip property overrides self contained objects
+			return;
+		}
+
+		var oldObjValue = oldObj.Data;
+
+		// Check for new or modified properties
+		foreach ( var property in newObj.Data )
+		{
+			var propName = property.Key;
+			var newValue = property.Value;
+
+			var propPathHash = HashAppend( pathHash, propName );
+			if ( oldObjects.TrackedPaths.Contains( propPathHash ) || newObjects.TrackedPaths.Contains( propPathHash ) )
+			{
+				// Skip tracked properties
+				continue;
+			}
+
+			if ( newObj.Definition.IgnoredProperties.Contains( propName ) )
+			{
+				continue;
+			}
+
+			if ( oldObjValue.TryGetPropertyValue( propName, out var oldValue ) )
+			{
+				// Property exists in both - check for differences
+				if ( !JsonNode.DeepEquals( oldValue, newValue ) )
+				{
+					patch.PropertyOverrides.Add( new PropertyOverride
+					{
+						Target = newObj.Id,
+						Property = propName,
+						Value = newValue?.DeepClone()
+					} );
+				}
+			}
+			else if ( newValue != null || oldObjValue != null )
+			{
+				// Property is new and not null
+				patch.PropertyOverrides.Add( new PropertyOverride
+				{
+					Target = newObj.Id,
+					Property = propName,
+					Value = newValue?.DeepClone()
+				} );
+			}
+		}
 	}
 
 	/// <summary>

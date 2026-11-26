@@ -193,9 +193,14 @@ internal class PrefabInstanceData
 	public void InitPatch( Json.Patch patch )
 	{
 		_patch = patch;
+		_partialPatchSource = null;
 	}
 
 	private static readonly SerializeOptions _serializeOptions = new();
+
+	// Set while the patch only reflects component-scoped refreshes: edits made outside any undo scope are
+	// missing until a full diff. Kept because the prefab may reload before then, and the diff must use the old source.
+	private Json.DiffSource _partialPatchSource;
 
 	/// <summary>
 	/// Updates the cached patch that represents differences between this instance and its source prefab.
@@ -212,6 +217,14 @@ internal class PrefabInstanceData
 			return;
 		}
 
+		var prefabScene = (PrefabCacheScene)GetPrefab( PrefabSource );
+		Assert.IsValid( prefabScene );
+
+		RefreshPatch( prefabScene.DiffSource );
+	}
+
+	private void RefreshPatch( Json.DiffSource source )
+	{
 		// Suppress any ambient blob-capture context (e.g. from an in-progress resource save higher
 		// up the call stack). The resulting patch is cached and reapplied long after that context's
 		// lifetime ends, so any embedded data (like mesh blobs) must be self-contained, not a
@@ -222,10 +235,45 @@ internal class PrefabInstanceData
 
 		RemapInstanceIdsToPrefabIds( ref instanceData );
 
-		var prefabScene = (PrefabCacheScene)GetPrefab( PrefabSource );
-		Assert.IsValid( prefabScene );
+		_patch = source.CalculateDifferences( instanceData );
+		_partialPatchSource = null;
+	}
 
-		_patch = prefabScene.CalculateDifferences( instanceData );
+	/// <summary>
+	/// Completes a pending component-scoped refresh. Call before the patch is read or applied back onto the instance.
+	/// </summary>
+	private void FlushPartialPatch()
+	{
+		if ( _partialPatchSource is { } source )
+			RefreshPatch( source );
+	}
+
+	/// <summary>
+	/// Updates the cached patch after property changes on <paramref name="components"/> only, without diffing the rest of the instance.
+	/// Falls back to a full <see cref="RefreshPatch()"/> if any of them has no counterpart in the prefab.
+	/// </summary>
+	internal void RefreshPatch( IEnumerable<Component> components )
+	{
+		// A pending source from before a prefab reload can't be mixed with the current one.
+		if ( _patch is not null && GetPrefab( PrefabSource ) is PrefabCacheScene prefabScene && (_partialPatchSource ?? prefabScene.DiffSource) == prefabScene.DiffSource )
+		{
+			// Same reason as in RefreshPatch(): the patch must hold self-contained data.
+			using var suppressBlobs = BlobDataSerializer.Suppress();
+
+			if ( components.All( c => c is not MissingComponent && c.Serialize( _serializeOptions ) is JsonObject json && TryUpdatePropertyOverrides( prefabScene, json ) ) )
+			{
+				_partialPatchSource = prefabScene.DiffSource;
+				return;
+			}
+		}
+
+		RefreshPatch();
+	}
+
+	private bool TryUpdatePropertyOverrides( PrefabCacheScene prefabScene, JsonObject json )
+	{
+		RemapInstanceIdsToPrefabIds( ref json );
+		return prefabScene.DiffSource.TryUpdatePropertyOverrides( _patch, json );
 	}
 
 	/// <summary>
@@ -241,6 +289,7 @@ internal class PrefabInstanceData
 		}
 
 		_patch = newPatch;
+		_partialPatchSource = null;
 	}
 
 	/// <summary>
@@ -407,6 +456,8 @@ internal class PrefabInstanceData
 	/// </summary>
 	public void RevertPropertyChange( object owner, string propertyName )
 	{
+		FlushPartialPatch();
+
 		var targetId = FindPrefabIdForInstanceObject( owner );
 		if ( targetId == Guid.Empty ) return;
 
@@ -451,6 +502,8 @@ internal class PrefabInstanceData
 	/// </summary>
 	public void RevertComponentChanges( Component comp )
 	{
+		FlushPartialPatch();
+
 		var targetId = FindPrefabIdForInstanceObject( comp );
 
 		Patch.PropertyOverrides.RemoveAll( x => Guid.Parse( x.Target.IdValue ) == targetId );
@@ -463,6 +516,8 @@ internal class PrefabInstanceData
 	/// </summary>
 	public void UpdateGameObjectFromPrefab( GameObject go, bool revertChanges = false )
 	{
+		FlushPartialPatch();
+
 		var prefabGameObject = FindPrefabGameObjectForInstanceId( go.Id );
 		if ( prefabGameObject is null ) return;
 
@@ -496,6 +551,8 @@ internal class PrefabInstanceData
 	/// </summary>
 	public void ApplyPropertyChangeToPrefab( object owner, string propertyName )
 	{
+		FlushPartialPatch();
+
 		var targetId = FindPrefabIdForInstanceObject( owner );
 		var goId = owner is Component comp ? comp.GameObject.Id : FindInstanceId( owner );
 
