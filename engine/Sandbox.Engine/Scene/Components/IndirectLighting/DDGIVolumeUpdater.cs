@@ -147,7 +147,12 @@ class DDGIProbeUpdaterCubemapper : IDisposable
 		await Task.Yield();
 
 		int completedCaptures = 0;
-		var pauseTimer = FastTimer.StartNew();
+
+		// The editor frame runs between capture slices, so a fixed slice ties bake speed to frame rate
+		// (vsync, fps caps, slow viewports). Size each slice from how long the last frame took instead.
+		const double minSliceMs = 20, maxSliceMs = 250, captureShare = 4;
+		var sliceMs = minSliceMs;
+		var sliceTimer = FastTimer.StartNew();
 
 		for ( _pass = 0; _pass < 2; _pass++ )
 		{
@@ -160,13 +165,16 @@ class DDGIProbeUpdaterCubemapper : IDisposable
 				RenderProbe( probeIndex );
 				completedCaptures++;
 
-				// Update the editor between slices of capture work.
-				if ( pauseTimer.ElapsedMilliSeconds >= 20 || completedCaptures == totalCaptures )
+				// Let the editor update between slices of capture work.
+				if ( sliceTimer.ElapsedMilliSeconds >= sliceMs || completedCaptures == totalCaptures )
 				{
 					progress.Subtitle = $"Rendering probe {completedCaptures:n0} / {totalCaptures:n0}";
 					progress.Current = completedCaptures;
+
+					var frameTimer = FastTimer.StartNew();
 					await Task.Delay( 1 );
-					pauseTimer.Start();
+					sliceMs = Math.Clamp( frameTimer.ElapsedMilliSeconds * captureShare, minSliceMs, maxSliceMs );
+					sliceTimer.Start();
 				}
 			}
 		}
