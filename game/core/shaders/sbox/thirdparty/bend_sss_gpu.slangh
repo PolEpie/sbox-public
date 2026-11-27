@@ -77,6 +77,9 @@ struct DispatchParameters
 
 	float SurfaceThickness;				// Assumed thickness of a shadow caster along view Z, in world units.
 
+	float2 FadeFootprint;				// SBOX: world units one pixel covers where the shadow starts fading (x) and is gone (y); y = 0 never fades.
+										// Where a pixel covers more than the caster detail, foliage only shadows itself in screen-space bands.
+
 	float BilinearThreshold;			// Percentage threshold for determining if the difference between two depth values represents an edge, and should not perform interpolation.
 										// To tune this value, set 'DebugOutputEdgeMask' to true to visualize where edges are being detected.
 										// Recommended starting value: 0.02 (2%)
@@ -119,6 +122,7 @@ struct DispatchParameters
 	void SetDefaults()
 	{
 		SurfaceThickness			= 2.0;
+		FadeFootprint				= float2(0, 0);
 		BilinearThreshold			= 0.02;
 		ShadowContrast				= 4;
 		IgnoreEdgePixels			= false;
@@ -400,6 +404,17 @@ void WriteScreenSpaceShadow(DispatchParameters inParameters, int3 inGroupID, int
 
 		float view_z = Depth::Linearize(start_depth, write_xy + 0.5);
 
+		// SBOX: a pixel's footprint grows with view_z (g_matViewToProjection[1][1] = 1 / tan(fov_y / 2)). Fully faded pixels
+		// write nothing: the mask starts lit, and every thread already shared its depths above.
+		float far_fade = 0;
+		if (inParameters.FadeFootprint.y > 0)
+		{
+			float footprint = 2.0 * view_z * inParameters.InvDepthTextureSize.y / abs(g_matViewToProjection[1][1]);
+			far_fade = saturate((footprint - inParameters.FadeFootprint.x) / (inParameters.FadeFootprint.y - inParameters.FadeFootprint.x));
+			if (far_fade >= 1)
+				return;
+		}
+
 		// lerp away from far depth by a tiny fraction?
 		if (inParameters.UsePrecisionOffset)
 			start_depth = lerp(start_depth, inParameters.FarDepthValue, -1.0 / 0xFFFF);
@@ -464,6 +479,7 @@ void WriteScreenSpaceShadow(DispatchParameters inParameters, int3 inGroupID, int
 
 		// If the first samples are always producing a hard shadow, then compute this value separately.
 		result = min(hard_shadow, result);
+		result = lerp(result, 1, far_fade);
 
 		//write the result
 		{

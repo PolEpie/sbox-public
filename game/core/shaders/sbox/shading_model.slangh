@@ -121,7 +121,11 @@ struct ShadingModelStandard
 
     static float4 Shade( Material m )
     {
-        // Want it right before the lighting
+        // Want it right before the lighting. Not in Borealis's depth mode, which keeps only the coverage (DepthNormals::Output):
+        // decals change no opacity, and their cluster walk's wave ops would stay even with the result dead
+        #ifdef SBOX_PASS_SLANGH
+            if ( !DepthNormals::WantsDepthNormals() )
+        #endif
         Decals::Apply( m.WorldPosition, m );
         
         // Do our magic alpha to coverage adjustment

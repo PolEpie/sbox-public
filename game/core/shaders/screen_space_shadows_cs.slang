@@ -69,6 +69,8 @@ cbuffer SssConstants
 	p.UseEarlyOut = true;
 	p.FarDepthValue = 0; // reverse-Z
 	p.NearDepthValue = 1;
+	// Gone where a pixel covers 1.5 world units (800 units away at 1080p, 90 degrees): distant canopies shadow themselves in bands
+	p.FadeFootprint = float2( 0.75, 1.5 );
 
 	p.DepthTexture = g_tSssDepth;
 	p.OutputTexture = g_outShadow;

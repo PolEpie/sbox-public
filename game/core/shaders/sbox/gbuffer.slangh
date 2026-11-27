@@ -12,6 +12,14 @@ struct DepthNormals
 {
     static float4 Output( float3 normal, float roughness = 1.0f, float opacity = 1.0f )
     {
+        // Borealis's depth mode draws into depth alone (it keeps no normals G-buffer: ambient occlusion rebuilds them from
+        // depth), so only the alpha to coverage counts. A constant normal lets the compiler drop the material's normal maths
+        // and textures from every prepass and shadow pixel
+        #ifdef SBOX_PASS_SLANGH
+            normal = float3( 0.0f, 0.0f, 1.0f );
+            roughness = 1.0f;
+        #endif
+
         // Remap normal from [-1, 1] to [0, 1]
          normal = 0.5f * ( normal + 1.0f );
          
