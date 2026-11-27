@@ -108,6 +108,18 @@ internal sealed class PassTimer : IDisposable
 		Volatile.Write( ref resetPending, 1 );
 	}
 
+	/// <summary>
+	/// Time nothing in the frame that begins: scopes <see cref="Begin"/> in it get -1 and write no timestamps. Every timestamp
+	/// costs a counter-heap resolve and breaks up the GPU's work on some drivers, so frames nobody reads aren't timed.
+	/// </summary>
+	public void SkipFrame() => slot = -1;
+
+	/// <summary>
+	/// Time only whole command lists (<see cref="ScopeKind.List"/>): other scopes <see cref="Begin"/> gets -1. For a GPU busy
+	/// time, which adds up the lists, without a timestamp at either end of every pass.
+	/// </summary>
+	public bool ListsOnly { get; set; }
+
 	/// <summary>Times <see cref="BeginFrame"/> waited for the GPU to finish a slot's last frame (<see cref="WaitForSlot"/>), for the tests.</summary>
 	public int SlotWaits { get; private set; }
 
@@ -145,7 +157,7 @@ internal sealed class PassTimer : IDisposable
 	/// </summary>
 	public int Begin( CommandList list, string name, ScopeKind kind, bool count = true )
 	{
-		if ( slot < 0 ) return -1;
+		if ( slot < 0 || ListsOnly && kind != ScopeKind.List ) return -1;
 		ref var used = ref usedTimestamps[slot];
 		int begin;
 		do

@@ -18,8 +18,10 @@ internal static partial class ManagedSceneRendering
 	[ConVar( "r_managed_async_compute", Help = "Run the depth chain, contact shadows and ambient occlusion on the async compute queue beside the shadow maps, where the GPU has one" )]
 	public static bool AsyncCompute { get; set; } = true;
 
+	// Off by default: its busy-share test misreads GPU-bound frames in the editor and drops async compute for seconds at a
+	// time, ~0.3 ms of GPU a frame, to save ~0.03 ms of CPU
 	[ConVar( "r_managed_async_compute_adaptive", Help = "With r_managed_async_compute, use the async compute queue only while the GPU limits the frame rate: it costs two more submissions and a compute handoff on the CPU each frame" )]
-	public static bool AsyncComputeAdaptive { get; set; } = true;
+	public static bool AsyncComputeAdaptive { get; set; }
 
 	/// <summary>
 	/// How occlusion culling handles aggregate fragments. Must match Borealis's <c>FragmentOcclusion</c>.

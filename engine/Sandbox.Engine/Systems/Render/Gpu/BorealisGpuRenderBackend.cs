@@ -516,18 +516,45 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 		services.PassTimer ??= busyTimer;
 		if ( services.PassTimer != busyTimer ) return;
 
-		busyTimer.BeginFrame( (long)frame );
+		// Every timestamp costs a counter-heap resolve and breaks up the GPU's work on some drivers (KosmicKrisp: ~90 resolve
+		// encoders a frame), so unless the dev tools or a counter capture read every frame, one frame in BusyReadFrames is
+		// timed, only its lists (all the busy time adds up), and the rest write no timestamps
+		var everyFrame = Sandbox.Diagnostics.GpuProfilerStats.Enabled || counterTimeline is not null;
+		busyTimer.ListsOnly = !everyFrame;
+		if ( everyFrame ) timedFrame = 0;
+		if ( everyFrame || (timedFrame == 0 && (long)frame >= busyReadFrom) )
+		{
+			busyTimer.BeginFrame( (long)frame );
+			if ( !everyFrame ) timedFrame = (long)frame;
+		}
+		else
+		{
+			busyTimer.SkipFrame();
+		}
 
-		// The frame before last is done (starting this frame waited for it); older ones are read once, every frame while the
-		// dev tools show the passes, every BusyReadFrames frames otherwise. The read goes to a worker: reading the queries back
+		// The timed frame is done once it's Slots - 1 frames behind (starting this frame waited for it); every frame while the
+		// dev tools show the passes, the one timed frame otherwise. The read goes to a worker: reading the queries back
 		// takes 0.4 ms on some drivers. It reads a slot this frame doesn't write, and the next frame's start waits for it
 		var done = (long)frame - (Borealis.Backend.PassTimer.Slots - 1);
-		if ( done <= 0 || done < busyReadFrom ) return;
-		busyReadFrame = done;
+		if ( everyFrame )
+		{
+			if ( done <= 0 || done < busyReadFrom ) return;
+			busyReadFrame = done;
+		}
+		else
+		{
+			if ( timedFrame == 0 || done < timedFrame ) return;
+			busyReadFrame = timedFrame;
+			timedFrame = 0;
+		}
+
 		busyReadCaller = Environment.CurrentManagedThreadId;
 		busyReading = true;
 		busyRead = JobDispatcher.Begin( 1, this, static ( backend, _ ) => backend.ReadBusy(), itemsPerBatch: 1 );
 	}
+
+	// The frame timed for the next read when frames aren't timed every one, 0 for none
+	long timedFrame;
 
 	// The busy timer's read of a finished frame on a worker (TimeFrame), whether one was started, the frame it reads, and
 	// whether it read it
@@ -2895,6 +2922,12 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 
 	public override void Dispatch( Material computeMaterial, RenderAttributes attributes, int threadsX, int threadsY, int threadsZ )
 	{
+		if ( DefersDispatch )
+		{
+			DeferDispatch( computeMaterial, attributes, threadsX, threadsY, threadsZ, null, 0 );
+			return;
+		}
+
 		if ( OutsideBlock )
 		{
 			// Outside a render block a dispatch is recorded with the update's uploads (gizmo text from layout), before the next block
@@ -2911,6 +2944,12 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 
 	public override void DispatchIndirect( Material computeMaterial, RenderAttributes attributes, GpuBuffer indirectBuffer, uint bufferOffset )
 	{
+		if ( DefersDispatch )
+		{
+			DeferDispatch( computeMaterial, attributes, 0, 0, 0, indirectBuffer, bufferOffset );
+			return;
+		}
+
 		if ( OutsideBlock )
 		{
 			using ( BeginUpdateWork() ) DispatchIndirect( computeMaterial, attributes, indirectBuffer, bufferOffset );
@@ -2921,6 +2960,65 @@ internal sealed partial class BorealisGpuRenderBackend : RenderBackend, IDisposa
 		drawer.Material = null;
 		if ( !context.DispatchIndirect( Require( computeMaterial ), LowerForDispatch( attributes ), BufferOf( indirectBuffer ), bufferOffset ) && !context.DispatchPending )
 			throw new InvalidOperationException( $"{computeMaterial} didn't dispatch on Borealis.Gpu" );
+	}
+
+	/// <summary>
+	/// A game dispatch on the main thread outside a block while the render thread draws a frame: kept, with a copy of its
+	/// attributes, and recorded at the join in order with the main thread's other writes (<see cref="DeferUpdateWork"/>),
+	/// rather than waiting there for the drawing (a GPU particle simulation each update held the main thread for it). The
+	/// recording state (<c>list</c>, <c>lendNext</c>) is the render thread's meanwhile: the main thread can't have a block of
+	/// its own then (<see cref="BeginBlock"/> joins first), so only its own scope is asked about.
+	/// </summary>
+	bool DefersDispatch => Overlapping && !Graphics.IsActive;
+
+	// Kept dispatches, reused: each with its attributes' copy and the delegate that records it, so deferring allocates nothing
+	readonly Stack<DeferredDispatch> deferredDispatches = new();
+
+	void DeferDispatch( Material computeMaterial, RenderAttributes attributes, int threadsX, int threadsY, int threadsZ, GpuBuffer indirectBuffer, uint bufferOffset )
+	{
+		var deferred = deferredDispatches.Count > 0 ? deferredDispatches.Pop() : new DeferredDispatch( this );
+		attributes.MergeTo( deferred.Attributes );
+		deferred.Material = computeMaterial;
+		deferred.X = threadsX;
+		deferred.Y = threadsY;
+		deferred.Z = threadsZ;
+		deferred.Indirect = indirectBuffer;
+		deferred.Offset = bufferOffset;
+		DeferUpdateWork( deferred.Run );
+	}
+
+	sealed class DeferredDispatch
+	{
+		readonly BorealisGpuRenderBackend backend;
+		public readonly RenderAttributes Attributes = new();
+		public readonly Action Run;
+		public Material Material;
+		public GpuBuffer Indirect;
+		public uint Offset;
+		public int X, Y, Z;
+
+		public DeferredDispatch( BorealisGpuRenderBackend backend )
+		{
+			this.backend = backend;
+			Run = Record;
+		}
+
+		void Record()
+		{
+			try
+			{
+				// What it reads may have gone since it was asked for
+				if ( Indirect is null ) backend.Dispatch( Material, Attributes, X, Y, Z );
+				else if ( Indirect.IsValid() ) backend.DispatchIndirect( Material, Attributes, Indirect, Offset );
+			}
+			finally
+			{
+				Attributes.Clear();
+				Material = null;
+				Indirect = null;
+				backend.deferredDispatches.Push( this );
+			}
+		}
 	}
 
 	/// <summary>
