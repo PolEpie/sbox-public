@@ -535,11 +535,17 @@ public sealed partial class BackendDevice
 	}
 
 	/// <summary>
-	/// Start reading a model made at run time, which has no file: <paramref name="save"/> makes its compiled bytes
-	/// (<c>Model.SaveMeshesToVmdl</c>) on a worker, where they're read with its materials and textures, for <see cref="MakeModel"/>.
-	/// It also decodes the buffers again once they're let go of, so it mustn't hold the model; null when the model is gone.
+	/// Read a procedural model's compiled bytes on a worker. The same reader can restore geometry after upload
+	/// and must not hold the model alive; it returns null once the model is gone.
 	/// </summary>
 	public Task<ModelFile> ReadModelAsync( Func<byte[]> save )
+		=> ReadModelAsync<object>( read => save() is { } bytes ? ModelFile.Read( bytes, read, save ) : null, null, null );
+
+	/// <summary>
+	/// Read a procedural model on a worker. The material predicate checks captured draw state without accessing native
+	/// objects or creating materials on the worker.
+	/// </summary>
+	internal Task<ModelFile> ReadModelAsync<T>( Func<Func<string, byte[]>, ModelFile> read, T state, Func<T, int, int, bool> hasRuntimeMaterial )
 	{
 		Interlocked.Increment( ref readsPending );
 		QueueWorkItem();
@@ -549,7 +555,7 @@ public sealed partial class BackendDevice
 			{
 				if ( !StartWorkItem( "read" ) ) return null;
 				using var zone = Zones.ModelRead.Start();
-				return save() is { } data ? ReadModelAhead( data, save ) : null;
+				return read( Content.TryRead ) is { } file ? ReadModelAhead( file, state, hasRuntimeMaterial ) : null;
 			}
 			finally
 			{
@@ -565,6 +571,10 @@ public sealed partial class BackendDevice
 	/// pending when it couldn't be read. Call on one thread at a time.
 	/// </summary>
 	public RenderMesh MakeModel( Task<ModelFile> read, ulong meshGroups, bool drawFastPath, out bool pending, bool generateLevels = true )
+		=> MakeModel( read, (meshGroups, drawFastPath, generateLevels), static ( device, file, options ) =>
+			BackendModel.Create( device, file, options.meshGroups, drawFastPath: options.drawFastPath, generateLevels: options.generateLevels ), out pending );
+
+	internal RenderMesh MakeModel<T>( Task<ModelFile> read, T state, Func<BackendDevice, ModelFile, T, RenderMesh> make, out bool pending )
 	{
 		pending = false;
 		if ( !read.IsCompleted || !WithinBudget() )
@@ -580,7 +590,7 @@ public sealed partial class BackendDevice
 		{
 			using ( Zones.ModelMake.Start() )
 			using ( Gpu.DeferUploads() )
-				return BackendModel.Create( this, file, meshGroups, drawFastPath: drawFastPath, generateLevels: generateLevels );
+				return make( this, file, state );
 		}
 		finally
 		{
@@ -706,7 +716,8 @@ public sealed partial class BackendDevice
 	}
 
 	// On a worker: the model's file, and its materials' files and textures, read and decoded for the thread that makes them
-	ModelFile ReadModelAhead( string path ) => ReadContent( path ) is { } data ? ReadModelAhead( data, () => ReadContent( path ) ) : null;
+	ModelFile ReadModelAhead( string path )
+		=> ReadContent( path ) is { } data ? ReadModelAhead<object>( ModelFile.Read( data, Content.TryRead, () => ReadContent( path ) ), null, null ) : null;
 
 	byte[] ReadContent( string path )
 	{
@@ -714,12 +725,19 @@ public sealed partial class BackendDevice
 		return Content.TryRead( path );
 	}
 
-	ModelFile ReadModelAhead( byte[] data, Func<byte[]> again = null )
+	ModelFile ReadModelAhead<T>( ModelFile file, T state, Func<T, int, int, bool> hasRuntimeMaterial )
 	{
-		var file = ModelFile.Read( data, Content.TryRead, again );
-		foreach ( var mesh in file.Meshes )
+		for ( int mesh = 0; mesh < file.Meshes.Count; mesh++ )
 		{
-			foreach ( var call in mesh.DrawCalls ) ReadMaterialAhead( file.MaterialFor( call.Material, 0 ) );
+			var draws = file.Meshes[mesh].DrawCalls;
+			bool mayUseRuntimeMaterial = hasRuntimeMaterial is not null && file.DrawsAtLod( mesh, 0 );
+			for ( int draw = 0; draw < draws.Count; draw++ )
+			{
+				var call = draws[draw];
+				// Match BackendModel.Create: a live LOD 0 material replaces the file when the draw can't use the shadow fast path.
+				if ( mayUseRuntimeMaterial && (call.Flags & MeshDrawFlags.ShadowFastPath) == 0 && hasRuntimeMaterial( state, mesh, draw ) ) continue;
+				ReadMaterialAhead( file.MaterialFor( call.Material, 0 ) );
+			}
 		}
 
 		return file;

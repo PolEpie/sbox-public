@@ -183,7 +183,7 @@ internal class BuildMount
 		""";
 
 	/// <summary>
-	/// Compiles the shaders under the mount's assets, mounted as the engine mounts them so they find each other.
+	/// Compiles the shaders under the mount's assets with and without the GPU-driven variant.
 	/// </summary>
 	static bool BuildShaders( string gameDir, string name, string assetsDir )
 	{
@@ -200,6 +200,13 @@ internal class BuildMount
 		if ( !Utility.RunProcess( shaderCompilerPath, $"-assets \"{assetsDir}\"", gameDir ) )
 		{
 			Log.Error( $"Failed to compile shaders of mount '{name}'" );
+			return false;
+		}
+
+		Log.Info( $"Compiling GPU-driven shaders of mount '{name}'" );
+		if ( !Utility.RunProcess( shaderCompilerPath, $"-assets \"{assetsDir}\" -gpudriven", gameDir ) )
+		{
+			Log.Error( $"Failed to compile GPU-driven shaders of mount '{name}'" );
 			return false;
 		}
 

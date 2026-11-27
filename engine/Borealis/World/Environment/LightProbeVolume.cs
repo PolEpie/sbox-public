@@ -81,7 +81,8 @@ public sealed class LightProbeVolume
 	public int RenderPriority { get; set { field = value; Version++; } }
 
 	/// <summary>
-	/// The light groups (string token values) whose objects it lights. Native gives a map's volumes one, the empty name.
+	/// The light groups (string token values) whose objects it lights. Native gives a map's volumes one, the empty name; one
+	/// managed code made (a component's, a mount's) has none, and lights every object.
 	/// </summary>
 	public uint[] LightGroups { get; set { field = value; Version++; } } = [];
 
@@ -121,7 +122,7 @@ public sealed class LightProbeVolume
 		{
 			var volume = volumes[i];
 			if ( !volume.Enabled || volume.Attributes is null || !volume.ShownIn( subWorlds ) ) continue;
-			if ( Array.IndexOf( volume.LightGroups, lightGroup ) < 0 ) continue;
+			if ( volume.LightGroups.Length > 0 && Array.IndexOf( volume.LightGroups, lightGroup ) < 0 ) continue;
 
 			var mins = volume.BoxMins;
 			var maxs = volume.BoxMaxs;

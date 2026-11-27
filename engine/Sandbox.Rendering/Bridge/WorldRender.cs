@@ -414,7 +414,7 @@ internal sealed partial class WorldRender : ISceneWorldRender, IAttributeSource,
 			return device.MaterialTexture( material, o.Parameter );
 		}
 
-		if ( MirrorContent.Gpu is not { } gpu || texture is null || texture.IsRenderTarget || MirrorContent.IsCaptureCube( texture ) || texture.ResourcePath is not { Length: > 0 } path ) return MirrorContent.Texture( texture );
+		if ( MirrorContent.Gpu is not { } gpu || texture is null || texture.IsRenderTarget || texture.MadeAtRunTime || MirrorContent.IsCaptureCube( texture ) || texture.ResourcePath is not { Length: > 0 } path ) return MirrorContent.Texture( texture );
 		lock ( heldTextures ) return heldTextures.Add( path ) ? gpu.HoldTexture( path ) : gpu.HeldTexture( path );
 	}
 

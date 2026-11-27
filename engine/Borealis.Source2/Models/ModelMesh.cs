@@ -113,10 +113,12 @@ public sealed class ModelMesh
 	/// Read a mesh from its KV3 (<c>CRenderMesh</c>) and buffer blocks. <paramref name="againBuffers"/> gives the buffer block
 	/// again, when the file can be read again: its buffers can then be let go once they're on the GPU (<see cref="MeshVertexBuffer.Release"/>).
 	/// </summary>
-	internal static ModelMesh Read( ReadOnlySpan<byte> kv3, ReadOnlySpan<byte> buffers, string name, int index, ulong meshGroups, byte lods, bool morphs, string morphTexture, MorphSet morphSet = null, ReadOnlySpan<byte> meshlets = default, Func<ReadOnlyMemory<byte>> againBuffers = null )
+	internal static ModelMesh Read( ReadOnlySpan<byte> kv3, ReadOnlySpan<byte> buffers, string name, int index, ulong meshGroups, byte lods, bool morphs, string morphTexture,
+		MorphSet morphSet = null, ReadOnlySpan<byte> meshlets = default, Func<ReadOnlyMemory<byte>> againBuffers = null,
+		(MeshVertexBuffer[] Vertices, MeshIndexBuffer[] Indices)? meshBuffers = null )
 	{
 		if ( Kv3.Read( kv3 ) is not Dictionary<string, object> root ) throw new InvalidDataException( $"Mesh {name} isn't a KV3 object" );
-		var (vertexBuffers, indexBuffers) = ReadBuffers( buffers, name, againBuffers );
+		var (vertexBuffers, indexBuffers) = meshBuffers ?? ReadBuffers( buffers, name, againBuffers );
 
 		// The compiler's meshlets (an MSHL block), each index buffer given its ranges'
 		if ( !meshlets.IsEmpty && CookedMeshlets.Read( meshlets, vertexBuffers, indexBuffers ) is { } cooked )

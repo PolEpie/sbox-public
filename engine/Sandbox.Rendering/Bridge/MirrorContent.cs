@@ -60,12 +60,12 @@ internal static class MirrorContent
 	static readonly System.Collections.Concurrent.ConcurrentQueue<BackendModel> freedModels = new();
 
 	/// <summary>
-	/// A model made at run time (no file to read): saved as a compiled model in memory
-	/// (<c>Model.SaveMeshesToVmdl</c>, its buffers as its meshes keep them, no physics) and read as a model file is, its materials by
-	/// path, drawn whole as native draws it (no generated levels: its vertices may be what a vertex stage places, a water
-	/// surface's clipmap cells); loading asynchronously (<see cref="BackendDevice.AsyncModels"/>) that's on a worker, and it's made within the
-	/// frame's load budget, null with <paramref name="pending"/> set until then. Its buffers are freed once the engine's model
-	/// is gone.
+	/// A model made at run time (no file to read): snapshots the builder's buffers, or reads buffers from native for
+	/// other procedural models. Both paths use native model metadata and omit physics.
+	/// It uses the model's live materials where possible and is drawn whole (no generated levels: its vertices may be what
+	/// a vertex stage places, a water surface's clipmap cells). With <see cref="BackendDevice.AsyncModels"/>, the read is
+	/// on a worker, and the mesh is made within the frame's load budget, null with <paramref name="pending"/> set until then.
+	/// Its buffers are freed once the engine's model is gone.
 	/// </summary>
 	static RenderMesh RuntimeMesh( Model model, BackendDevice gpu, out bool pending )
 	{
@@ -89,27 +89,69 @@ internal static class MirrorContent
 		RenderMesh mesh;
 		if ( gpu.AsyncModels )
 		{
-			var read = runtimeReads.GetValue( model, m => gpu.ReadModelAsync( SaveWeakly( m ) ) );
-			mesh = gpu.MakeModel( read, ulong.MaxValue, drawFastPath: true, out pending, generateLevels: false );
+			var read = runtimeReads.GetValue( model, m =>
+			{
+				var weak = new WeakReference<Model>( m );
+				return gpu.ReadModelAsync( external => weak.TryGetTarget( out var alive ) && !alive.native.IsNull ? alive.ReadRenderModel( external ) : null,
+					SceneObject.ModelDraws.For( m ).Draws, static ( draws, mesh, draw ) => RuntimeDrawSource( draws, mesh, draw ) is not null );
+			} );
+			mesh = gpu.MakeModel( read, model, CreateRuntimeMesh, out pending );
 			if ( pending ) return null;
 			runtimeReads.Remove( model );
 			if ( mesh is null && read.Exception?.GetBaseException() is { } e ) Log.Warning( e, $"Couldn't read run-time model {model.Name}: {e.Message}" );
 		}
-		else mesh = BackendModel.Create( gpu, ModelFile.Read( model.SaveMeshesToVmdl(), gpu.Content.TryRead, SaveWeakly( model ) ), meshGroups: ulong.MaxValue, drawFastPath: true, generateLevels: false );
+		else mesh = CreateRuntimeMesh( gpu, model.ReadRenderModel( gpu.Content.TryRead ), model );
 
+		if ( mesh is not null ) mesh = WithOwnMaterials( model, mesh );
 		runtimeMeshes.AddOrUpdate( model, new RuntimeModel( mesh ) );
 		if ( mesh is not null ) gpu.TrackModel( mesh );
 		return mesh;
 	}
 
-	/// <summary>
-	/// <see cref="Model.SaveMeshesToVmdl"/> without holding the model: the file read from it keeps this to decode buffers it let go
-	/// of, and mustn't keep the model alive. Null once the model is gone or destroyed.
-	/// </summary>
-	static Func<byte[]> SaveWeakly( Model model )
+	static RenderMesh CreateRuntimeMesh( BackendDevice gpu, ModelFile file, Model model )
+		=> BackendModel.Create( gpu, file, ulong.MaxValue, materialGroup: 0, drawFastPath: true, generateLevels: false,
+			SceneObject.ModelDraws.For( model ).Draws, RuntimeDrawMaterial );
+
+	static GpuMaterial RuntimeDrawMaterial( SceneObject.ModelDraws.Draw[] draws, int mesh, int drawCall )
+		=> Material( RuntimeDrawSource( draws, mesh, drawCall ) );
+
+	static Material RuntimeDrawSource( SceneObject.ModelDraws.Draw[] draws, int mesh, int drawCall )
 	{
-		var weak = new WeakReference<Model>( model );
-		return () => weak.TryGetTarget( out var alive ) && !alive.native.IsNull ? alive.SaveMeshesToVmdl() : null;
+		// Native draw ordinals restart per mesh; names are not unique for materials made in code.
+		int lo = 0, hi = draws.Length;
+		while ( lo < hi )
+		{
+			int mid = lo + (hi - lo) / 2;
+			ref readonly var draw = ref draws[mid];
+			if ( draw.Mesh == mesh && draw.DrawCall == drawCall )
+				return draw.Material?.MadeFromShader is not null ? draw.Material : null;
+			if ( draw.Mesh < mesh || (draw.Mesh == mesh && draw.DrawCall < drawCall) ) lo = mid + 1;
+			else hi = mid;
+		}
+		return null;
+	}
+
+	/// <summary>
+	/// A run-time model's mesh drawing the materials its model has rather than the ones its saved form names by path: a
+	/// material made in code (a mount's map surfaces, <c>Material.Create</c> with a name) has no file there, so by path it
+	/// draws as the error material. What draws the mesh as it is (an aggregate's fragments) gets them too; an object's own
+	/// draw states apply over them as for any model.
+	/// </summary>
+	static RenderMesh WithOwnMaterials( Model model, RenderMesh mesh )
+	{
+		var baseDraws = new Dictionary<(int, int), RenderMesh.Draw>();
+		foreach ( var draw in mesh.Draws ) baseDraws[(draw.Mesh, draw.DrawCall)] = draw;
+
+		var states = new List<RenderMesh.DrawState>();
+		foreach ( var draw in SceneObject.ModelDraws.For( model ).Draws )
+		{
+			if ( !baseDraws.TryGetValue( (draw.Mesh, draw.DrawCall), out var drawn ) || Material( draw.Material ) is not { } material ) continue;
+			var translucent = RenderMesh.IsTranslucent( material );
+			var fastPath = drawn.ShadowFastPath && material.ShadowFastPath && !translucent && !RenderMesh.IsAlphaTest( material );
+			states.Add( new RenderMesh.DrawState( draw.Mesh, draw.DrawCall, material, true, translucent, fastPath, drawn.Lightmapped ) );
+		}
+
+		return mesh.WithDraws( CollectionsMarshal.AsSpan( states ) );
 	}
 
 	/// <summary>Whether a model loading asynchronously (<see cref="Mesh(Model, out bool)"/>) has been read, so asking again can make it.</summary>

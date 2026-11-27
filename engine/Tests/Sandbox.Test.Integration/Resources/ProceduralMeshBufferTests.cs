@@ -158,31 +158,43 @@ public class ProceduralMeshBufferTests
 	}
 
 	/// <summary>
-	/// What the renderer saves a run-time model as, on a worker: its meshes without the physics block, whose native
-	/// serialisation isn't safe there (it crashed the editor opening a Hammer map).
+	/// The renderer can read a runtime model on a worker without serializing its physics. Its geometry is independent of
+	/// edits to the source mesh after the read.
 	/// </summary>
 	[TestMethod]
-	public void SavedMeshesLeaveOutThePhysics()
+	public void RenderModelKeepsGeometryWithoutPhysics()
 	{
 		var vertices = Strip( 5 );
 		int[] indices = [0, 1, 2, 2, 3, 4];
-		var model = Model.Builder.AddMesh( MeshOf( vertices, indices ) ).AddCollisionBox( new Vector3( 10 ) ).Create();
+		var source = MeshOf( vertices, indices );
+		var model = Model.Builder.AddMesh( source ).AddCollisionBox( new Vector3( 10 ) ).Create();
 
 		Assert.IsTrue( ModelFile.Read( model.SaveToVmdl() ).HasPhysics, "the whole model keeps its physics" );
 
-		var file = ModelFile.Read( model.SaveMeshesToVmdl() );
+		var file = model.ReadRenderModel( null );
+		file.ReleaseBuffers();
+		GC.Collect( 0, GCCollectionMode.Forced );
+		source.SetVertexBufferData( new[] { At( -10, -10, 1 ) }.AsSpan() );
+		source.SetIndexBufferData( new[] { 4, 3, 2 }.AsSpan() );
+
 		Assert.IsFalse( file.HasPhysics );
-		var vb = file.Meshes.Single().VertexBuffers.Single();
+		var mesh = file.Meshes.Single();
+		var vb = mesh.VertexBuffers.Single();
+		var ib = mesh.IndexBuffers.Single();
 		CollectionAssert.AreEqual( System.Runtime.InteropServices.MemoryMarshal.AsBytes( vertices.AsSpan() ).ToArray(), vb.Data );
-		Assert.AreEqual( 6, file.Meshes.Single().DrawCalls.Single().IndexCount );
+		CollectionAssert.AreEqual( indices.Select( i => (uint)i ).ToArray(), Enumerable.Range( 0, ib.Count ).Select( i => ib[i] ).ToArray() );
+		Assert.AreEqual( 6, mesh.DrawCalls.Single().IndexCount );
 	}
 
 	[TestMethod]
-	public void SavedModelWithoutIndicesHasNoIndexBuffer()
+	[DataRow( false )]
+	[DataRow( true )]
+	public void UnindexedModelHasNoSourceIndexBuffer( bool forRendering )
 	{
 		var mesh = new Mesh( White );
 		mesh.CreateVertexBuffer( 3, Strip( 3 ).AsSpan() );
-		var file = ModelFile.Read( Model.Builder.AddMesh( mesh ).Create().SaveToVmdl() );
+		var model = Model.Builder.AddMesh( mesh ).Create();
+		var file = forRendering ? model.ReadRenderModel( null ) : ModelFile.Read( model.SaveToVmdl() );
 
 		Assert.AreEqual( 0, file.Meshes[0].IndexBuffers.Count( b => !b.Generated ), "the file holds no index buffer" );
 		Assert.AreEqual( 3, file.Meshes[0].VertexBuffers[0].Count );

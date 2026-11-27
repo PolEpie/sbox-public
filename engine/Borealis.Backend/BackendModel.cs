@@ -610,11 +610,15 @@ public sealed class BackendModel : GpuMesh, IBackendGeometry, ISkinnedGeometry
 	/// Without <paramref name="generateLevels"/> its draws get no generated levels (<see cref="GeneratesLevels"/>).
 	/// </summary>
 	public static RenderMesh Create( BackendDevice device, ModelFile file, ulong? meshGroups = null, int materialGroup = 0, bool drawFastPath = false, bool generateLevels = true )
+		=> Create<object>( device, file, meshGroups, materialGroup, drawFastPath, generateLevels, null, null );
+
+	internal static RenderMesh Create<T>( BackendDevice device, ModelFile file, ulong? meshGroups, int materialGroup, bool drawFastPath, bool generateLevels,
+		T source, Func<T, int, int, GpuMaterial> runtimeMaterial )
 	{
 		var geometry = new BackendModel( device, file, generateLevels );
 		try
 		{
-			return Create( geometry, device, file, meshGroups, materialGroup, drawFastPath );
+			return Create( geometry, device, file, meshGroups, materialGroup, drawFastPath, source, runtimeMaterial );
 		}
 		catch
 		{
@@ -624,7 +628,8 @@ public sealed class BackendModel : GpuMesh, IBackendGeometry, ISkinnedGeometry
 		}
 	}
 
-	static RenderMesh Create( BackendModel geometry, BackendDevice device, ModelFile file, ulong? meshGroups, int materialGroup, bool drawFastPath )
+	static RenderMesh Create<T>( BackendModel geometry, BackendDevice device, ModelFile file, ulong? meshGroups, int materialGroup, bool drawFastPath,
+		T source, Func<T, int, int, GpuMaterial> runtimeMaterial )
 	{
 		var mask = meshGroups ?? file.DefaultMeshGroupMask;
 		var lods = new RenderMesh.Draw[file.LodCount][];
@@ -636,6 +641,8 @@ public sealed class BackendModel : GpuMesh, IBackendGeometry, ISkinnedGeometry
 			{
 				var mesh = file.Meshes[m];
 				if ( !file.DrawsAtLod( m, lod ) || (mesh.MeshGroupMask & mask) == 0 ) continue;
+				// The bridge's runtime material overlay matches only draws present at LOD 0, including when those draws are reused at other LODs.
+				bool usesRuntimeMaterial = runtimeMaterial is not null && file.DrawsAtLod( m, 0 );
 
 				for ( int d = 0; d < mesh.DrawCalls.Count; d++ )
 				{
@@ -644,14 +651,21 @@ public sealed class BackendModel : GpuMesh, IBackendGeometry, ISkinnedGeometry
 					// An empty mesh's draws draw nothing: they aren't drawn
 					if ( call.IndexCount <= 0 ) continue;
 
-					var materialPath = file.MaterialFor( call.Material, materialGroup );
-					var material = device.ModelMaterial( materialPath );
-					geometry.materialPaths.Add( materialPath );
+					var allowsFastPath = !drawFastPath || (call.Flags & MeshDrawFlags.ShadowFastPath) != 0;
+					var material = usesRuntimeMaterial ? runtimeMaterial( source, m, d ) : null;
+					// A replacement may rule out the fast path, but may not enable it if the serialized material wouldn't.
+					var borrowed = material is not null && (!allowsFastPath || !material.ShadowFastPath || RenderMesh.IsTranslucent( material ) || RenderMesh.IsAlphaTest( material ));
+					if ( !borrowed )
+					{
+						var materialPath = file.MaterialFor( call.Material, materialGroup );
+						material = device.ModelMaterial( materialPath );
+						geometry.materialPaths.Add( materialPath );
+					}
 
 					// The passes its draws will use, so its program guesses their parts alone: skinned meshes draw from the vertex
 					// cache (or classic, one-weight), the rest as static geometry, lightmapped too where the draw call can be (an
 					// object without a lightmap of its own draws it plain)
-					if ( material is SurfaceMaterial surface )
+					if ( !borrowed && material is SurfaceMaterial surface )
 					{
 						var kinds = mesh.IsSkinned ? SurfaceDrawKinds.Skinned | SurfaceDrawKinds.Dynamic : (call.Flags & MeshDrawFlags.BakedLightingFromLightmap) != 0 ? SurfaceDrawKinds.StaticLightmapped | SurfaceDrawKinds.Static : SurfaceDrawKinds.Static;
 						device.Surfaces.NoteMaterial( surface.Shader, surface.RenderState, kinds );
@@ -659,7 +673,7 @@ public sealed class BackendModel : GpuMesh, IBackendGeometry, ISkinnedGeometry
 					}
 					var translucent = RenderMesh.IsTranslucent( material );
 					var alphaTest = RenderMesh.IsAlphaTest( material );
-					var fastPath = material is { ShadowFastPath: true } && !translucent && !alphaTest && (!drawFastPath || (call.Flags & MeshDrawFlags.ShadowFastPath) != 0);
+					var fastPath = !borrowed && allowsFastPath && !translucent && !alphaTest && material is { ShadowFastPath: true };
 					Vector3? tint = call.Tint == System.Numerics.Vector3.One ? null : new Vector3( call.Tint.X, call.Tint.Y, call.Tint.Z );
 					var lightmapped = (call.Flags & MeshDrawFlags.BakedLightingFromLightmap) != 0;
 					list.Add( new RenderMesh.Draw( m, d, call.StartIndex, call.IndexCount, call.VertexCount, (int)call.Primitive, material, translucent, alphaTest, fastPath, lightmapped, tint, call.UvDensity ) );

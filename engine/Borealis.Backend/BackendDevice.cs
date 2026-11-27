@@ -1715,7 +1715,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 		{
 			if ( twoSidedMaterials.TryGetValue( path, out var material ) ) return material;
 			LifeOf( path ).Pinned = true;
-			material = Converted( path ) ?? Material( path, null );
+			material = LoadFileMaterial( path );
 			SetFeaturesOnMaterial( material, new Dictionary<string, int> { [BackendMaterial.RenderBackfaces] = 1 } );
 			return twoSidedMaterials[path] = material;
 		}
@@ -1733,7 +1733,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 			// Asked for by something other than a model's draws: kept for good
 			LifeOf( path ).Pinned = true;
 			if ( sharedMaterials.TryGetValue( path, out var material ) ) return material;
-			return sharedMaterials[path] = Converted( path ) ?? Material( path, null );
+			return sharedMaterials[path] = LoadFileMaterial( path );
 		}
 	}
 
@@ -1791,7 +1791,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 			collectingTextures = life.Textures ??= new List<string>();
 			try
 			{
-				return sharedMaterials[path] = Converted( path ) ?? Material( path, null );
+				return sharedMaterials[path] = LoadFileMaterial( path );
 			}
 			finally
 			{
@@ -1888,17 +1888,14 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 		return material?.Shader is null ? null : material;
 	}
 
-	/// <summary>
-	/// A material whose <c>.shader</c> has a surface standing in for it (<see cref="SurfaceShaders.Convert"/>), as that
-	/// surface with the material's values; null when it has none or doesn't compile.
-	/// </summary>
-	GpuMaterial Converted( string path )
+	// Conversion and the classic fallback draw the same file. Resolve it once, even when the path doesn't exist.
+	GpuMaterial LoadFileMaterial( string path )
 	{
-		if ( !Surfaces.HasConversions ) return null;
-		if ( (readMaterials.TryGetValue( path, out var read ) ? read.File : Content.TryRead( path ) is { } data ? ReadMaterial( data ) : null) is not { } file ) return null;
-		var converted = Converted( path, file, classicFallback: true );
-		if ( converted is not null && read.File is not null ) readMaterials.TryRemove( new( path, read ) );
-		return converted;
+		var (file, found) = ReadMaterialFile( path );
+#pragma warning disable CA2000 // Returned to the shared material cache, which owns it
+		if ( file is not null && Surfaces.HasConversions && Converted( path, file, classicFallback: true ) is { } converted ) return converted;
+#pragma warning restore CA2000
+		return Material( path, file, found );
 	}
 
 	/// <summary>
@@ -2202,21 +2199,30 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 		}
 	}
 
+	(MaterialFile File, bool Found) ReadMaterialFile( string path )
+	{
+		if ( readMaterials.TryRemove( path, out var read ) ) return (read.File, true);
+		return Content.TryRead( path ) is { } data ? (ReadMaterial( data ), true) : default;
+	}
+
 	BackendMaterial Material( string path, Dictionary<string, float[]> values, string name = null )
 	{
-		MaterialFile file;
+		var (file, found) = ReadMaterialFile( path );
+		return Material( path, file, found, values, name );
+	}
+
+	BackendMaterial Material( string path, MaterialFile file, bool found, Dictionary<string, float[]> values = null, string name = null )
+	{
 		string why = null;
-		if ( readMaterials.TryRemove( path, out var read ) ) file = read.File;
-		else if ( Content.TryRead( path ) is { } data )
-		{
-			file = ReadMaterial( data );
-			if ( file is null ) FellBack( path, why = "can't be read here, so it draws nothing" );
-		}
-		else
+		if ( !found )
 		{
 			file = MissingMaterial( path );
 			why = file is not null ? "isn't built, so it draws as the error material" : "isn't built, so it draws nothing";
 			if ( file is not null ) FellBack( path, why );
+		}
+		else if ( file is null )
+		{
+			FellBack( path, why = "can't be read here, so it draws nothing" );
 		}
 
 		if ( file is null ) return Track( new BackendMaterial( name ?? path, null, null, null, values ) { FellBack = why } );

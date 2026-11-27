@@ -1,5 +1,6 @@
 ﻿using NativeEngine;
 using Sandbox.Resources;
+using Borealis.Source2.Models;
 
 namespace Sandbox;
 
@@ -17,14 +18,24 @@ partial class Model
 	}
 
 	/// <summary>
-	/// The model as a compiled model without its physics block: what drawing it needs. Safe on a worker, unlike the
-	/// physics block, whose native serialisation goes through the resource system.
+	/// Read the parts of a procedural model needed for drawing. Safe on a worker: this does not serialize physics.
+	/// Builder meshes already have buffers in managed memory, so only their metadata goes through VMDL.
 	/// </summary>
-	internal byte[] SaveMeshesToVmdl()
+	internal ModelFile ReadRenderModel( Func<string, byte[]> external )
 	{
-		var writer = new VmdlWriter( this ) { WritePhysics = false };
-		return writer.Write();
+		var meshes = BuilderMeshes;
+		if ( meshes is not null )
+		{
+			var metadata = new VmdlWriter( this ) { WritePhysics = false, WriteMeshBuffers = false }.Write();
+			return ModelFile.ReadWithMeshBuffers( metadata, external, i => meshes[i].SnapshotRenderBuffers() );
+		}
+
+		var weak = new WeakReference<Model>( this );
+		return ModelFile.Read( SaveMeshesToVmdl(), external,
+			() => weak.TryGetTarget( out var alive ) && !alive.native.IsNull ? alive.SaveMeshesToVmdl() : null );
 	}
+
+	byte[] SaveMeshesToVmdl() => new VmdlWriter( this ) { WritePhysics = false }.Write();
 }
 
 sealed class VmdlWriter
@@ -44,8 +55,11 @@ sealed class VmdlWriter
 	readonly Model _model;
 	readonly ResourceWriter _resource;
 
-	/// <summary>Whether the physics block is written (<see cref="Model.SaveMeshesToVmdl"/> leaves it out).</summary>
+	/// <summary>Whether the physics block is written (the renderer leaves it out).</summary>
 	public bool WritePhysics { get; init; } = true;
+
+	/// <summary>Whether the resource includes mesh buffers, or the renderer supplies them separately.</summary>
+	public bool WriteMeshBuffers { get; init; } = true;
 
 	public VmdlWriter( Model model )
 	{
@@ -108,7 +122,7 @@ sealed class VmdlWriter
 
 	void WriteEmbeddedMesh( KeyValues3 array, int meshIndex )
 	{
-		var vbibBlock = WriteVBIBBlock( meshIndex );
+		var vbibBlock = WriteMeshBuffers ? WriteVBIBBlock( meshIndex ) : -1;
 		var mdatBlock = WriteMDATBlock( meshIndex );
 
 		var mesh = array.ArrayAddToTail();

@@ -199,6 +199,16 @@ namespace Sandbox
 		/// <summary>The index buffer's indices, or none.</summary>
 		internal int[] IndexData => ib.IsValid ? ib.Data : null;
 
+		/// <summary>Geometry for a renderer model, independent of later writes to this mesh's buffers.</summary>
+		internal (Borealis.Source2.Models.MeshVertexBuffer[] Vertices, Borealis.Source2.Models.MeshIndexBuffer[] Indices) SnapshotRenderBuffers()
+		{
+			// The source is mutable, so the renderer must keep this snapshot rather than reloading from the mesh.
+			return (
+				vb.IsValid ? [new( vb.ElementCount, vb.ElementSize, vb.Fields, vb.Data.AsSpan().ToArray() )] : [],
+				ib.IsValid ? [new( ib.ElementCount, sizeof( int ), MemoryMarshal.AsBytes( ib.Data.AsSpan() ).ToArray() )] : []
+			);
+		}
+
 		private static RenderPrimitiveType MeshPrimTypeToRenderPrimType( MeshPrimitiveType primType )
 		{
 			RenderPrimitiveType renderPrimType;

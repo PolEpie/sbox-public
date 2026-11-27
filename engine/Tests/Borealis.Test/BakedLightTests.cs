@@ -199,6 +199,9 @@ public class BakedLightTests
 		Assert.AreEqual( 2, LightProbeVolume.Choose( volumes, At( 245 ), At( 245 ), new Vector3( 10 ), 0 ), "inside none: the nearest it touches" );
 		Assert.AreEqual( -1, LightProbeVolume.Choose( volumes, At( 200 ), At( 200 ), small, 0 ), "inside none, touching none" );
 		Assert.AreEqual( -1, LightProbeVolume.Choose( volumes, At( 0 ), At( 0 ), small, 7 ), "none lights its light group" );
+		outdoor.LightGroups = [];
+		Assert.AreEqual( 0, LightProbeVolume.Choose( volumes, At( 0 ), At( 0 ), small, 7 ), "a managed volume with no group lights every group" );
+		outdoor.LightGroups = [0];
 
 		// An object the map compiler bound to a volume takes it wherever it is (ChooseLightProbeVolume's handshake map)
 		away.Handshake = 42;

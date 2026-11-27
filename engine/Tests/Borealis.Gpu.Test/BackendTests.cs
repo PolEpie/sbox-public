@@ -153,18 +153,29 @@ public class BackendTests : RenderGpuTest
 	/// resource system binds it, under its own name, in every layer; no name still draws nothing.
 	/// </summary>
 	[TestMethod]
-	public void MissingMaterialsDrawAsTheErrorMaterial()
+	[DataRow( false )]
+	[DataRow( true )]
+	public void MissingMaterialsDrawAsTheErrorMaterial( bool modelDraw )
 	{
 		using var backend = new Borealis.Backend.BackendDevice( Device );
 		if ( backend.Content.Find( Borealis.Backend.BackendDevice.ErrorMaterial ) is null ) { Assert.Inconclusive( "No compiled error material" ); return; }
 
-		var missing = (Borealis.Backend.BackendMaterial)backend.LoadMaterial( "materials/not_installed/missing_for_test.vmat" );
+		const string path = "materials/not_installed/missing_for_test.vmat";
+		int resolves = 0;
+		backend.Surfaces.ConvertShaders = true;
+		backend.Content.Resolve = compiled =>
+		{
+			if ( compiled == path + "_c" ) resolves++;
+			return null;
+		};
+		var missing = (Borealis.Backend.BackendMaterial)(modelDraw ? backend.ModelMaterial( path ) : backend.LoadMaterial( path ));
+		Assert.AreEqual( 1, resolves, "surface conversion and fallback resolve the missing material only once" );
 		Assert.IsNotNull( missing.Shader, "drawn with the error shader" );
 		StringAssert.Contains( missing.File.Shader, "error.shader" );
 		Assert.IsNotNull( missing.Shader.Mode( "Forward" ), "the error shader draws in every layer, with its one mode" );
 		Assert.IsNotNull( missing.Shader.Mode( "Depth" ) );
-		Assert.AreEqual( "materials/not_installed/missing_for_test.vmat", missing.Name );
-		StringAssert.Contains( backend.MaterialFallbacks.GetValueOrDefault( "materials/not_installed/missing_for_test.vmat" ) ?? "", "isn't built", "said for censuses" );
+		Assert.AreEqual( path, missing.Name );
+		StringAssert.Contains( backend.MaterialFallbacks.GetValueOrDefault( path ) ?? "", "isn't built", "said for censuses" );
 
 		Assert.IsNull( ((Borealis.Backend.BackendMaterial)backend.LoadMaterial( "" )).Shader );
 	}

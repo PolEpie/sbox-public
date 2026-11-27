@@ -313,7 +313,8 @@ internal sealed partial class WorldRender
 	/// </summary>
 	GpuTexture TextureFor( Texture texture, SceneObject sceneObject, SceneObjectChange change )
 	{
-		if ( MirrorContent.Gpu is not { AsyncModels: true } gpu || string.IsNullOrEmpty( texture?.ResourcePath ) ) return MirrorContent.Texture( texture );
+		// A texture made at run time (a mount's probe atlases) has its name for a path, with no file behind it
+		if ( MirrorContent.Gpu is not { AsyncModels: true } gpu || string.IsNullOrEmpty( texture?.ResourcePath ) || texture.MadeAtRunTime ) return MirrorContent.Texture( texture );
 
 		var path = texture.ResourcePath;
 		lock ( heldTextures )

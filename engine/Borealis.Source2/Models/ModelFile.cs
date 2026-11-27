@@ -241,10 +241,15 @@ public sealed class ModelFile
 	/// </summary>
 	public static ModelFile Read( byte[] data, Func<string, byte[]> external = null, Func<byte[]> again = null ) => Read( data, external, again, 0 );
 
+	/// <summary>Read a procedural model's metadata with snapshots of its existing mesh buffers in place of embedded MBUF blocks.</summary>
+	internal static ModelFile ReadWithMeshBuffers( byte[] metadata, Func<string, byte[]> external, Func<int, (MeshVertexBuffer[] Vertices, MeshIndexBuffer[] Indices)> meshBuffers )
+		=> Read( metadata, external, null, 0, meshBuffers );
+
 	/// <summary>How deep base models may nest before a chain of them counts as a loop.</summary>
 	const int MostBaseModels = 8;
 
-	static ModelFile Read( byte[] data, Func<string, byte[]> external, Func<byte[]> again, int depth )
+	static ModelFile Read( byte[] data, Func<string, byte[]> external, Func<byte[]> again, int depth,
+		Func<int, (MeshVertexBuffer[] Vertices, MeshIndexBuffer[] Indices)> meshBuffers = null )
 	{
 		var resource = ResourceFile.Read( data );
 		if ( Kv3.Read( resource.Block( "DATA" ) ) is not Dictionary<string, object> root ) throw new InvalidDataException( "Model DATA isn't an object" );
@@ -284,12 +289,12 @@ public sealed class ModelFile
 				var meshName = info.Get( "name" ) as string ?? $"mesh{i}";
 				var dataBlock = Block( resource, blocks, info.Get( "data_block" ), "MDAT", meshName );
 				var vbib = info.Get( "vbib_block" );
-				var vbibBlock = Block( resource, blocks, vbib, "MBUF", meshName );
+				var vbibBlock = meshBuffers is null ? Block( resource, blocks, vbib, "MBUF", meshName ) : default;
 				var morphBlock = (int)Kv.Number( info.Get( "morph_block" ), -1 );
 				var morphs = morphBlock >= 0 ? ReadMorphs( Block( resource, blocks, info.Get( "morph_block" ), "MRPH", meshName ) ) : null;
 				var meshlets = Kv.Number( info.Get( "meshlet_block" ), -1 ) >= 0 ? Block( resource, blocks, info.Get( "meshlet_block" ), CookedMeshlets.BlockName, meshName ) : default;
 				Func<ReadOnlyMemory<byte>> againBuffers = reread is null ? null : () => EmbeddedBuffers( reread, vbib, meshName );
-				meshes[i] = ModelMesh.Read( dataBlock, vbibBlock, meshName, i, groups, lods, morphBlock >= 0, info.Get( "morph_texture" ) as string, morphs, meshlets, againBuffers );
+				meshes[i] = ModelMesh.Read( dataBlock, vbibBlock, meshName, i, groups, lods, morphBlock >= 0, info.Get( "morph_texture" ) as string, morphs, meshlets, againBuffers, meshBuffers?.Invoke( i ) );
 			}
 			else if ( references[i] is string path && path.Length > 0 )
 			{

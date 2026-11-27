@@ -65,4 +65,61 @@ public class RuntimeModelWorldsTest
 			second.Delete();
 		}
 	}
+
+	[TestMethod]
+	[DataRow( false )]
+	[DataRow( true )]
+	public void RuntimeMaterialIsUsedWithoutLoadingItsSavedName( bool asyncModels )
+	{
+		TestGraphics.Require();
+		var gpu = Sandbox.Rendering.Bridge.MirrorContent.Gpu;
+		var original = gpu.AsyncModels;
+		var resolve = gpu.Content.Resolve;
+		gpu.AsyncModels = asyncModels;
+		try
+		{
+			var material = Material.Create( $"materials/runtime-model-test-{System.Guid.NewGuid():N}.vmat", "shaders/water.shader" );
+			var mesh = new Mesh( material ) { Bounds = new BBox( Vector3.Zero, new Vector3( 0, 32, 32 ) ) };
+			mesh.CreateVertexBuffer( 3, new List<Vertex>
+			{
+				new( Vector3.Zero, Vector3.Backward, Vector3.Up, new Vector4( 0, 0, 0, 0 ) ),
+				new( Vector3.Left * 32, Vector3.Backward, Vector3.Up, new Vector4( 1, 0, 0, 0 ) ),
+				new( Vector3.Up * 32, Vector3.Backward, Vector3.Up, new Vector4( 0, 1, 0, 0 ) ),
+			} );
+			mesh.CreateIndexBuffer( 3, new List<int> { 0, 2, 1 } );
+			var model = Model.Builder.AddMesh( mesh ).Create();
+
+			var saved = model.ReadRenderModel( null );
+			var path = saved.MaterialFor( saved.Meshes.Single().DrawCalls.Single().Material, 0 );
+			Assert.IsFalse( string.IsNullOrEmpty( path ), "the serialized draw names the runtime material" );
+			var compiled = path.EndsWith( "_c", System.StringComparison.OrdinalIgnoreCase ) ? path : path + "_c";
+			int probes = 0;
+			gpu.Content.Resolve = name =>
+			{
+				if ( string.Equals( name, compiled, System.StringComparison.OrdinalIgnoreCase ) ) System.Threading.Interlocked.Increment( ref probes );
+				return resolve?.Invoke( name );
+			};
+
+			Borealis.RenderMesh rendered = null;
+			for ( int i = 0; i < 100; i++ )
+			{
+				rendered = Sandbox.Rendering.Bridge.MirrorContent.Mesh( model, out var pending );
+				if ( !pending ) break;
+				System.Threading.Thread.Sleep( 5 );
+			}
+
+			Assert.IsNotNull( rendered, "the procedural mesh is published" );
+			var draw = rendered.Draws.Single();
+			Assert.AreSame( Sandbox.Rendering.Bridge.MirrorContent.Material( material ), draw.Material );
+			Assert.IsFalse( draw.ShadowFastPath, "water uses its own depth shader" );
+
+			Assert.IsFalse( gpu.MaterialFallbacks.ContainsKey( path ), "the runtime name was never loaded as a compiled material" );
+			Assert.AreEqual( 0, probes, "publication and prefetch never ask mounted content for this runtime material" );
+		}
+		finally
+		{
+			gpu.Content.Resolve = resolve;
+			gpu.AsyncModels = original;
+		}
+	}
 }
