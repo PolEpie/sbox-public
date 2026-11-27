@@ -13,6 +13,9 @@ internal class WorldPanelInput : PanelInput
 
 	readonly List<RootPanel> _hitPanels = new();
 
+	// The cursor is a ray here, screen distance means nothing
+	internal override float ClickSlop => -1.0f;
+
 	internal override void Tick( IReadOnlyList<RootPanel> panels, bool mouseIsActive )
 	{
 		bool hoveredAny = false;

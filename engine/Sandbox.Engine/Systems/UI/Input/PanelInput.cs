@@ -71,6 +71,8 @@ internal class PanelInput
 			.ToList();
 
 		mousebuttons.Clear();
+		unseenPresses.Clear();
+		deferredReleases.Clear();
 		Panel.Switch( PseudoClass.Active, false, Active );
 		Active = null;
 		DropTarget = null;
@@ -147,6 +149,13 @@ internal class PanelInput
 	}
 
 	HashSet<ButtonCode> mousebuttons = new HashSet<ButtonCode>();
+
+	// Buttons pressed since the last tick read them
+	readonly HashSet<ButtonCode> unseenPresses = new();
+
+	// Of those, the ones already released again
+	readonly HashSet<ButtonCode> deferredReleases = new();
+
 	Vector2 mouseWheelValue { get; set; }
 
 	/// <summary>
@@ -182,6 +191,11 @@ internal class PanelInput
 	/// </summary>
 	internal KeyboardModifiers MouseModifiers { get; private set; }
 
+	/// <summary>
+	/// How far the cursor can move between press and release and still click the panel that was pressed.
+	/// </summary>
+	internal virtual float ClickSlop => 5.0f;
+
 	internal void SetClickCount( ButtonCode button, int count )
 	{
 		var index = button - ButtonCode.MouseLeft;
@@ -193,8 +207,22 @@ internal class PanelInput
 		if ( down ) SetClickCount( code, clickCount );
 		MouseModifiers = modifiers;
 
-		if ( down ) mousebuttons.Add( code );
-		else mousebuttons.Remove( code );
+		if ( down )
+		{
+			mousebuttons.Add( code );
+			unseenPresses.Add( code );
+			deferredReleases.Remove( code );
+		}
+		else if ( unseenPresses.Contains( code ) )
+		{
+			// Pressed and released before a tick looked at it. Keep it down for one tick so the
+			// press still happens, the release comes the tick after.
+			deferredReleases.Add( code );
+		}
+		else
+		{
+			mousebuttons.Remove( code );
+		}
 	}
 
 	internal virtual InputData GetInputData()
@@ -226,6 +254,17 @@ internal class PanelInput
 		d.MouseWheel = mouseWheel;
 
 		mouseWheelValue = 0;
+
+		// Presses are seen now: let a press that was already released go
+		unseenPresses.Clear();
+
+		if ( deferredReleases.Count > 0 )
+		{
+			foreach ( var code in deferredReleases )
+				mousebuttons.Remove( code );
+
+			deferredReleases.Clear();
+		}
 
 		return d;
 	}
@@ -445,6 +484,11 @@ internal class PanelInput
 		public Vector2 StartHoldOffsetLocal;
 		public Vector2 StartHoldOffsetScreen;
 
+		/// <summary>
+		/// Where the cursor was when the press happened
+		/// </summary>
+		Vector2 PressScreenPos;
+
 		public MouseButtonState( PanelInput input, ButtonCode i )
 		{
 			Input = input;
@@ -558,6 +602,8 @@ internal class PanelInput
 				return;
 			}
 
+			PressScreenPos = Input.CursorPosition;
+
 			Panel.Switch( PseudoClass.Active, true, Active );
 
 			if ( MouseButton == ButtonCode.MouseLeft || MouseButton == ButtonCode.MouseRight )
@@ -599,7 +645,10 @@ internal class PanelInput
 				return;
 			}
 
-			bool canClick = hovered == Active && !Dragged;
+			// Pressing can restyle the panel out from under the cursor (a :active scale-down shrinks its hit box),
+			// so the release then lands on whatever is behind it. The cursor barely moving is still a click.
+			var nearPress = Active != null && (Input.CursorPosition - PressScreenPos).Length <= Input.ClickSlop;
+			bool canClick = (hovered == Active || nearPress) && !Dragged;
 
 			if ( Dragged && DragTarget != null )
 			{
