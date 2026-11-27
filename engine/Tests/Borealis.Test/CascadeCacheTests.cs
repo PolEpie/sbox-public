@@ -642,7 +642,7 @@ public class CascadeCacheTests
 			Assert.AreEqual( 3, list.DeviceCount, "a batch a LOD" );
 
 			var batches = new GpuContext.GpuDrivenBatch[list.DeviceCount];
-			Assert.IsTrue( aggregates.MeshDeviceBatches( list.MeshGroups, false, false, batches ) );
+			Assert.IsTrue( aggregates.MeshDeviceBatches( list.MeshGroups, 0, false, false, batches ) );
 			Assert.IsTrue( batches[0].Material is null && batches[1].Material is null, "none for the LODs that animate" );
 			Assert.IsTrue( batches[2].Material is not null && batches[2].Lod == 2, "one for the LOD that doesn't" );
 

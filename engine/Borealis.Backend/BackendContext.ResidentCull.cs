@@ -463,7 +463,23 @@ internal sealed partial class BackendContext
 		group.Clear();
 		group.AddRange( residentOrdered );
 
-		var headerBytes = (residentItems.Count * ResidentItemBytes + group.Count * ResidentViewBytes + 15) & ~15;
+		// After the items and views: the multi-draws the squeeze pass runs over, a run record and commands offset each. A
+		// listing view's come last: later passes (forward's compaction, the meshlet pass) take slots in its multi-draws by
+		// their counts, which the squeeze lowers, so DrawCulledRegion squeezes those once they have
+		var squeezeRuns = 0;
+		var squeezeNow = 0;
+		if ( InstancesResidentDraws )
+		{
+			foreach ( var work in group )
+			{
+				var runs = SqueezedRuns( work.Plan );
+				squeezeRuns += runs;
+				if ( !Listing( work ) ) squeezeNow += runs;
+			}
+		}
+
+		var squeezeAt = residentItems.Count * ResidentItemBytes + group.Count * ResidentViewBytes;
+		var headerBytes = (squeezeAt + squeezeRuns * 8 + 15) & ~15;
 		var bytes = headerBytes;
 		var stagedBytes = headerBytes;
 		// Keep the host mapping for diagnostics that read Hi-Z's candidate counters.
@@ -483,6 +499,9 @@ internal sealed partial class BackendContext
 		var data = deviceRegion ? upload.Data : Gpu.Map( buffer ).Slice( (int)offset, bytes );
 		var items = MemoryMarshal.Cast<byte, ResidentCullItem>( data[..(residentItems.Count * ResidentItemBytes)] );
 		var viewRecords = MemoryMarshal.Cast<byte, ResidentCullView>( data.Slice( residentItems.Count * ResidentItemBytes, group.Count * ResidentViewBytes ) );
+		var squeezeTable = MemoryMarshal.Cast<byte, uint>( data.Slice( squeezeAt, squeezeRuns * 8 ) );
+		var squeezedNow = 0;
+		var squeezedLater = squeezeNow;
 		var visibility = GroupVisibility( group );
 
 		var at = headerBytes;
@@ -528,7 +547,25 @@ internal sealed partial class BackendContext
 			}
 
 			var firstInstance = (uint)((regionOffset + layout.Instances) / GpuDrivenTables.InstanceStride);
-			work.Region = new CulledRegion( buffer, slot, regionOffset, layout.Runs, layout.Listed, layout.Instances, layout.FragmentWords, layout.Commands, firstInstance, listing ? compacted : default, meshlets ? compacted16 : default, hiz.Runs2, hiz.Listed2, hiz.Candidates, layout.HiZFirstSlot );
+			var squeezeFirst = listing ? squeezedLater : squeezedNow;
+			var squeezeCount = 0;
+			if ( squeezeRuns > 0 )
+			{
+				for ( int i = 0; i < plan.Runs.Length; i++ )
+				{
+					if ( !Squeezes( plan, i ) ) continue;
+					var entry = (squeezeFirst + squeezeCount) * 2;
+					squeezeTable[entry] = (uint)(regionOffset + layout.Runs + i * MultiDraw.Size);
+					squeezeTable[entry + 1] = (uint)(regionOffset + layout.Commands);
+					squeezeCount++;
+				}
+			}
+
+			if ( listing ) squeezedLater += squeezeCount;
+			else squeezedNow += squeezeCount;
+
+			work.Region = new CulledRegion( buffer, slot, regionOffset, layout.Runs, layout.Listed, layout.Instances, layout.FragmentWords, layout.Commands, firstInstance, listing ? compacted : default, meshlets ? compacted16 : default, hiz.Runs2, hiz.Listed2, hiz.Candidates, layout.HiZFirstSlot,
+				listing ? offset + squeezeAt + squeezeFirst * 8 : 0, listing ? squeezeCount : 0 );
 			viewRecords[w] = new ResidentCullView
 			{
 				View = (uint)regionOffset,
@@ -571,6 +608,7 @@ internal sealed partial class BackendContext
 			LodCount = lodTable.Records,
 			LodFadeNow = device.LodFadeNow,
 			LodFadeTicks = fades.Ticks,
+			Merge = InstancesResidentDraws ? 1u : 0u,
 		} );
 		if ( deviceRegion )
 		{
@@ -579,6 +617,51 @@ internal sealed partial class BackendContext
 		}
 		DispatchResidentShader( shader, buffer, visibility?.Stamps ?? default, (int)entries, fades.States );
 		device.CountResidentCull( residentItems.Count, group.Count, entries );
+		if ( squeezeNow == 0 ) return;
+
+		// The empty commands the cull's instanced draws left, squeezed out of their multi-draws before anything draws them
+		ResidentBufferReady( list, buffer, PipelineStage.ComputeShader, MemoryAccess.ShaderRead | MemoryAccess.ShaderWrite );
+		MemoryMarshal.Write( residentConstants, new ResidentCullConstants { Squeeze = (uint)(offset + squeezeAt), SqueezeRuns = (uint)squeezeNow, Merge = 1 } );
+		DispatchResidentShader( shader, buffer, default, squeezeNow * 64, default );
+	}
+
+	/// <summary>
+	/// A listing view's squeeze (<see cref="DispatchResident"/>), once forward's compaction and the meshlet pass have taken
+	/// their slots in its multi-draws: before, they'd take slots by the lowered counts, whose instance records the cull's
+	/// instanced draws still use.
+	/// </summary>
+	void SqueezeResident( in CulledRegion region )
+	{
+		if ( device.ResidentCullShader is not { } shader ) return;
+
+		ResidentBufferReady( recording.List, region.Buffer, PipelineStage.ComputeShader, MemoryAccess.ShaderRead | MemoryAccess.ShaderWrite );
+		residentConstants ??= new byte[Marshal.SizeOf<ResidentCullConstants>()];
+		MemoryMarshal.Write( residentConstants, new ResidentCullConstants { Squeeze = (uint)region.SqueezeAt, SqueezeRuns = (uint)region.SqueezeRuns, Merge = 1 } );
+		DispatchResidentShader( shader, region.Buffer, default, region.SqueezeRuns * 64, default );
+	}
+
+	/// <summary>Whether the cull lists a view's entries for a later pass (forward's compaction, the meshlet pass).</summary>
+	static bool Listing( ResidentAssignment work ) => work.Lists || work.Plan.Key.Meshlets && (work.Visibility is not null || !work.Plan.Key.Ids);
+
+	/// <summary>
+	/// Whether the resident cull draws one-instance draws of the same command as one instanced command, then squeezes the
+	/// empty commands out (<c>borealis_resident_cull_cs</c> WaveTakeDrawSlot, Squeeze): a forest's clutter is thousands of
+	/// one-instance draws a pass, which keep the GPU's front end busy and its shader units idle.
+	/// </summary>
+	internal static bool InstancesResidentDraws { get; set; } = true;
+
+	/// <summary>Whether the squeeze pass runs over a plan's multi-draw: one the cull fills with draws, not a task run, its tail or a compacted one.</summary>
+	static bool Squeezes( GpuDrivenPlan plan, int run ) => plan.Runs[run].Count >= 0 && !plan.Compacted[run];
+
+	static int SqueezedRuns( GpuDrivenPlan plan )
+	{
+		var count = 0;
+		for ( int i = 0; i < plan.Runs.Length; i++ )
+		{
+			if ( Squeezes( plan, i ) ) count++;
+		}
+
+		return count;
 	}
 
 	/// <summary>

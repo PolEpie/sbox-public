@@ -123,8 +123,17 @@ public sealed class InstancedMeshObject : RenderObject
 	{
 		public Vector3[] Centers, Extents;
 		public float[] Scales;
+
+		/// <summary>
+		/// Bounds of each <see cref="ClusterSize"/> placements in order, the last cluster the rest: a view culls a cluster whole
+		/// before its placements one by one. Placements given tile by tile sit near their neighbours, so the bounds stay tight.
+		/// </summary>
+		public Vector3[] ClusterCenters, ClusterExtents;
 		public int Version, TransformVersion;
 	}
+
+	/// <summary>Placements per <see cref="Placement.ClusterCenters"/> entry.</summary>
+	internal const int ClusterSize = 32;
 
 	Placement placed;
 
@@ -146,7 +155,26 @@ public sealed class InstancedMeshObject : RenderObject
 				scales[i] = MathF.Max( MathF.Abs( scale.x ), MathF.Max( MathF.Abs( scale.y ), MathF.Abs( scale.z ) ) );
 			}
 
-			return placed = new Placement { Centers = centers, Extents = extents, Scales = scales, Version = Version, TransformVersion = TransformVersion };
+			var clusters = (count + ClusterSize - 1) / ClusterSize;
+			var clusterCenters = new Vector3[clusters];
+			var clusterExtents = new Vector3[clusters];
+			for ( int c = 0; c < clusters; c++ )
+			{
+				var start = c * ClusterSize;
+				var end = Math.Min( start + ClusterSize, count );
+				var min = centers[start] - extents[start];
+				var max = centers[start] + extents[start];
+				for ( int i = start + 1; i < end; i++ )
+				{
+					min = Vector3.Min( min, centers[i] - extents[i] );
+					max = Vector3.Max( max, centers[i] + extents[i] );
+				}
+
+				clusterCenters[c] = (min + max) * 0.5f;
+				clusterExtents[c] = (max - min) * 0.5f;
+			}
+
+			return placed = new Placement { Centers = centers, Extents = extents, Scales = scales, ClusterCenters = clusterCenters, ClusterExtents = clusterExtents, Version = Version, TransformVersion = TransformVersion };
 		}
 	}
 

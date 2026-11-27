@@ -112,9 +112,10 @@ internal sealed partial class BackendContext
 
 		/// <summary>
 		/// With normals from the ids (whose target keeps earlier calls' ids): the call's frame chunk slot, first instance record
-		/// and how many, so only its own ids are marked; 0 instances marks every id.
+		/// and how many, so only its own ids are marked; 0 instances marks every id. Then the words the view's dirty list
+		/// holds (<see cref="BackendDevice.VisibilityView.Dirty"/>), 0 where this mark keeps none.
 		/// </summary>
-		public uint CallSlot, CallFirst, CallInstances, Pad3;
+		public uint CallSlot, CallFirst, CallInstances, DirtyCapacity;
 	}
 
 	/// <summary>A bucket: what one multi-draw shares, and the batches in it.</summary>
@@ -759,6 +760,8 @@ internal sealed partial class BackendContext
 		public static readonly int Ids = AttributeIds.Of( "BorealisIds" );
 		public static readonly int Msaa = AttributeIds.Of( "D_MSAA" );
 		public static readonly int MarkConstants = AttributeIds.Of( "BorealisGpuDrivenMark_t" );
+		public static readonly int Dirty = AttributeIds.Of( "BorealisCullMaskDirty" );
+		public static readonly int MaskClear = AttributeIds.Of( "D_MASK_CLEAR" );
 	}
 
 	const int CullViewBytes = CullViewRecord.Size;
@@ -1205,7 +1208,7 @@ internal sealed partial class BackendContext
 	/// instance records, fragment words, commands; its first instance record's index; this frame's compacted buffer.
 	/// </summary>
 	internal readonly record struct CulledRegion( BufferHandle Buffer, int Slot, long Offset, int Runs, int Listed, int Instances, int FragmentWords, int Commands, uint FirstInstance, BufferHandle Compacted, BufferHandle Compacted16 = default,
-		int Runs2 = 0, int Listed2 = 0, int Candidates = 0, int HiZFirstSlot = 0 )
+		int Runs2 = 0, int Listed2 = 0, int Candidates = 0, int HiZFirstSlot = 0, long SqueezeAt = 0, int SqueezeRuns = 0 )
 	{
 		/// <summary>Whether its prepass is culled in two phases: its view deferred candidates to the Hi-Z tail (<see cref="WriteHiZTail"/>).</summary>
 		public bool HiZ => Candidates != 0;
@@ -1347,6 +1350,17 @@ internal sealed partial class BackendContext
 		// The prepass's listed fragments: a group each, which draws its meshlets that can reach a sample (buckets drawn with
 		// task and mesh shaders list none)
 		if ( computeMeshlets ) DispatchMeshlets( cull, region, visibility, samples, dispatch );
+
+		// A resident listing region's squeeze, now the passes above have taken their slots in its multi-draws
+		if ( region.SqueezeRuns > 0 && (lists || meshletPass) ) SqueezeResident( region );
+
+		// A depth-only call outside its rendering scope (a prepass drawing ids, a shadow view's meshlet pass): its commands
+		// nearest first, in its view's copy jobs buffer meanwhile
+		if ( SortsDepthRuns && compact && r.Color is null && (ids || meshletPass) && !region.HiZ && !taskMeshlets && device.MeshletCullShader is not null )
+		{
+			var jobs = visibility is not null ? visibility.MeshletJobs : device.ShadowMeshletBuffersNow().Jobs;
+			if ( jobs.IsValid ) SortRuns( cull, region, jobs, cullRuns.Count );
+		}
 
 		// Only the culling's writes before the draws' reads of them: the draws before it needn't drain
 		var readers = PipelineStage.DrawIndirect | PipelineStage.VertexInput | PipelineStage.VertexShader | (taskMeshlets ? PipelineStage.TaskShader | PipelineStage.MeshShader : 0);
@@ -1665,9 +1679,63 @@ internal sealed partial class BackendContext
 		constants.Pass = 1;
 		Bind();
 		cullDrawer.DispatchIndirect( r.List, device.MeshletCullShader, meshletAttributes, jobs, 0 );
+
 		r.List.Marker( "end GPU-driven meshlets" );
 		timer?.End( r.List, scope );
 	}
+
+	/// <summary>
+	/// <c>borealis_meshlet_cull_cs</c>'s sort (<c>D_SORT</c>, a group a multi-draw): the region's first <paramref name="runs"/>
+	/// multi-draws' commands nearest first, through <paramref name="jobs"/> (a copy jobs buffer the view's meshlet pass is
+	/// done with). After the cull, meshlet pass and squeeze wrote them, before the draws read them.
+	/// </summary>
+	void SortRuns( in GpuDrivenCull cull, in CulledRegion region, BufferHandle jobs, int runs )
+	{
+		var r = recording;
+		var m = cull.WorldToClip;
+		meshletConstants ??= new byte[Marshal.SizeOf<MeshletCullConstants>()];
+		MemoryMarshal.Write( meshletConstants, new MeshletCullConstants
+		{
+			Instances = (uint)(region.Offset + region.Instances),
+			Commands = (uint)(region.Offset + region.Commands),
+			FirstInstance = region.FirstInstance,
+			Runs = (uint)(region.Offset + region.Runs),
+			Pass = 3,
+			Viewport = new System.Numerics.Vector4( 0, 0, BackendDevice.MeshletJobCapacity, 0 ),
+			ClipZ = new System.Numerics.Vector4( m.M13, m.M23, m.M33, m.M43 ),
+			ClipW = new System.Numerics.Vector4( m.M14, m.M24, m.M34, m.M44 ),
+		} );
+
+		cullDrawer ??= new ShaderDrawer( device );
+		meshletAttributes ??= new ShaderAttributes();
+		meshletAttributes.Clear();
+		meshletAttributes.SetById( Ids.BorealisCullFrame, region.Buffer );
+		meshletAttributes.SetById( Ids.BorealisMeshletJobs, jobs );
+		// Unread by the sort, bound for the shader's other passes' declarations
+		meshletAttributes.SetById( Ids.BorealisMeshletCompacted, jobs );
+		meshletAttributes.SetById( Ids.BorealisMeshletCompacted16, jobs );
+		meshletAttributes.SetById( Ids.BorealisMeshletStamps, jobs );
+		meshletAttributes.SetById( Ids.g_TransformBuffer, LentInstances.Transforms );
+		meshletAttributes.SetComboById( Ids.MeshletSort, 1 );
+		meshletAttributes.SetData( "BorealisMeshletCull_t", meshletConstants );
+
+		var timer = device.PassTimer;
+		var scope = timer?.Begin( r.List, "GPU-driven sort", PassTimer.ScopeKind.Own, count: false ) ?? -1;
+		r.List.Barrier( PipelineStage.ComputeShader | PipelineStage.Transfer, MemoryAccess.ShaderRead | MemoryAccess.ShaderWrite | MemoryAccess.TransferWrite, PipelineStage.ComputeShader, MemoryAccess.ShaderRead | MemoryAccess.ShaderWrite );
+		cullDrawer.Dispatch( r.List, device.MeshletCullShader, meshletAttributes, runs * MeshletSortThreads, 1, 1 );
+		r.List.Barrier( PipelineStage.ComputeShader, MemoryAccess.ShaderWrite, PipelineStage.DrawIndirect | PipelineStage.ComputeShader, MemoryAccess.IndirectRead | MemoryAccess.ShaderRead | MemoryAccess.ShaderWrite );
+		timer?.End( r.List, scope );
+	}
+
+	/// <summary>
+	/// Whether a depth-only call outside its rendering scope (a prepass drawing ids, a shadow view culling meshlets) draws each
+	/// multi-draw's commands nearest first, by their first instance's origin: the depth test then drops the leaves behind
+	/// the trees drawn before them instead of shading them (<see cref="SortRuns"/>).
+	/// </summary>
+	internal static bool SortsDepthRuns { get; set; } = true;
+
+	/// <summary>The sort pass's group size (<c>SortThreads</c> in <c>borealis_meshlet_cull_cs</c>): a group a multi-draw.</summary>
+	const int MeshletSortThreads = 512;
 
 	/// <summary>Whether resident calls may be drawn from plans now: not while a census or the record log watches each call.</summary>
 	bool UsesPlans => device.DrawsAggregatesResident && !Census && device.GpuDrivenRecordLog is null && CullShader is not null;
@@ -2195,9 +2263,22 @@ internal sealed partial class BackendContext
 		var meshStages = device.Gpu.Capabilities.MeshShaders ? PipelineStage.TaskShader | PipelineStage.MeshShader : 0;
 		r.List.Barrier( PipelineStage.ComputeShader | PipelineStage.VertexInput | PipelineStage.Transfer | meshStages,
 			MemoryAccess.ShaderWrite | MemoryAccess.TransferWrite, PipelineStage.Transfer, MemoryAccess.TransferWrite );
-		r.List.FillBuffer( visibility.Mask, 0, 0, Math.Max( (tables.VisibilityBits / 8 + 3) & ~3L, 4 ) );
-		var meshBits = Math.Max( tables.LastFrameVisibilityBits, 1L << 16 );
-		r.List.FillBuffer( visibility.Mask, 0, GpuDrivenTables.FrameVisibilityBitBase / 8, Math.Min( (meshBits / 8 + 4) & ~3L, (GpuDrivenTables.MaxVisibilityBits - GpuDrivenTables.FrameVisibilityBitBase) / 8 ) );
+		// The owners' bits and this frame's mesh draws': only the words last frame's marks set (its dirty list), where they all
+		// kept theirs there; else every word in use
+		if ( !ClearDirtyWords( visibility ) )
+		{
+			r.List.FillBuffer( visibility.Mask, 0, 0, Math.Max( (tables.VisibilityBits / 8 + 3) & ~3L, 4 ) );
+			var meshBits = Math.Max( tables.LastFrameVisibilityBits, 1L << 16 );
+			r.List.FillBuffer( visibility.Mask, 0, GpuDrivenTables.FrameVisibilityBitBase / 8, Math.Min( (meshBits / 8 + 4) & ~3L, (GpuDrivenTables.MaxVisibilityBits - GpuDrivenTables.FrameVisibilityBitBase) / 8 ) );
+		}
+
+		// The list empty for this frame's marks: no groups yet (of 1 by 1), no words
+		if ( visibility.Dirty.IsValid )
+		{
+			r.List.UpdateBuffer<uint>( visibility.Dirty, [0u, 1u, 1u, 0u] );
+			(visibility.DirtyFrame, visibility.DirtyKept) = (frame, true);
+		}
+
 		if ( !visibility.StampsCleared ) r.List.FillBuffer( visibility.Stamps, 0 );
 		visibility.StampsCleared = true;
 
@@ -2246,6 +2327,34 @@ internal sealed partial class BackendContext
 		}
 		r.List.Barrier( PipelineStage.Transfer, MemoryAccess.TransferWrite, PipelineStage.ComputeShader | PipelineStage.Transfer | PipelineStage.DrawIndirect | meshStages,
 			MemoryAccess.ShaderRead | MemoryAccess.ShaderWrite | MemoryAccess.TransferWrite | MemoryAccess.IndirectRead );
+	}
+
+	/// <summary>
+	/// Zero the words of a view's mask its marks set last frame (<see cref="BackendDevice.VisibilityView.Dirty"/>), with
+	/// <c>borealis_gpu_driven_mark_cs</c>'s clear: a forest's owners hold hundreds of millions of bits, which a fill of the
+	/// whole took a tenth of a millisecond to clear. False where the list doesn't hold them all (made since, or a mark kept
+	/// none): the caller fills the mask. Between the barrier before the fills and the one after them.
+	/// </summary>
+	bool ClearDirtyWords( BackendDevice.VisibilityView visibility )
+	{
+		if ( !visibility.DirtyKept || visibility.DirtyFrame == 0 || !visibility.Dirty.IsValid || device.GpuDrivenVisibilityShaders.Mark is not { } shader ) return false;
+
+		var r = recording;
+		r.List.Barrier( PipelineStage.Transfer | PipelineStage.ComputeShader, MemoryAccess.TransferWrite | MemoryAccess.ShaderWrite, PipelineStage.ComputeShader | PipelineStage.DrawIndirect, MemoryAccess.ShaderRead | MemoryAccess.ShaderWrite | MemoryAccess.IndirectRead );
+		var markConstants = this.markConstants ??= new byte[Marshal.SizeOf<GpuDrivenMarkConstants>()];
+		MemoryMarshal.Write( markConstants, new GpuDrivenMarkConstants { Bits = (uint)GpuDrivenTables.MaxVisibilityBits, DirtyCapacity = (uint)visibility.DirtyCapacity } );
+		cullDrawer ??= new ShaderDrawer( device );
+		cullAttributes ??= new ShaderAttributes();
+		cullAttributes.Clear();
+		cullAttributes.SetById( CullAttribute.Mask, visibility.Mask );
+		cullAttributes.SetById( CullAttribute.Dirty, visibility.Dirty );
+		cullAttributes.SetComboById( CullAttribute.MaskClear, 1 );
+		cullAttributes.SetDataById( CullAttribute.MarkConstants, markConstants );
+		if ( !cullDrawer.DispatchIndirect( r.List, shader, cullAttributes, visibility.Dirty, 0 ) ) return false;
+
+		// The list's header is reset next, and the marks read the mask
+		r.List.Barrier( PipelineStage.ComputeShader | PipelineStage.DrawIndirect, MemoryAccess.ShaderRead | MemoryAccess.ShaderWrite | MemoryAccess.IndirectRead, PipelineStage.Transfer | PipelineStage.ComputeShader, MemoryAccess.TransferWrite | MemoryAccess.ShaderRead | MemoryAccess.ShaderWrite );
+		return true;
 	}
 
 	/// <summary>
@@ -2403,6 +2512,7 @@ internal sealed partial class BackendContext
 		public static readonly int BorealisHiZ = AttributeIds.Of( "BorealisHiZ" );
 		public static readonly int BorealisHiZDepth = AttributeIds.Of( "BorealisHiZDepth" );
 		public static readonly int BorealisMeshletJobs = AttributeIds.Of( "BorealisMeshletJobs" );
+		public static readonly int MeshletSort = AttributeIds.Of( "D_SORT" );
 		public static readonly int g_TransformBuffer = AttributeIds.Of( "g_TransformBuffer" );
 		public static readonly int BorealisIds = AttributeIds.Of( "BorealisIds" );
 	}
@@ -2613,6 +2723,10 @@ internal sealed partial class BackendContext
 		r.List.Barrier( Borealis.Gpu.TextureBarrier.Transition( visibility.Ids, ImageLayout.ColorTarget, ImageLayout.ShaderRead, PipelineStage.ColorTargetOutput, MemoryAccess.ColorTargetWrite, PipelineStage.ComputeShader, MemoryAccess.ShaderRead ) );
 		var markConstants = this.markConstants ??= new byte[Marshal.SizeOf<GpuDrivenMarkConstants>()];
 		var frameBits = device.GpuDrivenTables.FrameVisibilityBits;
+
+		// Its set words in the view's dirty list, where this frame's clear readied it; else the next clear fills the mask
+		var dirtyCapacity = visibility.Dirty.IsValid && visibility.DirtyFrame == device.GpuDrivenFrame ? (uint)visibility.DirtyCapacity : 0u;
+		if ( dirtyCapacity == 0 ) visibility.DirtyKept = false;
 		MemoryMarshal.Write( markConstants, new GpuDrivenMarkConstants
 		{
 			Width = (uint)visibility.Width,
@@ -2622,12 +2736,15 @@ internal sealed partial class BackendContext
 			CallSlot = call.Slot,
 			CallFirst = call.First,
 			CallInstances = call.Instances,
+			DirtyCapacity = dirtyCapacity,
 		} );
 		cullDrawer ??= new ShaderDrawer( device );
 		cullAttributes ??= new ShaderAttributes();
 		cullAttributes.Clear();
 		cullAttributes.SetById( CullAttribute.Ids, visibility.Ids );
 		cullAttributes.SetById( CullAttribute.Mask, visibility.Mask );
+		// Bound either way; a mark that keeps no words leaves it untouched
+		cullAttributes.SetById( CullAttribute.Dirty, visibility.Dirty.IsValid ? visibility.Dirty : visibility.Mask );
 		cullAttributes.SetComboById( CullAttribute.Msaa, visibility.Samples > 1 ? 1 : 0 );
 		cullAttributes.SetDataById( CullAttribute.MarkConstants, markConstants );
 		var markScope = timer?.Begin( r.List, "GPU-driven mark", PassTimer.ScopeKind.Own, count: false ) ?? -1;

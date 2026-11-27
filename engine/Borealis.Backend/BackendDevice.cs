@@ -2943,13 +2943,13 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 		/// <summary>Every buffer it made.</summary>
 		public int Buffers( Span<BufferHandle> into )
 		{
-			ReadOnlySpan<BufferHandle> all = [Mask, Stamps, Compacted, PrepassCompacted, PrepassCompacted16, MeshletStamps, MeshletJobs, HiZVisible[0], HiZVisible[1], HiZ, IdsCalls, CompactLarge];
+			ReadOnlySpan<BufferHandle> all = [Mask, Stamps, Compacted, PrepassCompacted, PrepassCompacted16, MeshletStamps, MeshletJobs, HiZVisible[0], HiZVisible[1], HiZ, IdsCalls, CompactLarge, Dirty];
 			all.CopyTo( into );
 			return all.Length;
 		}
 
 		/// <summary>How many <see cref="Buffers"/> gives.</summary>
-		public const int BufferCount = 12;
+		public const int BufferCount = 13;
 
 		/// <summary>
 		/// The ids target and the id prepass's scratch target, at <see cref="Width"/> by <see cref="Height"/>: made when a
@@ -2971,6 +2971,18 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 		/// <summary>The size of the view's depth target, which its ids and compacted buffer are made for.</summary>
 		public int Width, Height, Samples;
 		public BufferHandle Mask, Stamps;
+
+		/// <summary>
+		/// The mask words the frame's marks set from 0 (<c>borealis_gpu_driven_mark_cs</c>), which the next frame's clear
+		/// zeroes instead of every owner's bits: 16 bytes of header (the clear's dispatch arguments and the count), then room
+		/// for <see cref="DirtyCapacity"/> words. Made with the view, again when its depth target grows past it.
+		/// </summary>
+		public BufferHandle Dirty;
+		public int DirtyCapacity;
+
+		/// <summary>The frame whose clear readied <see cref="Dirty"/> for its marks; whether every mark since kept its words there.</summary>
+		public uint DirtyFrame;
+		public volatile bool DirtyKept;
 
 		/// <summary>
 		/// Forward's compacted indices (the triangles that own a sample), made with the view: written and drawn within a frame on
@@ -3403,7 +3415,8 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 		}
 
 		state.Ready = false;
-		state.Mask = state.Stamps = state.PrepassCompacted = state.PrepassCompacted16 = state.MeshletStamps = state.MeshletJobs = state.HiZ = default;
+		state.Mask = state.Stamps = state.PrepassCompacted = state.PrepassCompacted16 = state.MeshletStamps = state.MeshletJobs = state.HiZ = state.Dirty = default;
+		(state.DirtyCapacity, state.DirtyFrame, state.DirtyKept) = (0, 0, false);
 		state.HiZVisible.AsSpan().Clear();
 		state.HiZWidth = state.HiZHeight = state.HiZLevels = 0;
 		state.HiZWrote = state.HiZReadValid = false;
@@ -3538,6 +3551,17 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 				ClearMadeAfterClear( state, compacted: true, prepass: default );
 			}
 
+			// The same for the mask's dirty words; a new list holds none of the mask's set words, so the next clear is whole
+			var dirty = DirtyWordsFor( depth );
+			if ( !state.Dirty.IsValid || dirty > state.DirtyCapacity )
+			{
+				if ( state.Dirty.IsValid && visibilityBuffers.Remove( state.Dirty ) ) Gpu.Destroy( state.Dirty );
+				state.Dirty = VisibilityDirty( dirty );
+				visibilityBuffers.Add( state.Dirty );
+				state.DirtyCapacity = dirty;
+				(state.DirtyFrame, state.DirtyKept) = (0, false);
+			}
+
 			// Its ids targets are made at its new size when a prepass next draws ids (IdsTargetsFor)
 			if ( depth.Width != 0 && (state.Width != depth.Width || state.Height != depth.Height || state.Samples != depth.Samples) )
 			{
@@ -3561,8 +3585,10 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 			if ( !StartWorkItem( "visibility" ) ) return;
 			using var zone = Zones.VisibilityMake.Start();
 			var compacted = CompactedIndicesFor( depth );
+			var dirtyWords = DirtyWordsFor( depth );
 			var (mask, stamps) = (VisibilityMask(), VisibilityStamps());
 			var buffer = VisibilityCompacted( compacted );
+			var dirty = VisibilityDirty( dirtyWords );
 			var idsCalls = ResolvingIds ? VisibilityIdsCalls() : default;
 
 			VisibilityView state;
@@ -3572,7 +3598,7 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 				if ( state.Ready || state.Mask.IsValid )
 				{
 					// Made meanwhile where it was asked
-					foreach ( var made in (BufferHandle[])[mask, stamps, buffer] ) Gpu.Destroy( made );
+					foreach ( var made in (BufferHandle[])[mask, stamps, buffer, dirty] ) Gpu.Destroy( made );
 					if ( idsCalls.IsValid ) Gpu.Destroy( idsCalls );
 					return;
 				}
@@ -3589,6 +3615,8 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 				state.Compacted = buffer;
 				visibilityBuffers.Add( buffer );
 				state.CompactedCapacity = compacted;
+				(state.Dirty, state.DirtyCapacity) = (dirty, dirtyWords);
+				visibilityBuffers.Add( dirty );
 				(state.Width, state.Height, state.Samples) = (depth.Width, depth.Height, depth.Samples);
 				state.Ready = true;
 			}
@@ -3616,6 +3644,19 @@ public sealed partial class BackendDevice : GpuDevice, IDisposable
 
 	// With the compaction's list of large fragments past the indices (BackendContext.CompactLargeBytes), its parts' dispatch arguments first
 	BufferHandle VisibilityCompacted( int indices ) => Gpu.CreateBuffer( new BufferInfo { Size = indices * 4L, Usage = BufferUsage.Index | BufferUsage.Storage | BufferUsage.CopyDestination, Name = "Borealis visibility triangles" } );
+
+	// The mask's dirty words (VisibilityView.Dirty): the clear's dispatch arguments and count, then the words
+	BufferHandle VisibilityDirty( int words ) => Gpu.CreateBuffer( new BufferInfo { Size = 16 + words * 4L, Usage = BufferUsage.Storage | BufferUsage.Indirect | BufferUsage.CopyDestination, Name = "Borealis visibility mask dirty words" } );
+
+	/// <summary>
+	/// Words a view's dirty list holds (<see cref="VisibilityView.Dirty"/>): one per sample of its depth target, which marks
+	/// a bit each at most per call; past it the next clear zeroes the whole mask.
+	/// </summary>
+	internal static int DirtyWordsFor( in TextureInfo depth )
+	{
+		var samples = depth.Width == 0 ? 1L << 22 : (long)depth.Width * depth.Height * Math.Max( depth.Samples, 1 );
+		return (int)Math.Clamp( samples, 1 << 16, 1 << 23 );
+	}
 
 	// Views whose ids targets are being made on a worker
 	readonly HashSet<VisibilityView> idsMaking = new( ReferenceEqualityComparer.Instance );

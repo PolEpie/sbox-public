@@ -92,36 +92,53 @@ internal sealed partial class MeshRenderFeature
 			var centers = placement.Centers;
 			var extents = placement.Extents;
 			var scales = placement.Scales;
+			var clusterCenters = placement.ClusterCenters;
+			var clusterExtents = placement.ClusterExtents;
 			var drawn = 0;
-			for ( int i = 0; i < count; i++ )
+			for ( int c = 0; c < clusterCenters.Length; c++ )
 			{
-				var center = centers[i];
-				var extent = extents[i];
-				if ( !frustum.Intersects( center, extent ) || size.Culls( center, extent ) || (sphere is { } s && center.Distance( s.Center ) - extent.Length > s.Radius) )
+				var start = c * InstancedMeshObject.ClusterSize;
+				var end = Math.Min( start + InstancedMeshObject.ClusterSize, count );
+
+				// A cluster outside the view has every placement outside; one inside has every placement inside
+				var containment = frustum.Classify( clusterCenters[c], clusterExtents[c] );
+				if ( containment == Culling.Containment.Outside )
 				{
-					instanceDrawn[i] = NotDrawn;
+					instanceDrawn.AsSpan( start, end - start ).Fill( NotDrawn );
 					continue;
 				}
 
-				var lod = 0;
-				if ( lodCount > 1 )
+				var inside = containment == Culling.Containment.Inside;
+				for ( int i = start; i < end; i++ )
 				{
-					if ( lods is null ) lod = model.LodForScreenSize( texels, scales[i] );
-					else if ( lods[i] != LodUnknown ) lod = lods[i];
-					else lods[i] = (byte)(lod = LodOf( model, center, scales[i], camera, tanHalfFov, screenWidth ));
-				}
+					var center = centers[i];
+					var extent = extents[i];
+					if ( (!inside && !frustum.Intersects( center, extent )) || size.Culls( center, extent ) || (sphere is { } s && center.Distance( s.Center ) - extent.Length > s.Radius) )
+					{
+						instanceDrawn[i] = NotDrawn;
+						continue;
+					}
 
-				// The cache and what's drawn over it each take their LODs of an object that animates some (ViewPass.SplitsLods)
-				if ( splits && !pass.DrawsLod( obj, lod ) )
-				{
-					instanceDrawn[i] = NotDrawn;
-					continue;
-				}
+					var lod = 0;
+					if ( lodCount > 1 )
+					{
+						if ( lods is null ) lod = model.LodForScreenSize( texels, scales[i] );
+						else if ( lods[i] != LodUnknown ) lod = lods[i];
+						else lods[i] = (byte)(lod = LodOf( model, center, scales[i], camera, tanHalfFov, screenWidth ));
+					}
 
-				instanceDrawn[i] = (byte)lod;
-				lodCounts[lod]++;
-				textures.AccumulateObject( center, extent, ref lodScale[lod], ref lodFallback[lod] );
-				drawn++;
+					// The cache and what's drawn over it each take their LODs of an object that animates some (ViewPass.SplitsLods)
+					if ( splits && !pass.DrawsLod( obj, lod ) )
+					{
+						instanceDrawn[i] = NotDrawn;
+						continue;
+					}
+
+					instanceDrawn[i] = (byte)lod;
+					lodCounts[lod]++;
+					textures.AccumulateObject( center, extent, ref lodScale[lod], ref lodFallback[lod] );
+					drawn++;
+				}
 			}
 
 			InstancesCulled += count - drawn;

@@ -58,6 +58,10 @@ cbuffer BorealisResidentCull_t
 	uint g_nResidentLodCount;		// draw records the LOD table covers
 	uint g_nResidentLodFadeNow;	// this frame's stamp for LOD fades: time in ticks of 1/256 s (bits 0-13) and frame (bits 14-23) (sbox/lod_fade.slangh)
 	uint g_nResidentLodFadeTicks;	// how long a LOD fade lasts, in ticks; 0: LODs switch at once
+	uint g_nResidentSqueeze;		// not 0: squeeze the empty commands out of multi-draws: byte offset of a table of them, two words each (run record, commands)
+	uint g_nResidentSqueezeRuns;	// the table's multi-draws, a group each
+	uint g_nResidentMerge;		// not 0: one-instance draws of the same command share an instanced one (WaveTakeDrawSlot)
+	uint g_nResidentPad;
 };
 
 static const uint None = 0xffffffffu;
@@ -287,6 +291,47 @@ uint WaveTakeSlot( bool bTake, uint nRuns, uint nRun, ByteAddressBuffer frame )
 	return nSlot;
 }
 
+// WaveTakeSlot for lanes that each draw one instance with the command vCommand (index count, first index, base vertex):
+// lanes of the same multi-draw and command share a run of consecutive slots, so one instanced command draws them all. The
+// group's first lane (bGroupFirst) writes it, for nGroupCount instances from its slot; the rest of its slots hold the
+// group's other instance records and empty commands. A multi-draw of thousands of one-instance draws keeps the GPU's
+// front end busy and its shader units idle (a forest's clutter: twelve thousand a pass). Every lane calls it
+uint WaveTakeDrawSlot( bool bTake, uint nRuns, uint nRun, uint3 vCommand, ByteAddressBuffer frame, out uint nGroupCount, out bool bGroupFirst )
+{
+	uint nSlot = 0;
+	nGroupCount = 0;
+	bGroupFirst = false;
+	bool bPending = bTake;
+	uint nLane = WaveGetLaneIndex();
+
+	// Not merging: each lane a command of its own, as WaveTakeSlot gives
+	uint3 vKey = g_nResidentMerge != 0 ? vCommand : uint3( nLane, 0, 0 );
+	while ( WaveActiveAnyTrue( bPending ) )
+	{
+		uint nLeader = WaveActiveMin( bPending ? nLane : None );
+		uint nLeaderRun = WaveReadLaneAt( nRun, nLeader );
+		uint3 vLeaderKey = WaveReadLaneAt( vKey, nLeader );
+		bool bMine = bPending && nRun == nLeaderRun && all( vKey == vLeaderKey );
+		uint nCount = WaveActiveCountBits( bMine );
+		uint nPrefix = WavePrefixCountBits( bMine );
+		uint nBase = 0;
+		if ( nLane == nLeader )
+		{
+			g_Frame.InterlockedAdd( nRuns + nLeaderRun * MultiDraw_Size + MultiDraw_Count, nCount, nBase );
+			nBase += frame.Load( nRuns + nLeaderRun * MultiDraw_Size + MultiDraw_FirstSlot );
+		}
+		nBase = WaveReadLaneAt( nBase, nLeader );
+		if ( bMine )
+		{
+			nSlot = nBase + nPrefix;
+			nGroupCount = nCount;
+			bGroupFirst = nPrefix == 0;
+			bPending = false;
+		}
+	}
+	return nSlot;
+}
+
 // Two-phase Hi-Z occlusion (CullViewRecord.Flags bit 3; docs/reference/borealis-gpu-driven.md, "Hi-Z occlusion"), as
 // borealis_gpu_driven_cull_cs defers: an ids fragment (not a forward one) forward didn't see last frame (its bit clear in the
 // bits at bindless slot vViewFlags.z) is left for the second phase, as a 64-byte candidate at byte offset vViewFlags.w (group
@@ -432,12 +477,74 @@ void Expand( uint nGroup, uint nThread )
 	}
 }
 
+// Squeeze mode (g_nResidentSqueeze): a group per multi-draw of the table, after the cull. The empty commands an instanced
+// group leaves in its other slots (WaveTakeDrawSlot) are dropped and the rest moved down in order, the count with them, so
+// the multi-draw draws only commands with instances. Instance records stay where they are: each command names its first.
+groupshared uint g_nSqueezeKeep[64];
+
+void Squeeze( uint nGroup, uint nThread )
+{
+	if ( nGroup >= g_nResidentSqueezeRuns )
+		return;
+
+	uint2 vRun = g_Frame.Load2( g_nResidentSqueeze + nGroup * 8 );
+	uint nFirst = g_Frame.Load( vRun.x + MultiDraw_FirstSlot );
+	uint nCount = g_Frame.Load( vRun.x + MultiDraw_Count );
+	uint nKept = 0;
+	for ( uint nBlock = 0; nBlock < nCount; nBlock += 64 )
+	{
+		uint i = nBlock + nThread;
+		uint4 vCommand = 0;
+		uint nFirstInstance = 0;
+		bool bKeep = false;
+		if ( i < nCount )
+		{
+			uint nAt = vRun.y + ( nFirst + i ) * 20;
+			vCommand = g_Frame.Load4( nAt );
+			nFirstInstance = g_Frame.Load( nAt + 16 );
+			bKeep = vCommand.y != 0;
+		}
+
+		// Every command of the block is read before any moves: a command only moves down, at most onto one read here
+		g_nSqueezeKeep[nThread] = bKeep ? 1 : 0;
+		GroupMemoryBarrierWithGroupSync();
+		uint nBefore = 0;
+		uint nTotal = 0;
+		for ( uint t = 0; t < 64; t++ )
+		{
+			uint nKeep = g_nSqueezeKeep[t];
+			nTotal += nKeep;
+			nBefore += t < nThread ? nKeep : 0;
+		}
+
+		uint nTo = nKept + nBefore;
+		if ( bKeep && nTo != i )
+		{
+			uint nAt = vRun.y + ( nFirst + nTo ) * 20;
+			g_Frame.Store4( nAt, vCommand );
+			g_Frame.Store( nAt + 16, nFirstInstance );
+		}
+
+		nKept += nTotal;
+		GroupMemoryBarrierWithGroupSync();
+	}
+
+	if ( nThread == 0 )
+		g_Frame.Store( vRun.x + MultiDraw_Count, nKept );
+}
+
 [numthreads( 64, 1, 1 )]
 [shader( "compute" )] void MainCs( uint3 vGroupId : SV_GroupID, uint nThread : SV_GroupIndex )
 {
 	if ( g_nResidentExpand != 0 )
 	{
 		Expand( vGroupId.x, nThread );
+		return;
+	}
+
+	if ( g_nResidentSqueeze != 0 )
+	{
+		Squeeze( vGroupId.x, nThread );
 		return;
 	}
 
@@ -710,9 +817,12 @@ void Expand( uint nGroup, uint nThread )
 		if ( ( bMeshlets || bTask ) && nFragment != None && ( vViewOut.w & 2 ) != 0 )
 			g_Stamps.Store( nFragment * 4, g_nResidentFrame );
 
-		// The next slot of its multi-draw (or task run) in this view
+		// The next slot of its multi-draw (or task run) in this view: drawn lanes with the same command share one, instanced
 		bool bDrawn = bKept && !bListed && !bMeshlets && !bTask;
-		uint nSlot = WaveTakeSlot( bDrawn || bTask, vView.w, bTask ? vVisibility.y & ~TaskRun : vBatch.w, frame );
+		uint nSlot = WaveTakeSlot( bTask, vView.w, vVisibility.y & ~TaskRun, frame );
+		uint nGroupCount;
+		bool bGroupFirst;
+		uint nDrawSlot = WaveTakeDrawSlot( bDrawn, vView.w, vBatch.w, uint3( vViewRange, vDraw.z ), frame, nGroupCount, bGroupFirst );
 		if ( bTask )
 		{
 			g_Frame.Store( vView.y + nSlot * InstanceRecord_Size + InstanceRecord_Transform, nViewTransform );
@@ -723,12 +833,14 @@ void Expand( uint nGroup, uint nThread )
 
 		if ( bDrawn )
 		{
+			nSlot = nDrawSlot;
 			g_Frame.Store( vView.y + nSlot * InstanceRecord_Size + InstanceRecord_Transform, nViewTransform );
 			g_Frame.Store( vView.y + nSlot * InstanceRecord_Size + InstanceRecord_Draw, nViewDraw );
 
+			// The group's command, from its first slot; an empty one in each of its other slots
 			uint nCommand = vView.z + nSlot * 20;
-			g_Frame.Store( nCommand, vViewRange.y );
-			g_Frame.Store( nCommand + 4, 1 );
+			g_Frame.Store( nCommand, bGroupFirst ? vViewRange.y : 0 );
+			g_Frame.Store( nCommand + 4, bGroupFirst ? nGroupCount : 0 );
 			g_Frame.Store( nCommand + 8, vViewRange.x );
 			g_Frame.Store( nCommand + 12, vDraw.z );
 			g_Frame.Store( nCommand + 16, vViewOut.x + nSlot );

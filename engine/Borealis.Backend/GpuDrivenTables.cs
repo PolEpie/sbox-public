@@ -905,8 +905,12 @@ internal sealed class GpuDrivenTables : IDisposable
 	/// <summary>Visibility fragments there can be: a stamp each.</summary>
 	public const int MaxVisibilityFragments = 1 << 20;
 
-	/// <summary>Vertex bits the mask holds, a bit for every vertex of every aggregate drawn.</summary>
-	public const long MaxVisibilityBits = 1L << 26;
+	/// <summary>
+	/// Vertex bits the mask holds, a bit for every vertex of every aggregate drawn: owners' runs below
+	/// <see cref="FrameVisibilityBitBase"/>, this frame's mesh draws' above. Owners hold a run for every fragment they have,
+	/// seen or not: a forest's resident trees took over 600 million, and those that found no room drew whole in forward.
+	/// </summary>
+	public const long MaxVisibilityBits = FrameVisibilityBitBase + (1L << 25);
 
 	/// <summary>
 	/// An owner's visibility: its stamps and its vertex bits (in 32-bit words). One that found no room has
@@ -1108,7 +1112,7 @@ internal sealed class GpuDrivenTables : IDisposable
 
 	/// <summary>Where this frame's visibility starts: aggregates' runs, which last, are below it, mesh draws' above.</summary>
 	public const int FrameVisibilityFragmentBase = MaxVisibilityFragments / 2;
-	public const long FrameVisibilityBitBase = MaxVisibilityBits / 2;
+	public const long FrameVisibilityBitBase = 1L << 30;
 
 	readonly Dictionary<(int FirstInstance, object Mesh, int ModelMesh, int DrawCall), (uint First, uint VertexBase)> frameVisibility = new();
 	int frameVisibilityFragments;

@@ -38,4 +38,11 @@ internal struct ResidentCullConstants
 	/// ticks (<see cref="BackendDevice.LodFades"/>).
 	/// </summary>
 	public uint LodTable, LodCount, LodFadeNow, LodFadeTicks;
+
+	/// <summary>
+	/// Not 0: a squeeze dispatch after the cull, a group per multi-draw: the byte offset of their table (run record, then
+	/// commands, a word each) and its length. Whether the cull draws one-instance draws of the same command as one
+	/// instanced command (<see cref="BackendContext.InstancesResidentDraws"/>); then a pad word.
+	/// </summary>
+	public uint Squeeze, SqueezeRuns, Merge, Pad;
 }

@@ -64,19 +64,21 @@ public sealed partial class BackendDevice
 		("shaders/screen_space_reflections_cs.shader", [("D_PASS", 2), ("D_MSAA_NORMALS", 0)]),
 	];
 
-	// GPU-driven visibility's compute (BackendContext.GpuDriven: the cull, the ids' mark at either sample count, the
-	// compaction's five kinds, the meshlet cull), each dispatched through a material object
+	// GPU-driven visibility's compute (BackendContext.GpuDriven: the cull, the ids' mark at either sample count and the
+	// mask's clear, the compaction's five kinds, the meshlet cull), each dispatched through a material object
 	static readonly (string Shader, (string Name, int Value)[] Combos)[] gpuDrivenDispatches =
 	[
 		("shaders/borealis_gpu_driven_cull_cs.shader", []),
 		("shaders/borealis_gpu_driven_mark_cs.shader", [("D_MSAA", 0)]),
 		("shaders/borealis_gpu_driven_mark_cs.shader", [("D_MSAA", 1)]),
+		("shaders/borealis_gpu_driven_mark_cs.shader", [("D_MASK_CLEAR", 1)]),
 		("shaders/borealis_gpu_driven_compact_cs.shader", [("D_PARTS", 0)]),
 		("shaders/borealis_gpu_driven_compact_cs.shader", [("D_PARTS", 1)]),
 		("shaders/borealis_gpu_driven_compact_cs.shader", [("D_PARTS", 2)]),
 		("shaders/borealis_gpu_driven_compact_cs.shader", [("D_PARTS", 3)]),
 		("shaders/borealis_gpu_driven_compact_cs.shader", [("D_PARTS", 4)]),
 		("shaders/borealis_meshlet_cull_cs.shader", []),
+		("shaders/borealis_meshlet_cull_cs.shader", [("D_SORT", 1)]),
 	];
 
 	// Graphics draws a frame after a load makes whatever the map, drawn through a material object (ShaderDrawer.Draw): the

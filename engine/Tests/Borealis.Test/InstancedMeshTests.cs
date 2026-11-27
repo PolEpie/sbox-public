@@ -123,13 +123,20 @@ public class InstancedMeshTests
 		Assert.AreSame( owner, aggregates.ResidentFor( system.MainPass ).MeshGroups.Single().Owner, "the same owner in a new list" );
 		Assert.AreEqual( released, aggregates.ResidentOwnersReleased );
 
-		// New instances replace the owner, and rewrite the run once
+		// New instances replace the owner, and rewrite the run once; the list keeps everything else and takes a new version
+		var kept = aggregates.ResidentFor( system.MainPass );
+		var keptVersion = kept.Version;
+		made = aggregates.ResidentListsMade;
 		var moved = new Transform[Count];
 		for ( int i = 0; i < Count; i++ ) moved[i] = new Transform( new Vector3( 12 + i * 0.5f, 1, 0 ) );
 		obj.SetInstances( moved, default );
 		CollectAndPrepare( system, world, view );
-		var replaced = aggregates.ResidentFor( system.MainPass ).MeshGroups.Single().Owner;
+		Assert.AreSame( kept, aggregates.ResidentFor( system.MainPass ), "the list patched, not made again" );
+		Assert.AreEqual( made, aggregates.ResidentListsMade, "no list made again" );
+		Assert.AreNotEqual( keptVersion, kept.Version, "a new version, so its draw is planned again" );
+		var replaced = kept.MeshGroups.Single().Owner;
 		Assert.AreNotSame( owner, replaced, "a new owner for new instances" );
+		Assert.AreEqual( 2, kept.DeviceCount, "its batches counted once" );
 		Assert.IsTrue( aggregates.ResidentOwnersReleased > released, "the old one let go" );
 		Assert.AreEqual( written + Count, system.Transforms.KeptWrites, "every entry rewritten once" );
 		Assert.AreEqual( 12.0f, system.Transforms[replaced.Slots[0]].Row0.w );

@@ -57,6 +57,16 @@ internal sealed partial class AggregateRenderFeature
 		/// <summary>Per depth kind, whether <see cref="Device"/> holds its mesh groups' batches, which no frame changes.</summary>
 		public readonly bool[] DeviceMeshes = new bool[4];
 
+		/// <summary>
+		/// Where its instanced objects' groups start in <see cref="MeshGroups"/> (they come last), and its device batches,
+		/// triangles and fragments before them: <see cref="PatchInstanced"/> makes only those again.
+		/// </summary>
+		public int InstancedGroupsFrom, InstancedDeviceFrom, InstancedFragmentsFrom;
+		public long InstancedTrianglesFrom;
+
+		/// <summary>Per depth kind, whether <see cref="Device"/> holds its instanced groups' batches as they are now.</summary>
+		public readonly bool[] DeviceInstanced = new bool[4];
+
 		/// <summary>Per depth kind, the frame a layer that draws it was planned in (<see cref="WantDeviceBatches"/>), for setup to make its batches.</summary>
 		public readonly int[] DeviceWanted = [-1, -1, -1, -1];
 
@@ -606,6 +616,7 @@ internal sealed partial class AggregateRenderFeature
 		var entryVersions = world.EntryVersions;
 		var movedStamps = world.MovedStamps;
 		var changed = false;
+		var instancedChanged = false;
 		var settling = SettleAggregates( transforms.Generation );
 		for ( int m = 0; m < memberCount; m++ )
 		{
@@ -685,7 +696,7 @@ internal sealed partial class AggregateRenderFeature
 			{
 				member.Slot = slot;
 				member.EntryVersion = instancedEntryVersions[index];
-				changed = true;
+				instancedChanged = true;
 			}
 		}
 
@@ -725,8 +736,45 @@ internal sealed partial class AggregateRenderFeature
 
 		MarkMembers( world );
 		if ( changed ) DropResidentLists();
-		else if ( settling ) DropSettledLists();
-		else if ( allKept ) KeepQuiet( world, transforms, firstInstance );
+		else
+		{
+			// Only instanced objects' placements or runs: their groups made again, the rest of each list kept
+			if ( instancedChanged ) PatchInstanced();
+			if ( settling ) DropSettledLists();
+			else if ( allKept && !instancedChanged ) KeepQuiet( world, transforms, firstInstance );
+		}
+	}
+
+	/// <summary>Lists made again in place (<see cref="PatchInstanced"/>) since the feature was made, for the tests.</summary>
+	internal int InstancedPatches { get; private set; }
+
+	/// <summary>A patched list's version: below zero, so it's never a version <see cref="ResidentListFor"/> gives a list.</summary>
+	int patchedVersion;
+
+	/// <summary>
+	/// Only instanced objects changed (moved placements, a new run): each list's instanced groups made again in place, the
+	/// owners whose object, placements and run are the same kept, rather than every list dropped and its aggregates, mesh
+	/// groups and device batches made from scratch. The list takes a version of its own, so the device plans its draw again
+	/// and the views mark what it holds again.
+	/// </summary>
+	void PatchInstanced()
+	{
+		foreach ( var ((casters, mask), list) in residentLists )
+		{
+			lock ( list )
+			{
+				for ( int m = 0; m < instancedMemberCount; m++ ) list.Holds[instancedMembers[m].Index] = false;
+				list.MeshGroups.RemoveRange( list.InstancedGroupsFrom, list.MeshGroups.Count - list.InstancedGroupsFrom );
+				list.DeviceCount = list.InstancedDeviceFrom;
+				list.Triangles = list.InstancedTrianglesFrom;
+				list.Fragments = list.InstancedFragmentsFrom;
+				AddInstancedGroups( list, casters, mask, casters != ResidentCasters.Main );
+				list.Version = --patchedVersion;
+				Array.Clear( list.DeviceInstanced );
+			}
+
+			InstancedPatches++;
+		}
 	}
 
 	/// <summary>
@@ -1392,6 +1440,7 @@ internal sealed partial class AggregateRenderFeature
 		}
 
 		if ( meshMemberCount > 0 ) AddMeshGroups( list, casters, mask, shadow );
+		(list.InstancedGroupsFrom, list.InstancedDeviceFrom, list.InstancedTrianglesFrom, list.InstancedFragmentsFrom) = (list.MeshGroups.Count, list.DeviceCount, list.Triangles, list.Fragments);
 		if ( instancedMemberCount > 0 ) AddInstancedGroups( list, casters, mask, shadow );
 		if ( meshMemberCount > 0 && !shadow && residentOverlays ) AddOverlays( list, mask );
 		residentLists[(casters, mask)] = list;
@@ -1772,7 +1821,7 @@ internal sealed partial class AggregateRenderFeature
 
 		// Made once: they name no frame's instances, and only the overlay layer draws them
 		order.Device = new GpuContext.GpuDrivenBatch[deviceCount];
-		MeshDeviceBatches( order.Groups, false, false, order.Device );
+		MeshDeviceBatches( order.Groups, 0, false, false, order.Device );
 		return order;
 	}
 
@@ -1810,15 +1859,17 @@ internal sealed partial class AggregateRenderFeature
 	}
 
 	/// <summary>
-	/// Mesh groups as the device takes them for a depth kind: a batch per group, LOD and draw. False while a depth draw's
-	/// material may still change which material draws it (<see cref="GpuMaterial.DepthOnlyPending"/>), to make them again.
+	/// Mesh groups from <paramref name="first"/> on as the device takes them for a depth kind: a batch per group, LOD and
+	/// draw. False while a depth draw's material may still change which material draws it
+	/// (<see cref="GpuMaterial.DepthOnlyPending"/>), to make them again.
 	/// </summary>
-	internal bool MeshDeviceBatches( List<MeshGroup> groups, bool depth, bool forceDepthOnly, Span<GpuContext.GpuDrivenBatch> made )
+	internal bool MeshDeviceBatches( List<MeshGroup> groups, int first, bool depth, bool forceDepthOnly, Span<GpuContext.GpuDrivenBatch> made )
 	{
 		var at = 0;
 		var settled = true;
-		foreach ( var group in groups )
+		for ( int g = first; g < groups.Count; g++ )
 		{
+			var group = groups[g];
 			var mesh = group.Mesh;
 			var owner = group.Owner;
 			for ( int lod = 0; lod < mesh.LodCount; lod++ )
@@ -2040,7 +2091,13 @@ internal sealed partial class AggregateRenderFeature
 			// Mesh groups' batches name no frame's instances: made once their materials have settled
 			if ( !list.DeviceMeshes[kind] )
 			{
-				list.DeviceMeshes[kind] = MeshDeviceBatches( list.MeshGroups, depth, forceDepthOnly, made.AsSpan( batches.Length, list.DeviceCount - batches.Length ) );
+				list.DeviceMeshes[kind] = list.DeviceInstanced[kind] = MeshDeviceBatches( list.MeshGroups, 0, depth, forceDepthOnly, made.AsSpan( batches.Length, list.DeviceCount - batches.Length ) );
+				changed = true;
+			}
+			// Only its instanced groups made again (PatchInstanced): only their batches
+			else if ( !list.DeviceInstanced[kind] )
+			{
+				list.DeviceInstanced[kind] = MeshDeviceBatches( list.MeshGroups, list.InstancedGroupsFrom, depth, forceDepthOnly, made.AsSpan( list.InstancedDeviceFrom, list.DeviceCount - list.InstancedDeviceFrom ) );
 				changed = true;
 			}
 

@@ -25,6 +25,9 @@ Mode( Default );
 ByteAddressBuffer g_bindless_VertexBuffers[] EXTERNAL_DESC_SET( t, g_globalLateBoundBindlessSet, 17 );
 #endif
 
+// The sort pass's variant (g_nMeshletPass 3): its groupshared keys would cost the test pass its occupancy
+DynamicCombo( D_SORT, 0..1, Sys( ALL ) );
+
 // The call's region (listed fragments in; instance records, commands, multi-draw counts and fragment words out), the
 // view's prepass compacted indices, 32-bit and 16-bit (each one's cursor is its first word) and, per visibility fragment, the frame, where its kept
 // triangles start in the compacted indices (None: drawn whole) and how many, for its forward compaction; and the copy
@@ -48,7 +51,7 @@ cbuffer BorealisMeshletCull_t
 	uint g_nMeshletCapacity;		// indices g_Compacted and g_Compacted16 hold
 	uint g_nMeshletFragmentWords;	// g_Frame byte offset of instance 0's fragment word for the ids (wraps), or None
 	uint g_nMeshletSamples;			// the depth target's samples: 1 or 4 cull meshlets between samples, others don't
-	uint g_nMeshletPass;			// 0: test and place (a group per listed fragment), 1: copy (a group per job), 2: test and place for a shadow view
+	uint g_nMeshletPass;			// 0: test and place (a group per listed fragment), 1: copy (a group per job), 2: test and place for a shadow view, 3: sort (D_SORT, a group per multi-draw)
 	uint g_nMeshletFrame;			// this frame's stamp
 	float4 g_nMeshletViewport;		// width and height in pixels, and the copy jobs g_MeshletJobs holds
 	float4 g_nMeshletClipX;			// world to clip: x, y, z, w = dot( row, float4( world, 1 ) ), y before the vertex shaders negate it
@@ -159,6 +162,112 @@ void Copy( uint nJob, uint nThread )
 		g_Compacted16.Store( ( vJob.x / 2 + w ) * 4, nPair );
 	}
 }
+
+#if D_SORT
+// The sort pass: a group per multi-draw of the call, after the copy. Its commands nearest first, by the view's depth
+// (clip w - z, which grows away from the viewer for perspective and orthographic, reversed depth or not) of each command's
+// first instance's origin: a depth-only pass drawn front to back lets the depth test drop the pixels behind what it drew.
+// A counting sort into SortBins between the run's nearest and farthest (on the depth's ordered float bits, so finer near):
+// near enough to front to back, in three passes over the commands. Only commands move: each names its own instance record
+// (as the resident squeeze moves them). The copy jobs buffer, free once the copy pass ran, holds them meanwhile. A
+// multi-draw of more than SortCommands stays as it is.
+static const uint SortCommands = 8192;
+static const uint SortThreads = 512;
+static const uint SortBins = 256;
+groupshared uint gs_Key[SortCommands];
+groupshared uint gs_Bins[SortBins];
+groupshared uint gs_Low;
+groupshared uint gs_High;
+
+void SortRun( uint nRun, uint nThread )
+{
+	uint nRunAt = g_nMeshletRuns + nRun * MultiDraw_Size;
+	uint nFirst = g_Frame.Load( nRunAt + MultiDraw_FirstSlot );
+	uint nCount = g_Frame.Load( nRunAt + MultiDraw_Count );
+	if ( nCount < 2 || nCount > SortCommands || ( nFirst + nCount ) * 20 > uint( g_nMeshletViewport.z ) * 16 )
+		return;
+
+	if ( nThread < SortBins )
+		gs_Bins[nThread] = 0;
+	if ( nThread == 0 )
+	{
+		gs_Low = None;
+		gs_High = 0;
+	}
+	GroupMemoryBarrierWithGroupSync();
+
+	// Each command copied out, its depth as an ordered uint (None: empty, drawn last), and the run's range
+	for ( uint i = nThread; i < nCount; i += SortThreads )
+	{
+		uint nAt = g_nMeshletCommands + ( nFirst + i ) * 20;
+		uint4 vCommand = g_Frame.Load4( nAt );
+		uint nFirstInstance = g_Frame.Load( nAt + 16 );
+		g_MeshletJobs.Store4( 16 + ( nFirst + i ) * 20, vCommand );
+		g_MeshletJobs.Store( 16 + ( nFirst + i ) * 20 + 16, nFirstInstance );
+
+		uint nKey = None;
+		if ( vCommand.x != 0 && vCommand.y != 0 )
+		{
+			uint nTransform = g_Frame.Load( g_nMeshletInstances + ( nFirstInstance - g_nMeshletFirstInstance ) * InstanceRecord_Size + InstanceRecord_Transform );
+			float3x4 mTransform = g_TransformData[nTransform & 0xffffffu].transform;
+			float4 vOrigin = float4( mTransform[0][3], mTransform[1][3], mTransform[2][3], 1 );
+			nKey = asuint( dot( g_nMeshletClipW, vOrigin ) - dot( g_nMeshletClipZ, vOrigin ) );
+			nKey = min( ( nKey & 0x80000000u ) != 0 ? ~nKey : nKey | 0x80000000u, None - 1 );
+			InterlockedMin( gs_Low, nKey );
+			InterlockedMax( gs_High, nKey );
+		}
+		gs_Key[i] = nKey;
+	}
+	GroupMemoryBarrierWithGroupSync();
+
+	// Nothing drawn: nothing to order
+	uint nLow = gs_Low;
+	if ( nLow > gs_High )
+		return;
+
+	// Each command's bin, and the bins' counts
+	float flScale = float( SortBins ) / ( float( gs_High - nLow ) + 1.0 );
+	for ( uint i = nThread; i < nCount; i += SortThreads )
+	{
+		uint nKey = gs_Key[i];
+		uint nBin = nKey == None ? SortBins - 1 : min( uint( float( nKey - nLow ) * flScale ), SortBins - 1 );
+		gs_Key[i] = nBin;
+		InterlockedAdd( gs_Bins[nBin], 1 );
+	}
+	GroupMemoryBarrierWithGroupSync();
+
+	// Where each bin starts: an exclusive scan of the counts
+	uint nOwn = nThread < SortBins ? gs_Bins[nThread] : 0;
+	for ( uint d = 1; d < SortBins; d <<= 1 )
+	{
+		uint nAdd = nThread < SortBins && nThread >= d ? gs_Bins[nThread - d] : 0;
+		GroupMemoryBarrierWithGroupSync();
+		if ( nThread < SortBins )
+			gs_Bins[nThread] += nAdd;
+		GroupMemoryBarrierWithGroupSync();
+	}
+	if ( nThread < SortBins )
+		gs_Bins[nThread] -= nOwn;
+
+	// And every command copied out before any is written back
+	AllMemoryBarrierWithGroupSync();
+	for ( uint i = nThread; i < nCount; i += SortThreads )
+	{
+		uint nTo;
+		InterlockedAdd( gs_Bins[gs_Key[i]], 1, nTo );
+		uint nFromAt = 16 + ( nFirst + i ) * 20;
+		uint nAt = g_nMeshletCommands + ( nFirst + nTo ) * 20;
+		g_Frame.Store4( nAt, g_MeshletJobs.Load4( nFromAt ) );
+		g_Frame.Store( nAt + 16, g_MeshletJobs.Load( nFromAt + 16 ) );
+	}
+}
+
+[numthreads( SortThreads, 1, 1 )]
+[shader( "compute" )] void MainCs( uint3 vGroupId : SV_GroupID, uint nThread : SV_GroupIndex )
+{
+	SortRun( vGroupId.x, nThread );
+}
+#else
 
 // A group per listed fragment, its meshlets in chunks of ChunkMeshlets: tests each chunk's meshlets and draws those that
 // can reach a sample from room of the chunk's own in the compacted indices, from the bucket's compacted multi-draw
@@ -330,5 +439,6 @@ void Copy( uint nJob, uint nThread )
 		}
 	}
 }
+#endif // D_SORT
 
 #endif // CS

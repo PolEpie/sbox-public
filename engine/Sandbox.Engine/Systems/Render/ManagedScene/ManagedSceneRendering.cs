@@ -23,6 +23,23 @@ internal static partial class ManagedSceneRendering
 	[ConVar( "r_managed_async_compute_adaptive", Help = "With r_managed_async_compute, use the async compute queue only while the GPU limits the frame rate: it costs two more submissions and a compute handoff on the CPU each frame" )]
 	public static bool AsyncComputeAdaptive { get; set; }
 
+	[ConVar( "r_gpudriven_instancing", Help = "Draw the GPU-driven resident cull's one-instance draws of the same mesh as one instanced draw, and drop the empty commands that leaves" )]
+	public static bool GpuDrivenInstancing
+	{
+		get => Borealis.Backend.BackendContext.InstancesResidentDraws;
+		set => Borealis.Backend.BackendContext.InstancesResidentDraws = value;
+	}
+
+	[ConVar( "r_shadow_meshlets", Help = "Cull meshlets in GPU-driven shadow views too, so their depth buckets draw only the meshlets inside the view: a win where casters are big meshes reaching out of the cascade (a forest), a loss where the meshlet pass costs more than the triangles it saves" )]
+	public static bool ShadowMeshlets
+	{
+		get => (RenderBackend.Default as BorealisGpuRenderBackend)?.Services.ShadowMeshlets ?? false;
+		set
+		{
+			if ( RenderBackend.Default is BorealisGpuRenderBackend backend ) backend.Services.ShadowMeshlets = value;
+		}
+	}
+
 	/// <summary>
 	/// How occlusion culling handles aggregate fragments. Must match Borealis's <c>FragmentOcclusion</c>.
 	/// </summary>
