@@ -24,12 +24,15 @@ public sealed partial class ClutterGridSystem : GameObjectSystem
 	private readonly List<ClutterGenerationJob> _pendingJobs = [];
 	private readonly HashSet<ClutterTile> _pendingTiles = [];
 	private readonly HashSet<Terrain> _subscribedTerrains = [];
+	private readonly HashSet<MapInstance> _subscribedMaps = [];
 	private Vector3 _lastCameraPosition;
+	private BBox? _sceneBounds;
 
 	// Reused by the update path so an idle scene doesn't allocate.
 	private readonly List<ClutterComponent> _activeInfinite = [];
 	private readonly List<ClutterComponent> _componentsToRemove = [];
 	private readonly List<Terrain> _sceneTerrains = [];
+	private readonly List<MapInstance> _sceneMaps = [];
 	private readonly HashSet<ClutterLayer> _layersToRebuild = [];
 
 	/// <summary>
@@ -69,6 +72,14 @@ public sealed partial class ClutterGridSystem : GameObjectSystem
 			if ( terrain.IsValid() ) terrain.OnTerrainModified -= OnTerrainModified;
 		_subscribedTerrains.Clear();
 
+		foreach ( var map in _subscribedMaps )
+		{
+			if ( !map.IsValid() ) continue;
+			map.OnMapLoaded -= InvalidateSceneBounds;
+			map.OnMapUnloaded -= InvalidateSceneBounds;
+		}
+		_subscribedMaps.Clear();
+
 		_painted?.ClearAllTiles();
 		_painted = null;
 
@@ -87,7 +98,7 @@ public sealed partial class ClutterGridSystem : GameObjectSystem
 		if ( camera is not null )
 		{
 			_lastCameraPosition = camera.WorldPosition;
-			SubscribeToTerrains();
+			SubscribeToWorldGeometry();
 			UpdateInfiniteLayers( _lastCameraPosition );
 			ProcessJobs();
 		}
@@ -115,11 +126,20 @@ public sealed partial class ClutterGridSystem : GameObjectSystem
 
 	private void RestorePaintedLayer()
 	{
+		InvalidateSceneBounds();
 		RebuildPaintedLayer();
 		_dirty = false;
 	}
 
-	private void SubscribeToTerrains()
+	/// <summary>
+	/// The scene's bounds, the vertical span of clutter ground traces. Walking the scene for them takes milliseconds on
+	/// a big map, once per tile, so they're kept until a terrain or map appears, changes or leaves.
+	/// </summary>
+	internal BBox SceneBounds => _sceneBounds ??= Scene.GetBounds();
+
+	internal void InvalidateSceneBounds() => _sceneBounds = null;
+
+	private void SubscribeToWorldGeometry()
 	{
 		_sceneTerrains.Clear();
 		Scene.GetAll( _sceneTerrains );
@@ -129,10 +149,29 @@ public sealed partial class ClutterGridSystem : GameObjectSystem
 			if ( _subscribedTerrains.Add( terrain ) )
 			{
 				terrain.OnTerrainModified += OnTerrainModified;
+				InvalidateSceneBounds();
 			}
 		}
 
-		_subscribedTerrains.RemoveWhere( t => !t.IsValid() );
+		if ( _subscribedTerrains.RemoveWhere( t => !t.IsValid() ) > 0 )
+			InvalidateSceneBounds();
+
+		// Maps load lazily, after the scene
+		_sceneMaps.Clear();
+		Scene.GetAll( _sceneMaps );
+
+		foreach ( var map in _sceneMaps )
+		{
+			if ( _subscribedMaps.Add( map ) )
+			{
+				map.OnMapLoaded += InvalidateSceneBounds;
+				map.OnMapUnloaded += InvalidateSceneBounds;
+				InvalidateSceneBounds();
+			}
+		}
+
+		if ( _subscribedMaps.RemoveWhere( m => !m.IsValid() ) > 0 )
+			InvalidateSceneBounds();
 	}
 
 	private void UpdateActiveComponents( List<ClutterComponent> components, Vector3 cameraPosition )
@@ -252,6 +291,9 @@ public sealed partial class ClutterGridSystem : GameObjectSystem
 
 	private void OnTerrainModified( Terrain.SyncFlags flags, RectInt region )
 	{
+		// Sculpting moves the terrain's height, which ground traces span
+		InvalidateSceneBounds();
+
 		var bounds = TerrainRegionToWorldBounds( _subscribedTerrains.First(), region );
 		InvalidateTilesInBounds( bounds );
 	}
@@ -348,7 +390,7 @@ public sealed partial class ClutterGridSystem : GameObjectSystem
 			// Execute if still valid and not populated
 			if ( job.Parent.IsValid() && job.Tile?.IsPopulated != true )
 			{
-				job.Execute();
+				job.Execute( SceneBounds );
 				processed++;
 
 				if ( job.Layer != null )

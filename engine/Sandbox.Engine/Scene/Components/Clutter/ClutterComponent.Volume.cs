@@ -45,6 +45,9 @@ public sealed partial class ClutterComponent
 		var gridSystem = Scene.GetSystem<ClutterGridSystem>();
 		if ( gridSystem == null ) return;
 
+		// Asked for by hand, so it sees what's been placed since the bounds were cached
+		gridSystem.InvalidateSceneBounds();
+
 		var settings = GetCurrentSettings();
 		_volumeLayer ??= gridSystem.GetOrCreateLayer( this, settings );
 

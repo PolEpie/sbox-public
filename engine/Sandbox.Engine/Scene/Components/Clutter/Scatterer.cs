@@ -21,6 +21,8 @@ public abstract class Scatterer
 	[Hide]
 	protected Random Random { get; private set; }
 
+	BBox? _sceneBounds;
+
 	/// <summary>
 	/// Generates clutter instances for the given bounds.
 	/// The Random property is initialized before this is called.
@@ -38,13 +40,21 @@ public abstract class Scatterer
 	/// <param name="clutter">The clutter containing objects to scatter</param>
 	/// <param name="seed">Seed for deterministic random generation</param>
 	/// <param name="scene">Scene to use for tracing (required in editor mode)</param>
+	/// <param name="sceneBounds">The scene's bounds if the caller has them cached, see <see cref="GetSceneBounds"/></param>
 	/// <returns>Collection of clutter instances to spawn</returns>
-	public List<ClutterInstance> Scatter( BBox bounds, ClutterDefinition clutter, int seed, Scene scene = null )
+	public List<ClutterInstance> Scatter( BBox bounds, ClutterDefinition clutter, int seed, Scene scene = null, BBox? sceneBounds = null )
 	{
 		Random = new Random( seed );
+		_sceneBounds = sceneBounds;
 
 		return Generate( bounds, clutter, scene );
 	}
+
+	/// <summary>
+	/// The scene's bounds, the vertical span of ground traces: the ones passed to <see cref="Scatter"/>, else walked from
+	/// <paramref name="scene"/>, which is slow on a big scene.
+	/// </summary>
+	protected BBox GetSceneBounds( Scene scene ) => _sceneBounds ?? scene.GetBounds();
 
 	/// <summary>
 	/// Generates a hash from all serializable fields and properties using TypeLibrary.

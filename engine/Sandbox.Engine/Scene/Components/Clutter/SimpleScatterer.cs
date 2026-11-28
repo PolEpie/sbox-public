@@ -48,7 +48,7 @@ public class SimpleScatterer : Scatterer
 		}
 
 		using var pooledTraces = PlaceOnGround
-			? RentGroundTraces( scene, points, scene.GetBounds() )
+			? RentGroundTraces( scene, points, GetSceneBounds( scene ) )
 			: default;
 		var traces = pooledTraces.Span;
 

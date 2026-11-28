@@ -74,9 +74,9 @@ class ClutterGenerationJob
 	public Transform? VolumeTransform { get; init; }
 
 	/// <summary>
-	/// Execute the generation job.
+	/// Execute the generation job. <paramref name="sceneBounds"/> are the scene's, cached by the grid system.
 	/// </summary>
-	public void Execute()
+	public void Execute( BBox sceneBounds )
 	{
 		try
 		{
@@ -93,7 +93,7 @@ class ClutterGenerationJob
 			}
 
 			var instances = Clutter.Scatterer.HasValue
-				? Clutter.Scatterer.Value.Scatter( Bounds, Clutter, seed, Parent.Scene )
+				? Clutter.Scatterer.Value.Scatter( Bounds, Clutter, seed, Parent.Scene, sceneBounds )
 				: null;
 
 			if ( LocalBounds.HasValue && VolumeTransform.HasValue )
