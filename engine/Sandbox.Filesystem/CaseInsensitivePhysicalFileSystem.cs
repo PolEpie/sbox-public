@@ -10,7 +10,7 @@ namespace Sandbox;
 /// <summary>
 /// A physical filesystem that resolves paths case-insensitively on Linux.
 /// </summary>
-internal sealed class CaseInsensitivePhysicalFileSystem : PhysicalFileSystem
+internal sealed class CaseInsensitivePhysicalFileSystem : WatchedPhysicalFileSystem
 {
 	/// <summary>
 	/// Real directory path -> the names inside it.

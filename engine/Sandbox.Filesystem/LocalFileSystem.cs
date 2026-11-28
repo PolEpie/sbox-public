@@ -20,7 +20,7 @@ internal class LocalFileSystem : BaseFileSystem
 		// windows + macos do the normal path
 		else
 		{
-			Physical = new Zio.FileSystems.PhysicalFileSystem();
+			Physical = new WatchedPhysicalFileSystem();
 		}
 
 		// A relative root is under the current directory. Zio resolves it that way on Windows and refuses it elsewhere
