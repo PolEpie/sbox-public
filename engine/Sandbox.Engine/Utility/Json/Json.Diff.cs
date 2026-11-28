@@ -1,5 +1,6 @@
 ﻿using System.Data;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using Sandbox.Hashing;
@@ -239,7 +240,7 @@ public static partial class Json
 		/// <summary>The object's JSON data without its children</summary>
 		public JsonObject Data;
 
-		// Diffing can borrow leaf data; anything returned in a patch must own its nodes.
+		// Diffing can borrow data it only reads; anything returned in a patch must own its nodes.
 		public bool BorrowsData;
 
 		/// <summary>Reference to this object's parent (null for root objects)</summary>
@@ -428,9 +429,9 @@ public static partial class Json
 		// (Parent == null), so ToJson() can reparent them freely.
 		foreach ( var (_, trackedObj) in result.IdToTrackedObject )
 		{
-			// Leaves have no tracked descendants to strip. Diffing only reads them,
-			// so defer copying until an addition or property override needs owned data.
-			if ( forDiff && !trackedObj.HasChildren )
+			// Diffing only reads data and skips tracked properties, so it can borrow it unless a tracked descendant
+			// sits inside an untracked container (which would be compared). Copies are made when a patch needs them.
+			if ( forDiff && !HasNestedTrackedChildren( trackedObj ) )
 			{
 				trackedObj.BorrowsData = true;
 				continue;
@@ -442,6 +443,57 @@ public static partial class Json
 		}
 
 		return result;
+	}
+
+	private static bool HasNestedTrackedChildren( TrackedObject trackedObj )
+	{
+		if ( !trackedObj.HasChildren )
+			return false;
+
+		foreach ( var child in trackedObj.Children )
+		{
+			if ( child.ContainerProperty.Contains( '.' ) )
+				return true;
+		}
+
+		return false;
+	}
+
+	/// <summary>
+	/// The object's data without its tracked descendants, owned by the caller.
+	/// </summary>
+	private static JsonObject OwnedData( TrackedObject trackedObj, HashSet<ulong> trackedPaths )
+	{
+		if ( !trackedObj.BorrowsData )
+			return trackedObj.Data;
+
+		return trackedObj.HasChildren
+			? CopyStrippedData( trackedObj.Data, trackedObj.PathHash, trackedPaths )
+			: trackedObj.Data.DeepClone().AsObject();
+	}
+
+	/// <summary>
+	/// <see cref="JsonNode.DeepEquals"/>, but a string value made from a .NET value (a GameObject's transform) is
+	/// written once, into <paramref name="buffer"/> (reused across a diff): DeepEquals serializes it to find its kind,
+	/// then again into a document to compare it.
+	/// </summary>
+	private static bool PropertyEquals( JsonNode a, JsonNode b, System.Buffers.ArrayBufferWriter<byte> buffer, Utf8JsonWriter writer )
+	{
+		if ( a is JsonValue va && b is JsonValue vb && va.TryGetValue<JsonElement>( out var element ) && element.ValueKind == JsonValueKind.String && !vb.TryGetValue<JsonElement>( out _ ) )
+		{
+			buffer.ResetWrittenCount();
+			writer.Reset();
+
+			vb.WriteTo( writer );
+			writer.Flush();
+
+			// A string written without escapes is its value, between the quotes
+			var written = buffer.WrittenSpan;
+			if ( written.Length >= 2 && written[0] == (byte)'"' && written.IndexOf( (byte)'\\' ) < 0 )
+				return element.ValueEquals( written[1..^1] );
+		}
+
+		return JsonNode.DeepEquals( a, b );
 	}
 
 	/// <summary>
@@ -676,7 +728,9 @@ public static partial class Json
 			if ( !_source.IdToTrackedObject.TryGetValue( targetObj.Id, out var sourceObj ) || sourceObj.HasChildren ) return false;
 
 			patch.PropertyOverrides.RemoveAll( x => x.Target == targetObj.Id );
-			AddPropertyOverrides( patch, _source, targetObjects, sourceObj, targetObj, sourceObj.PathHash );
+			var valueBuffer = new System.Buffers.ArrayBufferWriter<byte>( 256 );
+			using var valueWriter = new Utf8JsonWriter( valueBuffer );
+			AddPropertyOverrides( patch, _source, targetObjects, sourceObj, targetObj, sourceObj.PathHash, valueBuffer, valueWriter );
 			return true;
 		}
 	}
@@ -684,6 +738,8 @@ public static partial class Json
 	private static Patch CalculateDifferences( TrackedObjects oldObjects, TrackedObjects newObjects )
 	{
 		var patch = new Patch();
+		var valueBuffer = new System.Buffers.ArrayBufferWriter<byte>( 256 );
+		using var valueWriter = new Utf8JsonWriter( valueBuffer );
 
 		// Find removed objects
 		foreach ( var oldObj in oldObjects.IdToTrackedObject )
@@ -712,14 +768,14 @@ public static partial class Json
 						Parent = newObj.Value.Parent.Id,
 						ContainerProperty = newObj.Value.ContainerProperty,
 						IsContainerArray = newObj.Value.IsContainedInArray,
-						Data = newObj.Value.BorrowsData ? newObj.Value.Data.DeepClone().AsObject() : newObj.Value.Data,
+						Data = OwnedData( newObj.Value, newObjects.TrackedPaths ),
 						PreviousElement = newObj.Value.PreviousElement?.Id
 					} );
 				}
 			}
 			else
 			{
-				AddPropertyOverrides( patch, oldObjects, newObjects, oldTrackedObj, newObj.Value, newObj.Value.PathHash );
+				AddPropertyOverrides( patch, oldObjects, newObjects, oldTrackedObj, newObj.Value, newObj.Value.PathHash, valueBuffer, valueWriter );
 
 				// Check if object has moved (different parent or different position in array)
 				if ( newObj.Value.PreviousElement?.Id != oldTrackedObj.PreviousElement?.Id ||
@@ -740,7 +796,8 @@ public static partial class Json
 		return patch;
 	}
 
-	private static void AddPropertyOverrides( Patch patch, TrackedObjects oldObjects, TrackedObjects newObjects, TrackedObject oldObj, TrackedObject newObj, ulong pathHash )
+	private static void AddPropertyOverrides( Patch patch, TrackedObjects oldObjects, TrackedObjects newObjects, TrackedObject oldObj, TrackedObject newObj, ulong pathHash,
+		System.Buffers.ArrayBufferWriter<byte> valueBuffer, Utf8JsonWriter valueWriter )
 	{
 		if ( newObj.Definition.Atomic )
 		{
@@ -771,7 +828,7 @@ public static partial class Json
 			if ( oldObjValue.TryGetPropertyValue( propName, out var oldValue ) )
 			{
 				// Property exists in both - check for differences
-				if ( !JsonNode.DeepEquals( oldValue, newValue ) )
+				if ( !PropertyEquals( oldValue, newValue, valueBuffer, valueWriter ) )
 				{
 					patch.PropertyOverrides.Add( new PropertyOverride
 					{
