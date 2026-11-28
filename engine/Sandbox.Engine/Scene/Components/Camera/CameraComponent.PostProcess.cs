@@ -12,9 +12,9 @@ public sealed partial class CameraComponent : Component, Component.ExecuteInEdit
 	PostProcessLayers _drawnPostProcess;
 
 	/// <summary>
-	/// The layers the camera's drawing runs: those built for the frame, taken at the frame's extract
-	/// (<see cref="TakePostProcess"/>), so a render thread drawing them while the game builds the next frame's into the
-	/// other set reads only its own. A camera never extracted (the editor's, one only rendered by hand) draws what's built.
+	/// The layers the camera's drawing runs: those built for the frame, taken when a frame of its scene is prepared
+	/// (<see cref="Scene.TakePostProcess"/>), so a render thread drawing them while the game builds the next frame's into the
+	/// other set reads only its own. A camera never taken (one only rendered by hand) draws what's built.
 	/// </summary>
 	internal PostProcessLayers DrawnPostProcess => _drawnPostProcess ?? PostProcess;
 

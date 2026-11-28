@@ -396,6 +396,17 @@ public partial class Scene : GameObject
 	}
 
 	/// <summary>
+	/// On the main thread, with nothing drawing this scene, before a frame of it is prepared: the post processing the update
+	/// built for each camera becomes what its drawing reads, and the next update builds into the other set
+	/// (<see cref="CameraComponent.TakePostProcess"/>). Every path that draws the scene takes it, or a frame handed to the
+	/// render thread reads layers the next update is clearing.
+	/// </summary>
+	internal void TakePostProcess()
+	{
+		foreach ( var cc in Cameras ) cc.TakePostProcess();
+	}
+
+	/// <summary>
 	/// The game's half of a frame the game window draws (<c>GameWindow.Render</c>), on the main thread at the sync point: the
 	/// scene and camera snapshots; each camera that draws is added to <paramref name="drawn"/> in priority order. What
 	/// draws them (<see cref="DrawRender"/>) then reads only what they prepared, on whichever thread draws the frame.
@@ -408,7 +419,7 @@ public partial class Scene : GameObject
 		using var _extractScope = _extractTimer.Start();
 
 		// The post processing the update built for each camera is what this frame draws; the next builds into the other set
-		foreach ( var cc in Cameras ) cc.TakePostProcess();
+		TakePostProcess();
 		PrepareSceneForRendering();
 
 		var cameras = RentSortedCameras();

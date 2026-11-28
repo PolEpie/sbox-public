@@ -233,6 +233,9 @@ public class SceneRenderingWidget : Frame
 
 		PrepareSceneCamera();
 
+		// Drawn here, after the render thread finished its frame: the same scene's view may have been handed to it before
+		(Camera.IsValid() ? Camera.Scene : Scene)?.TakePostProcess();
+
 		if ( Camera.IsValid() )
 		{
 			Camera.Scene?.PrepareSceneForRendering();
@@ -385,6 +388,9 @@ public class SceneRenderingWidget : Frame
 		Sandbox.Rendering.GameDrawExtract.BeginFrame();
 		using ( ExtractZone.Start() )
 		{
+			// The render thread draws the scene's post processing while the next update builds its own, including the main
+			// camera's, whose layers the scene view's camera runs
+			drawnScene?.TakePostProcess();
 			drawnScene?.PrepareSceneForRendering();
 			if ( Camera.PrepareForRenderList() ) drawnCameras.Add( Camera );
 			Sandbox.Rendering.GameDrawExtract.Extract( drawnCameras, record: true );
