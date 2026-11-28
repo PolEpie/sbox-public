@@ -69,7 +69,7 @@ public partial class Terrain
 
 	void CreateClipmapSceneObject()
 	{
-		if ( !Active || !Graphics.IsAvailable )
+		if ( !Active || !Graphics.IsAvailable || Storage is null )
 			return;
 
 		// These get created once
